@@ -1,0 +1,305 @@
+from __future__ import annotations
+
+import json
+from uuid import UUID
+
+from sqlalchemy.pool import StaticPool
+from sqlmodel import Session, SQLModel, create_engine
+
+from app.models import Profile, ProfileSource
+from app.schemas import JobCreateIn
+from app.services import job_research
+from app.services.job_research import JOB_READER_VERSION, classify_requirements, extract_job_from_input
+from app.services.jobs import create_or_analyze_job
+from app.services.profile import analyze_profile
+
+
+USER_ID = UUID("00000000-0000-0000-0000-000000000777")
+
+
+def _engine():
+    return create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+
+
+def _ready_profile(session: Session) -> None:
+    profile = Profile(user_id=USER_ID, status="needs_analysis")
+    session.add(profile)
+    session.commit()
+    session.refresh(profile)
+    session.add(
+        ProfileSource(
+            user_id=USER_ID,
+            profile_id=profile.id or 0,
+            source_type="cv",
+            title="cv.pdf",
+            content_text=(
+                "B.Sc. Computer Science student with 2 semesters remaining and no professional "
+                "experience. Built projects using Python, C++, JavaScript, data structures, Linux, "
+                "FastAPI, PostgreSQL, and React."
+            ),
+        )
+    )
+    session.commit()
+    analyze_profile(session, USER_ID)
+
+
+def test_json_ld_url_only_extracts_job_identity(monkeypatch):
+    description = (
+        "Responsibilities: Build backend services and REST APIs. "
+        "Requirements: 2 years of professional experience with Python and PostgreSQL. "
+        "Preferred qualifications: Docker and AWS. " * 2
+    )
+    html = f"""
+    <html><head><script type="application/ld+json">
+    {json.dumps({
+        "@context": "https://schema.org",
+        "@type": "JobPosting",
+        "title": "Backend Engineer",
+        "description": description,
+        "hiringOrganization": {"name": "Example Labs"},
+        "jobLocation": {"address": {"addressLocality": "Tel Aviv", "addressCountry": "Israel"}},
+        "url": "https://example.com/jobs/123"
+    })}
+    </script></head><body></body></html>
+    """
+    monkeypatch.setattr(job_research, "validate_public_job_url", lambda _: None)
+    monkeypatch.setattr(job_research, "_fetch", lambda _: html)
+
+    job = extract_job_from_input("https://example.com/jobs/123", "", "", "")
+
+    assert job.company == "Example Labs"
+    assert job.role == "Backend Engineer"
+    assert job.location == "Tel Aviv, Israel"
+    assert job.requirements.min_years_experience == 2
+    assert job.requirements.reader_version == JOB_READER_VERSION
+    assert job.source_confidence >= 0.8
+
+
+def test_workday_adapter_reads_public_cxs_payload(monkeypatch):
+    monkeypatch.setattr(job_research, "validate_public_job_url", lambda _: None)
+    monkeypatch.setattr(job_research, "_fetch", lambda _: "<html></html>")
+    monkeypatch.setattr(
+        job_research,
+        "_fetch_json",
+        lambda _: {
+            "jobPostingInfo": {
+                "title": "Research Scientist Student",
+                "location": "Migdal Ha'emek, Israel",
+                    "jobDescription": (
+                        "<p>Responsibilities: Develop computer vision algorithms.</p>"
+                        "<p>Requirements: Computer Science student with Python and communication skills. "
+                        "Work with researchers to design, validate, document, and improve production "
+                        "algorithms for semiconductor inspection systems.</p>"
+                    ),
+                "externalUrl": "https://kla.wd1.myworkdayjobs.com/Search/job/example",
+            }
+        },
+    )
+
+    job = extract_job_from_input(
+        "https://kla.wd1.myworkdayjobs.com/en-GB/Search/job/Israel/example",
+        "",
+        "",
+        "",
+    )
+
+    assert job.company == "KLA"
+    assert job.role == "Research Scientist Student"
+    assert job.requirements.seniority == "student"
+    assert "python" in job.requirements.all_skills
+
+
+def test_metadata_recovers_identity_and_description_from_provider_error_page(monkeypatch):
+    description = (
+        "We are seeking a Senior Product Designer to own product discovery and delivery. "
+        "Responsibilities include user research, prototyping, and collaboration with product "
+        "and engineering. Requirements include five years of product design experience. " * 3
+    )
+    html = f"""
+    <html><head>
+      <title>Job opportunity: Senior Product Designer at Orca-AI | Comeet</title>
+      <meta property="og:title" content="Job opportunity: Senior Product Designer at Orca-AI | Comeet">
+      <meta property="og:description" content="{description}">
+    </head><body><main>Something went wrong. Please try again later.</main></body></html>
+    """
+    monkeypatch.setattr(job_research, "validate_public_job_url", lambda _: None)
+    monkeypatch.setattr(job_research, "_fetch", lambda _: html)
+
+    job = extract_job_from_input(
+        "https://www.comeet.com/jobs/Orca-AI/example/senior-product-designer/123",
+        "",
+        "",
+        "",
+    )
+
+    assert job.company == "Orca-AI"
+    assert job.role == "Senior Product Designer"
+    assert len(job.description_text) >= 500
+    assert job.requirements.min_years_experience == 5
+
+
+def test_greenhouse_company_can_come_from_document_title(monkeypatch):
+    description = (
+        "Responsibilities: Run office operations and support employees. "
+        "Requirements: two years of office management experience and strong communication. " * 3
+    )
+    html = f"""
+    <html><head>
+      <title>Job Application for Office Manager at Eon</title>
+      <meta property="og:title" content="Office Manager">
+    </head><body><main>{description}</main></body></html>
+    """
+    monkeypatch.setattr(job_research, "validate_public_job_url", lambda _: None)
+    monkeypatch.setattr(job_research, "_fetch", lambda _: html)
+
+    job = extract_job_from_input(
+        "https://job-boards.eu.greenhouse.io/eonio/jobs/123",
+        "",
+        "",
+        "",
+    )
+
+    assert job.company == "Eon"
+    assert job.role == "Office Manager"
+
+
+def test_linkedin_recommendations_do_not_become_job_requirements(monkeypatch):
+    core = """
+    Responsibilities
+    Perform manual testing and document defects.
+    Requirements
+    Background in Artillery systems - Must
+    Experience with JIRA - Advantage
+    Collaborate with the software team throughout integration and record clear test results.
+    """ * 3
+    description = core + """
+    Similar jobs
+    Test Automation Engineer
+    AWS Firmware QA Engineer
+    """
+    html = f"""
+    <html><head>
+      <title>Junior QA Tester | LinkedIn</title>
+      <meta property="og:title" content="Qualitest hiring Junior QA Tester in Israel | LinkedIn">
+    </head><body><main>{description}</main></body></html>
+    """
+    monkeypatch.setattr(job_research, "validate_public_job_url", lambda _: None)
+    monkeypatch.setattr(job_research, "_fetch", lambda _: html)
+
+    job = extract_job_from_input(
+        "https://www.linkedin.com/jobs/view/123",
+        "",
+        "",
+        "",
+    )
+
+    assert job.company == "Qualitest"
+    assert job.role == "Junior QA Tester"
+    assert "artillery systems" in job.requirements.must_have_skills
+    assert "test automation" not in job.requirements.all_skills
+    assert "aws" not in job.requirements.all_skills
+    assert "firmware" not in job.requirements.all_skills
+
+
+def test_alternative_languages_and_experience_are_typed():
+    requirements = classify_requirements(
+        "Minimum qualifications: 1 year of experience with software development in one or "
+        "more programming languages such as Python, C, C++, Java, or JavaScript. "
+        "1 year of experience with data structures and algorithms. "
+        "1 year of experience with iOS application development.",
+        "Software Engineer II, Notifications iOS",
+    )
+
+    assert requirements.min_years_experience == 1
+    assert requirements.experience_requirement_known is True
+    assert requirements.seniority == "junior"
+    assert requirements.must_have_skills == ["data structures", "ios"]
+    assert len(requirements.skill_groups) == 1
+    assert requirements.skill_groups[0].mode == "one_of"
+    assert requirements.skill_groups[0].skills == ["python", "c", "c++", "java", "javascript"]
+
+
+def test_written_and_ranged_experience_use_the_required_minimum():
+    written = classify_requirements(
+        "Requirements: five years of product design experience.",
+        "Product Designer",
+    )
+    ranged = classify_requirements(
+        "Requirements: 3-5 years of professional backend experience.",
+        "Backend Engineer",
+    )
+
+    assert written.min_years_experience == 5
+    assert ranged.min_years_experience == 3
+
+
+def test_one_language_satisfies_group_but_real_blockers_remain():
+    engine = _engine()
+    SQLModel.metadata.create_all(engine)
+    with Session(engine) as session:
+        _ready_profile(session)
+        job = create_or_analyze_job(
+            session,
+            USER_ID,
+            JobCreateIn(
+                company="Google",
+                role="Software Engineer II, Notifications iOS",
+                description_text=(
+                    "Minimum qualifications: 1 year of experience with software development in one "
+                    "or more programming languages such as Python, C, C++, Java, or JavaScript. "
+                    "1 year of experience with data structures and algorithms. "
+                    "1 year of experience with iOS application development."
+                ),
+            ),
+        )
+
+    assert job.match is not None
+    blockers = " ".join(job.match.missing_blockers).lower()
+    assert "required alternative" not in blockers
+    assert "missing must-have skill: ios" in blockers
+    assert "requires 1+ professional years" in blockers
+    assert "missing must-have skill: c." not in blockers
+    assert "missing must-have skill: java." not in blockers
+    assert job.match.score <= 45
+
+
+def test_failed_url_can_be_upgraded_with_pasted_description(monkeypatch):
+    engine = _engine()
+    SQLModel.metadata.create_all(engine)
+    real_extract = extract_job_from_input
+    calls = 0
+
+    def fail_once(source_url, company, role, description):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise ValueError("blocked")
+        return real_extract(source_url, company, role, description)
+
+    monkeypatch.setattr("app.services.jobs.extract_job_from_input", fail_once)
+    with Session(engine) as session:
+        _ready_profile(session)
+        failed = create_or_analyze_job(
+            session,
+            USER_ID,
+            JobCreateIn(source_url="https://example.com/jobs/upgrade"),
+        )
+        upgraded = create_or_analyze_job(
+            session,
+            USER_ID,
+            JobCreateIn(
+                source_url="https://example.com/jobs/upgrade",
+                company="Example",
+                role="Backend Developer",
+                description_text=(
+                    "Requirements: Python and PostgreSQL. Responsibilities: Build backend APIs "
+                    "and maintain production services."
+                ),
+            ),
+        )
+
+    assert failed.id == upgraded.id
+    assert failed.status == "failed"
+    assert upgraded.status == "analyzed"
+    assert upgraded.company == "Example"
+    assert upgraded.requirements.reader_version == JOB_READER_VERSION
