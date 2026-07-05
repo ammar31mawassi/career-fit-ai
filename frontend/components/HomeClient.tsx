@@ -1,7 +1,7 @@
 "use client";
 
-import { useMemo, useState, type FormEvent } from "react";
-import { ArrowUpRight, ExternalLink, FileText, RefreshCw, Search, Sparkles } from "lucide-react";
+import { useDeferredValue, useEffect, useMemo, useState, type FormEvent } from "react";
+import { ArrowUpRight, ChevronDown, ExternalLink, FileText, Radar, RefreshCw, Search, Sparkles } from "lucide-react";
 import { useAppData } from "@/components/AppDataProvider";
 import {
   createJob,
@@ -21,19 +21,25 @@ export function HomeClient() {
   const [submitting, setSubmitting] = useState(false);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
+  const [scanStartedAt, setScanStartedAt] = useState(0);
 
   const profileReady = profile ? profile.status === "ready" : true;
   const profileConfirmedIncomplete = !profileLoading && profile !== null && profile.status !== "ready";
-  const visibleJobs = useMemo(() => {
-    const normalized = query.trim().toLowerCase();
-    if (!normalized) return jobs;
-    return jobs.filter((job) =>
-      [job.company, job.role, job.location, job.description_text, ...job.requirements.all_skills]
+  const deferredQuery = useDeferredValue(query);
+  const searchableJobs = useMemo(
+    () => jobs.map((job) => ({
+      job,
+      searchText: [job.company, job.role, job.location, job.description_text, ...job.requirements.all_skills]
         .join(" ")
         .toLowerCase()
-        .includes(normalized)
-    );
-  }, [jobs, query]);
+    })),
+    [jobs]
+  );
+  const visibleJobs = useMemo(() => {
+    const normalized = deferredQuery.trim().toLowerCase();
+    if (!normalized) return jobs;
+    return searchableJobs.filter(({ searchText }) => searchText.includes(normalized)).map(({ job }) => job);
+  }, [deferredQuery, jobs, searchableJobs]);
   const stats = useMemo(() => {
     const scanned = jobs.length;
     const applied = jobs.filter((job) => job.match && !["Lead", "Withdrawn"].includes(job.match.status)).length;
@@ -44,6 +50,7 @@ export function HomeClient() {
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setSubmitting(true);
+    setScanStartedAt(Date.now());
     setError("");
     setMessage("");
     try {
@@ -56,6 +63,7 @@ export function HomeClient() {
       setError(err instanceof Error ? err.message : "Could not analyze this job.");
     } finally {
       setSubmitting(false);
+      setScanStartedAt(0);
     }
   }
 
@@ -91,13 +99,7 @@ export function HomeClient() {
         </section>
       ) : null}
 
-      <section className="stats signal-stats" aria-label="Job search overview">
-        <div><span>Opportunities mapped</span><strong>{stats.scanned}</strong><small>Your searchable career library</small></div>
-        <div><span>Strong signals</span><strong>{stats.strong}</strong><small>Roles worth prioritizing</small></div>
-        <div><span>In motion</span><strong>{stats.applied}</strong><small>Applications beyond lead stage</small></div>
-      </section>
-
-      <form className="panel job-form" onSubmit={submit}>
+      <form aria-busy={submitting} className={`panel job-form${submitting ? " is-scanning" : ""}`} onSubmit={submit}>
         <div className="section-heading">
           <div>
             <span className="section-kicker">New opportunity</span>
@@ -106,22 +108,36 @@ export function HomeClient() {
           </div>
           <span className="section-orbit"><ArrowUpRight size={20} aria-hidden /></span>
         </div>
-        <label className="field">
-          <span>Job URL</span>
-          <input onChange={(event) => setForm({ ...form, source_url: event.target.value })} placeholder="https://company.com/careers/job/..." type="url" value={form.source_url} />
-        </label>
-        <div className="form-grid">
-          <label className="field"><span>Company (optional)</span><input onChange={(event) => setForm({ ...form, company: event.target.value })} value={form.company} /></label>
-          <label className="field"><span>Role (optional)</span><input onChange={(event) => setForm({ ...form, role: event.target.value })} value={form.role} /></label>
+        <div className="scan-entry-row">
+          <label className="field scan-url-field">
+            <span>Job URL</span>
+            <input autoComplete="url" onChange={(event) => setForm({ ...form, source_url: event.target.value })} placeholder="https://company.com/careers/job/..." type="url" value={form.source_url} />
+          </label>
+          <button className="button primary action-button" disabled={submitting || !profileReady || (!form.source_url.trim() && !form.description_text.trim())} type="submit">
+            {submitting ? <><span className="button-spinner" /> Analyzing</> : <><Radar size={16} /> Save and match</>}
+          </button>
         </div>
-        <label className="field">
-          <span>Job description fallback</span>
-          <textarea onChange={(event) => setForm({ ...form, description_text: event.target.value })} placeholder="Paste the full job description here..." value={form.description_text} />
-        </label>
-        <button className="button primary action-button" disabled={submitting || !profileReady || (!form.source_url.trim() && !form.description_text.trim())} type="submit">
-          {submitting ? "Analyzing..." : "Save and match"}
-        </button>
+        <details className="scan-options" open={Boolean(form.description_text || form.company || form.role)}>
+          <summary><ChevronDown size={15} /> Add company, role, or a description fallback</summary>
+          <div className="scan-options-body">
+            <div className="form-grid">
+              <label className="field"><span>Company (optional)</span><input onChange={(event) => setForm({ ...form, company: event.target.value })} value={form.company} /></label>
+              <label className="field"><span>Role (optional)</span><input onChange={(event) => setForm({ ...form, role: event.target.value })} value={form.role} /></label>
+            </div>
+            <label className="field">
+              <span>Job description fallback</span>
+              <textarea onChange={(event) => setForm({ ...form, description_text: event.target.value })} placeholder="Paste the full job description when the career site blocks extraction..." value={form.description_text} />
+            </label>
+          </div>
+        </details>
+        {submitting ? <ScanProgress startedAt={scanStartedAt} /> : null}
       </form>
+
+      <section className="stats signal-stats" aria-label="Job search overview">
+        <div><span>Opportunities mapped</span><strong>{stats.scanned}</strong><small>Your searchable career library</small></div>
+        <div><span>Strong signals</span><strong>{stats.strong}</strong><small>Roles worth prioritizing</small></div>
+        <div><span>In motion</span><strong>{stats.applied}</strong><small>Applications beyond lead stage</small></div>
+      </section>
 
       <section className="panel flush">
         <div className="list-header">
@@ -135,7 +151,7 @@ export function HomeClient() {
             <input onChange={(event) => setQuery(event.target.value)} placeholder="Search company, role, skill..." value={query} />
           </form>
         </div>
-        {jobsLoading && !jobs.length ? <div className="empty loading-state"><span className="pulse-dot" /> Mapping your opportunities…</div> : visibleJobs.length ? (
+        {jobsLoading && !jobs.length ? <JobLibrarySkeleton /> : visibleJobs.length ? (
           <div className="job-list">
             {visibleJobs.map((job) => <JobCard job={job} key={job.id} onStatusChanged={updateCachedJob} />)}
           </div>
@@ -233,5 +249,49 @@ function AnalysisList({ title, items }: { title: string; items: string[] }) {
       <h3>{title}</h3>
       <ul>{items.map((item) => <li key={item}>{item}</li>)}</ul>
     </section>
+  );
+}
+
+function ScanProgress({ startedAt }: { startedAt: number }) {
+  const [elapsed, setElapsed] = useState(0);
+
+  useEffect(() => {
+    setElapsed(0);
+    const timer = window.setInterval(() => setElapsed(Math.floor((Date.now() - startedAt) / 1000)), 1000);
+    return () => window.clearInterval(timer);
+  }, [startedAt]);
+
+  const message = elapsed < 3
+    ? "Opening the job source and checking its structure"
+    : elapsed < 8
+      ? "Reading requirements and separating must-haves from preferences"
+      : elapsed < 14
+        ? "Comparing the role with your verified profile evidence"
+        : "Preparing the match explanation and resume direction";
+
+  return (
+    <section className="scan-progress" role="status" aria-live="polite">
+      <div className="scan-visual" aria-hidden><span /><i /><b /></div>
+      <div className="scan-progress-copy">
+        <span className="scan-progress-label">Analysis in progress · {elapsed}s</span>
+        <strong>{message}</strong>
+        <small>Some career sites take longer when they limit automated reading. Keep this tab open.</small>
+      </div>
+      <div className="scan-progress-rail" aria-hidden><span /></div>
+    </section>
+  );
+}
+
+function JobLibrarySkeleton() {
+  return (
+    <div className="library-skeleton" role="status" aria-label="Loading saved opportunities">
+      {[0, 1, 2].map((item) => (
+        <div className="library-skeleton-row" key={item}>
+          <span className="skeleton-block wide" />
+          <span className="skeleton-block pill" />
+          <span className="skeleton-block text" />
+        </div>
+      ))}
+    </div>
   );
 }

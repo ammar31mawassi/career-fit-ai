@@ -1,7 +1,5 @@
 import { OnboardingClient } from "@/components/OnboardingClient";
-import { requireOnboardingPending } from "@/lib/auth";
 
-export default async function OnboardingPage() {
-  await requireOnboardingPending();
+export default function OnboardingPage() {
   return <OnboardingClient />;
 }

@@ -32,8 +32,8 @@ export async function proxy(request: NextRequest) {
     }
   });
 
-  const { data } = await supabase.auth.getUser();
-  if (!data.user) {
+  const { data } = await supabase.auth.getClaims();
+  if (!data?.claims?.sub) {
     if (pathname.startsWith("/backend/")) {
       return NextResponse.json({ detail: "Authentication required." }, { status: 401 });
     }
@@ -47,4 +47,3 @@ export async function proxy(request: NextRequest) {
 export const config = {
   matcher: ["/((?!_next/static|_next/image|favicon.ico).*)"]
 };
-

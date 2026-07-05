@@ -1,6 +1,6 @@
 "use client";
 
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import {
   createContext,
   useCallback,
@@ -29,9 +29,33 @@ type AppData = {
 };
 
 const AppDataContext = createContext<AppData | null>(null);
+const WORKSPACE_CACHE_KEY = "careerfit:workspace:v2";
+const WORKSPACE_CACHE_TTL = 5 * 60 * 1000;
+
+type WorkspaceCache = {
+  savedAt: number;
+  profile: Profile | null;
+  jobs: TrackedJob[];
+};
+
+function readWorkspaceCache(): WorkspaceCache | null {
+  try {
+    const raw = sessionStorage.getItem(WORKSPACE_CACHE_KEY);
+    if (!raw) return null;
+    const cached = JSON.parse(raw) as WorkspaceCache;
+    if (!cached.savedAt || Date.now() - cached.savedAt > WORKSPACE_CACHE_TTL) {
+      sessionStorage.removeItem(WORKSPACE_CACHE_KEY);
+      return null;
+    }
+    return cached;
+  } catch {
+    return null;
+  }
+}
 
 export function AppDataProvider({ children }: { children: ReactNode }) {
   const pathname = usePathname();
+  const router = useRouter();
   const started = useRef(false);
   const [profile, setProfile] = useState<Profile | null>(null);
   const [jobs, setJobs] = useState<TrackedJob[]>([]);
@@ -79,6 +103,13 @@ export function AppDataProvider({ children }: { children: ReactNode }) {
       return;
     }
     started.current = true;
+    const cached = readWorkspaceCache();
+    if (cached) {
+      setProfile(cached.profile);
+      setJobs(cached.jobs);
+      setProfileLoading(false);
+      setJobsLoading(false);
+    }
     if (pathname === "/onboarding") {
       void refreshProfile().catch((error) => {
         setDataError(error instanceof Error ? error.message : "Could not load your profile.");
@@ -88,6 +119,27 @@ export function AppDataProvider({ children }: { children: ReactNode }) {
       void refreshAll();
     }
   }, [pathname, refreshAll]);
+
+  useEffect(() => {
+    if (pathname === "/login" || profileLoading || !profile) return;
+    if (pathname === "/onboarding" && profile.onboarding_completed) {
+      router.replace("/");
+    } else if (pathname !== "/onboarding" && !profile.onboarding_completed) {
+      router.replace("/onboarding");
+    }
+  }, [pathname, profile, profileLoading, router]);
+
+  useEffect(() => {
+    if (pathname === "/login" || profileLoading || jobsLoading) return;
+    try {
+      sessionStorage.setItem(
+        WORKSPACE_CACHE_KEY,
+        JSON.stringify({ savedAt: Date.now(), profile, jobs } satisfies WorkspaceCache)
+      );
+    } catch {
+      // A private in-memory session cache is an optimization, never a requirement.
+    }
+  }, [jobs, jobsLoading, pathname, profile, profileLoading]);
 
   const value = useMemo(
     () => ({

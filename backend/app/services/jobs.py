@@ -93,7 +93,55 @@ def list_jobs(session: Session, user_id: UUID, query: str = "", limit: int = 100
             for job in jobs
             if normalized in " ".join([job.company, job.role, job.source_url, job.description_text]).lower()
         ]
-    return [_job_to_out(session, user_id, job) for job in jobs]
+    if not jobs:
+        return []
+
+    job_ids = [job.id for job in jobs if job.id is not None]
+    matches = list(
+        session.exec(
+            select(JobMatch).where(JobMatch.user_id == user_id, JobMatch.job_id.in_(job_ids))
+        ).all()
+    )
+    matches_by_job = {match.job_id: match for match in matches}
+
+    # A profile edit invalidates its saved scores. Recalculate only stale rows, then
+    # batch-load the related data instead of issuing several queries for every job.
+    profile = session.exec(select(Profile).where(Profile.user_id == user_id)).first()
+    if profile and profile.status == "ready":
+        stale_jobs = [
+            job for job in jobs
+            if job.id is not None
+            and (match := matches_by_job.get(job.id))
+            and _is_after(profile.updated_at, match.analyzed_at)
+        ]
+        for job in stale_jobs:
+            matches_by_job[job.id or 0] = _save_match(session, user_id, profile, job)
+
+    match_ids = [match.id for match in matches_by_job.values() if match.id is not None]
+    advice_by_match: dict[int, ResumeAdvice] = {}
+    events_by_match: dict[int, list[JobStatusEvent]] = {match_id: [] for match_id in match_ids}
+    if match_ids:
+        advice = session.exec(
+            select(ResumeAdvice).where(ResumeAdvice.user_id == user_id, ResumeAdvice.match_id.in_(match_ids))
+        ).all()
+        advice_by_match = {item.match_id: item for item in advice}
+        events = session.exec(
+            select(JobStatusEvent)
+            .where(JobStatusEvent.user_id == user_id, JobStatusEvent.match_id.in_(match_ids))
+            .order_by(JobStatusEvent.created_at)
+        ).all()
+        for event in events:
+            events_by_match.setdefault(event.match_id, []).append(event)
+
+    return [
+        _job_to_out_from_loaded(
+            job,
+            matches_by_job.get(job.id or 0),
+            advice_by_match,
+            events_by_match,
+        )
+        for job in jobs
+    ]
 
 
 def job_output(session: Session, user_id: UUID, job_id: int) -> JobOut:
@@ -172,6 +220,29 @@ def _job_to_out(session: Session, user_id: UUID, job: Job) -> JobOut:
     profile = session.exec(select(Profile).where(Profile.user_id == user_id)).first()
     if match and profile and profile.status == "ready" and _is_after(profile.updated_at, match.analyzed_at):
         match = _save_match(session, user_id, profile, job)
+    return _job_to_out_from_loaded(job, match, {}, {}, session=session, user_id=user_id)
+
+
+def _job_to_out_from_loaded(
+    job: Job,
+    match: JobMatch | None,
+    advice_by_match: dict[int, ResumeAdvice],
+    events_by_match: dict[int, list[JobStatusEvent]],
+    *,
+    session: Session | None = None,
+    user_id: UUID | None = None,
+) -> JobOut:
+    match_id = match.id or 0 if match else 0
+    match_out = None
+    if match:
+        if session is not None and user_id is not None:
+            match_out = _match_out(session, user_id, match)
+        else:
+            match_out = _match_to_out(
+                match,
+                advice_by_match.get(match_id),
+                events_by_match.get(match_id, []),
+            )
     return JobOut(
         id=job.id or 0,
         source_url=job.source_url,
@@ -187,7 +258,7 @@ def _job_to_out(session: Session, user_id: UUID, job: Job) -> JobOut:
         created_at=job.created_at,
         updated_at=job.updated_at,
         requirements=RequirementModel.model_validate(asdict(requirements_from_json(job.requirements_json))),
-        match=_match_out(session, user_id, match) if match else None,
+        match=match_out,
     )
 
 
@@ -210,6 +281,14 @@ def _match_out(session: Session, user_id: UUID, match: JobMatch) -> JobMatchOut:
             .order_by(JobStatusEvent.created_at)
         ).all()
     )
+    return _match_to_out(match, advice, events)
+
+
+def _match_to_out(
+    match: JobMatch,
+    advice: ResumeAdvice | None,
+    events: list[JobStatusEvent],
+) -> JobMatchOut:
     return JobMatchOut(
         id=match.id or 0,
         score=match.score,
