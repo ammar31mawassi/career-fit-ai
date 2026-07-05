@@ -124,9 +124,19 @@ def main() -> None:
             {"github_url": "", "linkedin_text": "", "manual_info": "Available full-time in Israel with 2 semesters remaining."},
             api_headers,
         )
+        json_request(
+            BACKEND + "/api/profile/preferences",
+            "PUT",
+            {"career_interests": ["Software Engineering"]},
+            api_headers,
+        )
         status, analysis = json_request(BACKEND + "/api/profile/analyze", "POST", {}, api_headers)
         assert analysis["profile"]["status"] == "ready" and analysis["generated_facts"] > 0
         print(f'Profile analysis: {status}; facts={analysis["generated_facts"]}')
+
+        status, completed = json_request(BACKEND + "/api/profile/onboarding/complete", "POST", {}, api_headers)
+        assert completed["status"] == "ready" and completed["onboarding_completed"] is True
+        print(f"Onboarding completion: {status}")
 
         python_fact = next(
             fact for fact in analysis["profile"]["facts"]
