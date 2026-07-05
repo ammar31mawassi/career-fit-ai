@@ -74,6 +74,18 @@ def test_onboarding_requires_cv_and_supported_career_interest():
         ProfilePreferencesIn(career_interests=["Professional Wizard"])
 
 
+def test_saving_the_same_career_interest_twice_is_idempotent():
+    engine = _engine()
+    SQLModel.metadata.create_all(engine)
+    payload = ProfilePreferencesIn(career_interests=["Software Engineering"])
+    with Session(engine) as session:
+        first = update_profile_preferences(session, USER_ID, payload)
+        second = update_profile_preferences(session, USER_ID, payload)
+
+    assert first.career_interests == ["Software Engineering"]
+    assert second.career_interests == ["Software Engineering"]
+
+
 def test_analyzed_profile_can_complete_onboarding_with_interests():
     engine = _engine()
     SQLModel.metadata.create_all(engine)

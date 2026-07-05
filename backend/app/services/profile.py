@@ -177,6 +177,10 @@ def update_profile_preferences(
     )
     for interest in existing:
         session.delete(interest)
+    # Execute deletions before inserting replacements. Without this flush,
+    # SQLite/Postgres may insert the same selected interest first and hit the
+    # (profile_id, interest) unique constraint during an onboarding retry.
+    session.flush()
     for interest in payload.career_interests:
         session.add(
             ProfileInterest(
