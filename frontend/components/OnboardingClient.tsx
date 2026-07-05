@@ -71,6 +71,11 @@ export function OnboardingClient() {
       const result = await analyzeProfile();
       setProfile(result.profile);
       setProgress("");
+      if (result.profile.status !== "ready") {
+        setError(profileAnalysisError(result.profile.status));
+        setStage("form");
+        return;
+      }
       setStage("review");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not build your profile.");
@@ -80,6 +85,11 @@ export function OnboardingClient() {
   }
 
   async function finish() {
+    if (profile?.status !== "ready") {
+      setError(profileAnalysisError(profile?.status ?? "needs_analysis"));
+      setStage("form");
+      return;
+    }
     setProgress("Opening your workspace…");
     setError("");
     try {
@@ -107,7 +117,7 @@ export function OnboardingClient() {
             <div><strong>{openQuestions}</strong><span>questions to refine later</span></div>
           </div>
           {error ? <div className="notice error">{error}</div> : null}
-          <button className="button primary onboarding-continue" onClick={() => void finish()} type="button">
+          <button className="button primary onboarding-continue" disabled={Boolean(progress)} onClick={() => void finish()} type="button">
             Enter CareerFit <ArrowRight size={16} />
           </button>
           {progress ? <small>{progress}</small> : null}
@@ -175,4 +185,14 @@ export function OnboardingClient() {
       </form>
     </main>
   );
+}
+
+function profileAnalysisError(status: string) {
+  if (status === "cv_unreadable") {
+    return "We couldn't read text from this CV. Upload a text-based PDF rather than a scanned image, then analyze again.";
+  }
+  if (status === "needs_cv") {
+    return "Upload a readable CV PDF before continuing.";
+  }
+  return "Profile analysis did not finish. Review your sources and analyze again.";
 }

@@ -201,7 +201,16 @@ def complete_onboarding(session: Session, user_id: UUID) -> ProfileOut:
     if not interests:
         raise ValueError("Choose at least one career interest.")
     if profile.status != "ready":
-        raise ValueError("Analyze your profile before completing onboarding.")
+        # Completion is idempotent: if a write left the profile marked stale,
+        # rebuild it once instead of trapping the user after the review screen.
+        analyzed = analyze_profile(session, user_id)
+        profile = get_or_create_profile(session, user_id)
+        if analyzed.profile.status == "cv_unreadable":
+            raise ValueError(
+                "We couldn't read text from your CV. Upload a text-based PDF (not a scan) and analyze again."
+            )
+        if analyzed.profile.status != "ready":
+            raise ValueError("Profile analysis did not finish. Review your CV and analyze again.")
     profile.onboarding_completed = True
     profile.updated_at = _now()
     session.add(profile)
@@ -212,7 +221,8 @@ def complete_onboarding(session: Session, user_id: UUID) -> ProfileOut:
 def analyze_profile(session: Session, user_id: UUID) -> ProfileAnalyzeResult:
     profile = get_or_create_profile(session, user_id)
     sources = _sources(session, profile)
-    if not any(source.source_type == "cv" and source.content_text.strip() for source in sources):
+    cv_sources = [source for source in sources if source.source_type == "cv"]
+    if not cv_sources:
         profile.status = "needs_cv"
         profile.updated_at = _now()
         session.add(profile)
@@ -220,7 +230,15 @@ def analyze_profile(session: Session, user_id: UUID) -> ProfileAnalyzeResult:
         output = profile_output(session, user_id)
         return ProfileAnalyzeResult(profile=output, generated_facts=0, open_questions=len(output.questions))
 
+    # Re-run older PDF parser versions before deciding that a CV is unreadable.
     _refresh_pdf_sources(session, sources)
+    if not any(source.content_text.strip() for source in cv_sources):
+        profile.status = "cv_unreadable"
+        profile.updated_at = _now()
+        session.add(profile)
+        session.commit()
+        output = profile_output(session, user_id)
+        return ProfileAnalyzeResult(profile=output, generated_facts=0, open_questions=len(output.questions))
 
     existing_facts = list(session.exec(select(ProfileFact).where(ProfileFact.profile_id == profile.id)).all())
     reviewed: dict[str, ProfileFact] = {}

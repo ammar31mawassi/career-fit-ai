@@ -86,7 +86,13 @@ export function ProfileClient() {
       await persistSources();
       const result = await analyzeProfile();
       setProfile(result.profile);
-      setMessage(`Profile analyzed: ${result.generated_facts} facts, ${result.open_questions} open questions.`);
+      if (result.profile.status === "ready") {
+        setMessage(`Profile analyzed: ${result.generated_facts} facts, ${result.open_questions} open questions.`);
+      } else if (result.profile.status === "cv_unreadable") {
+        setError("We couldn't read text from this CV. Upload a text-based PDF rather than a scanned image, then analyze again.");
+      } else {
+        setError("Profile analysis did not finish. Review your sources and analyze again.");
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not analyze profile.");
     } finally {

@@ -109,6 +109,69 @@ def test_analyzed_profile_can_complete_onboarding_with_interests():
     ]
 
 
+def test_completion_recovers_a_stale_profile_after_cv_upload():
+    engine = _engine()
+    SQLModel.metadata.create_all(engine)
+    with Session(engine) as session:
+        profile = Profile(user_id=USER_ID, status="needs_analysis")
+        session.add(profile)
+        session.commit()
+        session.refresh(profile)
+        session.add(
+            ProfileSource(
+                user_id=USER_ID,
+                profile_id=profile.id or 0,
+                source_type="cv",
+                title="cv.pdf",
+                content_text="Computer Science student. Skills: Python, SQL, React.",
+            )
+        )
+        session.commit()
+        update_profile_preferences(
+            session,
+            USER_ID,
+            ProfilePreferencesIn(career_interests=["Software Engineering"]),
+        )
+
+        completed = complete_onboarding(session, USER_ID)
+
+    assert completed.status == "ready"
+    assert completed.last_analyzed_at is not None
+    assert completed.onboarding_completed is True
+
+
+def test_unreadable_cv_is_reported_instead_of_showing_ready():
+    engine = _engine()
+    SQLModel.metadata.create_all(engine)
+    with Session(engine) as session:
+        profile = Profile(user_id=USER_ID, status="needs_analysis")
+        session.add(profile)
+        session.commit()
+        session.refresh(profile)
+        session.add(
+            ProfileSource(
+                user_id=USER_ID,
+                profile_id=profile.id or 0,
+                source_type="cv",
+                title="scanned-cv.pdf",
+                content_text="",
+            )
+        )
+        session.commit()
+        update_profile_preferences(
+            session,
+            USER_ID,
+            ProfilePreferencesIn(career_interests=["Software Engineering"]),
+        )
+
+        analyzed = analyze_profile(session, USER_ID)
+        with pytest.raises(ValueError, match="couldn't read text"):
+            complete_onboarding(session, USER_ID)
+
+    assert analyzed.profile.status == "cv_unreadable"
+    assert analyzed.profile.onboarding_completed is False
+
+
 def test_profile_analysis_extracts_facts_and_questions_from_cv():
     engine = _engine()
     SQLModel.metadata.create_all(engine)
