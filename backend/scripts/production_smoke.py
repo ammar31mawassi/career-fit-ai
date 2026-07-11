@@ -20,7 +20,6 @@ SUPABASE = str(LOCAL_ENV.get("SUPABASE_URL") or LOCAL_ENV.get("NEXT_PUBLIC_SUPAB
 ANON_KEY = str(LOCAL_ENV.get("SUPABASE_ANON_KEY") or LOCAL_ENV.get("NEXT_PUBLIC_SUPABASE_ANON_KEY") or "")
 SECRET_KEY = str(LOCAL_ENV.get("SUPABASE_SECRET_KEY") or LOCAL_ENV.get("SUPABASE_SERVICE_ROLE_KEY") or "")
 INTERNAL_KEY = os.getenv("SMOKE_INTERNAL_KEY", "")
-INVITE_CODE = os.getenv("SMOKE_INVITE", "")
 BUCKET = str(LOCAL_ENV.get("SUPABASE_STORAGE_BUCKET") or "profile-documents")
 
 
@@ -82,15 +81,15 @@ def admin_headers() -> dict[str, str]:
 
 
 def main() -> None:
-    if not all((SUPABASE, ANON_KEY, SECRET_KEY, INTERNAL_KEY, INVITE_CODE)):
+    if not all((SUPABASE, ANON_KEY, SECRET_KEY, INTERNAL_KEY)):
         raise SystemExit("Smoke configuration is incomplete.")
     email = f"smoke-{int(time.time())}-{secrets.token_hex(3)}@example.com"
     password = "Smoke-" + secrets.token_urlsafe(18)
     user_id = ""
     try:
-        form = urllib.parse.urlencode({"email": email, "password": password, "invite_code": INVITE_CODE}).encode()
+        form = urllib.parse.urlencode({"email": email, "password": password}).encode()
         status, _ = request(FRONTEND + "/auth/signup", "POST", {"Content-Type": "application/x-www-form-urlencoded"}, form)
-        print(f"Invite signup: {status}")
+        print(f"Public signup: {status}")
 
         status, auth = json_request(
             SUPABASE + "/auth/v1/token?grant_type=password",

@@ -13,29 +13,29 @@ import {
   type ReactNode,
   type SetStateAction
 } from "react";
-import { getJobs, getProfile, type Profile, type TrackedJob } from "@/lib/api";
+import { getJobSummaries, getProfile, type Profile, type TrackedJobSummary } from "@/lib/api";
 
 type AppData = {
   profile: Profile | null;
-  jobs: TrackedJob[];
+  jobs: TrackedJobSummary[];
   profileLoading: boolean;
   jobsLoading: boolean;
   dataError: string;
   setProfile: Dispatch<SetStateAction<Profile | null>>;
-  setJobs: Dispatch<SetStateAction<TrackedJob[]>>;
+  setJobs: Dispatch<SetStateAction<TrackedJobSummary[]>>;
   refreshProfile: () => Promise<Profile>;
-  refreshJobs: () => Promise<TrackedJob[]>;
+  refreshJobs: () => Promise<TrackedJobSummary[]>;
   refreshAll: () => Promise<void>;
 };
 
 const AppDataContext = createContext<AppData | null>(null);
-const WORKSPACE_CACHE_KEY = "careerfit:workspace:v2";
+const WORKSPACE_CACHE_KEY = "careerfit:workspace:v3";
 const WORKSPACE_CACHE_TTL = 5 * 60 * 1000;
 
 type WorkspaceCache = {
   savedAt: number;
   profile: Profile | null;
-  jobs: TrackedJob[];
+  jobs: TrackedJobSummary[];
 };
 
 function readWorkspaceCache(): WorkspaceCache | null {
@@ -56,9 +56,9 @@ function readWorkspaceCache(): WorkspaceCache | null {
 export function AppDataProvider({ children }: { children: ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
-  const started = useRef(false);
+  const cacheHydrated = useRef(false);
   const [profile, setProfile] = useState<Profile | null>(null);
-  const [jobs, setJobs] = useState<TrackedJob[]>([]);
+  const [jobs, setJobs] = useState<TrackedJobSummary[]>([]);
   const [profileLoading, setProfileLoading] = useState(true);
   const [jobsLoading, setJobsLoading] = useState(true);
   const [dataError, setDataError] = useState("");
@@ -77,7 +77,7 @@ export function AppDataProvider({ children }: { children: ReactNode }) {
   const refreshJobs = useCallback(async () => {
     setJobsLoading(true);
     try {
-      const data = await getJobs();
+      const data = await getJobSummaries();
       setJobs(data);
       return data;
     } finally {
@@ -95,30 +95,32 @@ export function AppDataProvider({ children }: { children: ReactNode }) {
   }, [refreshJobs, refreshProfile]);
 
   useEffect(() => {
-    if (pathname === "/login" || started.current) {
-      if (pathname === "/login") {
+    if (pathname === "/login") {
+      setProfileLoading(false);
+      setJobsLoading(false);
+      return;
+    }
+
+    if (!cacheHydrated.current) {
+      cacheHydrated.current = true;
+      const cached = readWorkspaceCache();
+      if (cached) {
+        setProfile(cached.profile);
+        setJobs(cached.jobs);
         setProfileLoading(false);
         setJobsLoading(false);
       }
-      return;
     }
-    started.current = true;
-    const cached = readWorkspaceCache();
-    if (cached) {
-      setProfile(cached.profile);
-      setJobs(cached.jobs);
-      setProfileLoading(false);
-      setJobsLoading(false);
-    }
-    if (pathname === "/onboarding") {
+
+    if (pathname === "/onboarding" || pathname === "/profile") {
       void refreshProfile().catch((error) => {
         setDataError(error instanceof Error ? error.message : "Could not load your profile.");
       });
       setJobsLoading(false);
-    } else {
+    } else if (pathname === "/") {
       void refreshAll();
     }
-  }, [pathname, refreshAll]);
+  }, [pathname, refreshAll, refreshProfile]);
 
   useEffect(() => {
     if (pathname === "/login" || profileLoading || !profile) return;

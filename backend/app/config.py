@@ -23,6 +23,7 @@ class Settings:
     supabase_secret_key: str | None
     supabase_storage_bucket: str
     local_upload_dir: Path
+    max_upload_bytes: int
 
 
 def _csv_values(value: str) -> tuple[str, ...]:
@@ -52,4 +53,5 @@ def get_settings() -> Settings:
         ),
         supabase_storage_bucket=os.getenv("SUPABASE_STORAGE_BUCKET", "profile-documents"),
         local_upload_dir=_path_value(os.getenv("LOCAL_UPLOAD_DIR", "./data/uploads")),
+        max_upload_bytes=int(os.getenv("MAX_UPLOAD_BYTES", str(5 * 1024 * 1024))),
     )

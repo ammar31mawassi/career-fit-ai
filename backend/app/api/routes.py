@@ -4,12 +4,14 @@ from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from sqlmodel import Session
 from uuid import UUID
 
+from ..config import get_settings
 from ..database import get_session
 from ..schemas import (
     ClarificationAnswerIn,
     JobCreateIn,
     JobOut,
     JobStatusPatchIn,
+    JobSummaryOut,
     ProfileAnalyzeResult,
     ProfileFactCreateIn,
     ProfileFactPatchIn,
@@ -18,7 +20,7 @@ from ..schemas import (
     ProfileSourcesIn,
 )
 from ..services.auth import current_user_id
-from ..services.jobs import create_or_analyze_job, job_output, list_jobs, update_job_status
+from ..services.jobs import create_or_analyze_job, job_output, list_job_summaries, list_jobs, update_job_status
 from ..services.profile import (
     analyze_profile,
     add_fact,
@@ -60,6 +62,8 @@ async def upload_cv(
     data = await file.read()
     if not data:
         raise HTTPException(status_code=400, detail="Uploaded CV is empty.")
+    if len(data) > get_settings().max_upload_bytes:
+        raise HTTPException(status_code=413, detail="Uploaded CV is too large. Use a PDF under 5 MB.")
     return upload_cv_source(session, user_id, file.filename or "cv.pdf", data)
 
 
@@ -72,6 +76,8 @@ async def upload_linkedin_pdf(
     data = await file.read()
     if not data:
         raise HTTPException(status_code=400, detail="Uploaded LinkedIn PDF is empty.")
+    if len(data) > get_settings().max_upload_bytes:
+        raise HTTPException(status_code=413, detail="Uploaded LinkedIn PDF is too large. Use a PDF under 5 MB.")
     return upload_linkedin_pdf_source(session, user_id, file.filename or "linkedin.pdf", data)
 
 
@@ -167,6 +173,16 @@ def jobs(
     session: Session = Depends(get_session),
 ) -> list[JobOut]:
     return list_jobs(session, user_id, query=query, limit=limit)
+
+
+@router.get("/jobs/summary", response_model=list[JobSummaryOut])
+def job_summaries(
+    query: str = Query(default="", max_length=200),
+    limit: int = Query(default=100, ge=1, le=250),
+    user_id: UUID = Depends(current_user_id),
+    session: Session = Depends(get_session),
+) -> list[JobSummaryOut]:
+    return list_job_summaries(session, user_id, query=query, limit=limit)
 
 
 @router.get("/jobs/{job_id}", response_model=JobOut)

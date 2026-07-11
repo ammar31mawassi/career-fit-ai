@@ -9,7 +9,7 @@ The beta does not use OpenAI, ChatGPT, or another hosted generative model. Profi
 
 ## Scope
 
-- Invite-only accounts through Supabase Auth.
+- Public beta accounts through Supabase Auth, protected by lightweight signup/API rate limits.
 - First-use onboarding plus authenticated Home and Profile pages.
 - One required CV PDF.
 - Optional GitHub, LinkedIn PDF/text, and manual notes.
@@ -50,8 +50,8 @@ Open `http://localhost:3000`.
 1. Create a Supabase project.
 2. Run `supabase/schema.sql` in the Supabase SQL editor.
 3. Create a private Storage bucket named `profile-documents`.
-4. Disable open public signups in Supabase Auth settings for invite-only beta.
-5. Put the project URL, anon key, service role key, and invite code in Vercel/local env.
+4. Keep email/password Auth enabled. The app signup route creates confirmed beta users and applies signup rate limits.
+5. Put the project URL, anon key, service role key, backend API key, and allowed origins in Vercel/local env.
 
 For an existing database, apply the SQL files in `supabase/migrations/` in filename order instead of rerunning the base schema.
 

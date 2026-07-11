@@ -8,6 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from .api.routes import router
 from .config import get_settings
 from .database import init_db
+from .services.rate_limit import check_rate_limit
 
 
 @asynccontextmanager
@@ -35,5 +36,18 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.include_router(router)
 
+@app.middleware("http")
+async def public_beta_rate_limit(request, call_next):
+    limited = check_rate_limit(request)
+    if limited is not None:
+        return limited
+    response = await call_next(request)
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+    response.headers.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+    return response
+
+
+app.include_router(router)

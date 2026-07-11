@@ -4,9 +4,9 @@ from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel, create_engine, select
 from uuid import UUID
 
-from app.models import Job, Profile, ProfileFact, ProfileSource
+from app.models import AgentRun, AgentStep, Job, Profile, ProfileFact, ProfileSource
 from app.schemas import JobCreateIn
-from app.services.jobs import create_or_analyze_job, list_jobs, update_job_status
+from app.services.jobs import create_or_analyze_job, list_job_summaries, list_jobs, update_job_status
 from app.services.profile import analyze_profile
 
 
@@ -176,3 +176,88 @@ def test_resume_advice_and_status_are_saved():
     assert updated.match.model_version == "fit-v2.1.0"
     assert [event.status for event in updated.match.status_history] == ["Lead", "Applied"]
     assert [job.id for job in searched] == [job.id]
+
+
+def test_job_summaries_omit_heavy_detail_but_keep_match_signal():
+    engine = _engine()
+    SQLModel.metadata.create_all(engine)
+    with Session(engine) as session:
+        _ready_profile(session)
+        job = create_or_analyze_job(
+            session,
+            USER_ID,
+            JobCreateIn(
+                company="Summary Co",
+                role="Backend Developer",
+                description_text="Requirements: Python, FastAPI, SQL. Preferred: React and Docker.",
+            ),
+        )
+        summaries = list_job_summaries(session, USER_ID, query="Summary")
+        skill_summaries = list_job_summaries(session, USER_ID, query="FastAPI")
+
+    assert len(summaries) == 1
+    summary = summaries[0]
+    assert summary.id == job.id
+    assert summary.match is not None
+    assert summary.match.score == job.match.score
+    assert summary.top_skills
+    assert summary.requirement_summary
+    assert not hasattr(summary, "description_text")
+    assert not hasattr(summary.match, "resume_advice")
+    assert [item.id for item in skill_summaries] == [job.id]
+
+
+def test_job_scan_records_agent_workflow_trace():
+    engine = _engine()
+    SQLModel.metadata.create_all(engine)
+    with Session(engine) as session:
+        _ready_profile(session)
+        job = create_or_analyze_job(
+            session,
+            USER_ID,
+            JobCreateIn(
+                company="Agent Co",
+                role="Backend Developer",
+                description_text="Requirements: Python, FastAPI, SQL. Preferred: React.",
+            ),
+        )
+        runs = session.exec(select(AgentRun)).all()
+        steps = session.exec(select(AgentStep).order_by(AgentStep.id)).all()
+
+    assert len(runs) == 1
+    assert runs[0].workflow_type == "job_reader"
+    assert runs[0].subject_id == job.id
+    assert runs[0].status == "completed"
+    assert job.agent_run is not None
+    assert job.agent_run.status == "completed"
+    assert [step.step_key for step in steps] == [
+        "validate_profile",
+        "dedupe_lookup",
+        "extract_job",
+        "classify_requirements",
+        "match_profile_evidence",
+        "validate_resume_advice",
+    ]
+    assert all(step.status == "completed" for step in steps)
+
+
+def test_duplicate_job_records_reused_agent_run():
+    engine = _engine()
+    SQLModel.metadata.create_all(engine)
+    with Session(engine) as session:
+        _ready_profile(session)
+        payload = JobCreateIn(
+            source_url="https://example.com/job/agent",
+            company="Agent Co",
+            role="Backend Developer",
+            description_text="Requirements: Python, FastAPI, SQL.",
+        )
+        first = create_or_analyze_job(session, USER_ID, payload)
+        second = create_or_analyze_job(session, USER_ID, payload)
+        runs = session.exec(select(AgentRun).order_by(AgentRun.id)).all()
+
+    assert first.id == second.id
+    assert len(runs) == 2
+    assert runs[-1].status == "reused"
+    assert second.agent_run is not None
+    assert second.agent_run.status == "reused"

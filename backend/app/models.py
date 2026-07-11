@@ -177,3 +177,38 @@ class JobStatusEvent(SQLModel, table=True):
     match_id: int = Field(foreign_key="job_matches.id", index=True)
     status: str = Field(index=True)
     created_at: datetime = Field(default_factory=utc_now)
+
+
+class AgentRun(SQLModel, table=True):
+    __tablename__ = "agent_runs"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    user_id: UUID = Field(index=True)
+    workflow_type: str = Field(index=True)
+    subject_type: str = Field(default="", index=True)
+    subject_id: Optional[int] = Field(default=None, index=True)
+    input_hash: str = Field(default="", index=True)
+    status: str = Field(default="running", index=True)
+    version: str = ""
+    summary: str = ""
+    error: str = ""
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
+    completed_at: Optional[datetime] = None
+
+
+class AgentStep(SQLModel, table=True):
+    __tablename__ = "agent_steps"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    user_id: UUID = Field(index=True)
+    run_id: int = Field(foreign_key="agent_runs.id", index=True)
+    step_key: str = Field(index=True)
+    title: str
+    status: str = Field(default="running", index=True)
+    attempt: int = 1
+    progress: str = ""
+    output_json: str = "{}"
+    error: str = ""
+    started_at: datetime = Field(default_factory=utc_now)
+    completed_at: Optional[datetime] = None

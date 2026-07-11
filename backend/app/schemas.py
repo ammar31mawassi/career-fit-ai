@@ -165,6 +165,62 @@ class JobMatchOut(BaseModel):
     analyzed_at: datetime
 
 
+class JobMatchSummaryOut(BaseModel):
+    id: int
+    score: float
+    fit_level: FitLevel
+    confidence: float
+    status: JobStatus
+    analyzed_at: datetime
+
+
+class AgentStepOut(BaseModel):
+    id: int
+    step_key: str
+    title: str
+    status: str
+    attempt: int = 1
+    progress: str = ""
+    output: dict[str, object] = Field(default_factory=dict)
+    error: str = ""
+    started_at: datetime
+    completed_at: datetime | None = None
+
+
+class AgentRunOut(BaseModel):
+    id: int
+    workflow_type: str
+    subject_type: str = ""
+    subject_id: int | None = None
+    status: str
+    version: str
+    summary: str = ""
+    error: str = ""
+    created_at: datetime
+    completed_at: datetime | None = None
+    steps: list[AgentStepOut] = Field(default_factory=list)
+
+
+class JobSummaryOut(BaseModel):
+    id: int
+    source_url: str
+    company: str
+    role: str
+    location: str
+    source_confidence: float
+    application_link: str
+    status: str
+    error: str
+    created_at: datetime
+    updated_at: datetime
+    requirement_summary: str = ""
+    top_skills: list[str] = Field(default_factory=list)
+    min_years_experience: float = 0.0
+    extraction_completeness: float = 0.0
+    primary_signal: str = ""
+    match: JobMatchSummaryOut | None = None
+
+
 class JobOut(BaseModel):
     id: int
     source_url: str
@@ -181,6 +237,7 @@ class JobOut(BaseModel):
     updated_at: datetime
     requirements: RequirementModel
     match: JobMatchOut | None
+    agent_run: AgentRunOut | None = None
 
 
 class JobCreateIn(BaseModel):

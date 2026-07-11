@@ -6,10 +6,31 @@ from dataclasses import asdict
 from datetime import datetime, timezone
 from uuid import UUID
 
+from sqlalchemy import or_
 from sqlmodel import Session, select
 
 from ..models import Job, JobMatch, JobStatusEvent, Profile, ResumeAdvice
-from ..schemas import JobCreateIn, JobMatchOut, JobOut, JobStatusEventOut, RequirementModel, ResumeAdviceOut
+from ..schemas import (
+    JobCreateIn,
+    JobMatchOut,
+    JobMatchSummaryOut,
+    JobOut,
+    JobStatusEventOut,
+    JobSummaryOut,
+    RequirementModel,
+    ResumeAdviceOut,
+)
+from .agent_workflows import (
+    JOB_READER_WORKFLOW_VERSION,
+    attach_subject,
+    complete_run,
+    complete_step,
+    fail_run,
+    fail_step,
+    latest_agent_run_for_subject,
+    start_agent_run,
+    start_step,
+)
 from .job_research import JOB_READER_VERSION, extract_job_from_input, requirements_from_json
 from .matcher import score_match
 from .profile import candidate_snapshot, get_or_create_profile
@@ -21,12 +42,45 @@ def create_or_analyze_job(session: Session, user_id: UUID, payload: JobCreateIn)
         raise ValueError("Upload at least one CV before matching jobs.")
 
     content_hash = _content_hash(payload.source_url, payload.description_text, payload.company, payload.role)
+    run = start_agent_run(
+        session,
+        user_id,
+        "job_reader",
+        input_hash=content_hash,
+        version=JOB_READER_WORKFLOW_VERSION,
+        subject_type="job",
+        summary="Job reader workflow started.",
+    )
+    validation_step = start_step(session, run, "validate_profile", "Validate profile readiness")
+    complete_step(
+        session,
+        validation_step,
+        "Profile has a CV-backed analysis state and can be matched.",
+        {"profile_status": profile.status},
+    )
+
+    dedupe_step = start_step(session, run, "dedupe_lookup", "Check saved-job cache")
     existing = session.exec(
         select(Job).where(Job.user_id == user_id, Job.content_hash == content_hash)
     ).first()
     if existing and _can_reuse(existing, payload):
+        attach_subject(session, run, "job", existing.id or 0)
+        complete_step(
+            session,
+            dedupe_step,
+            "Existing job analysis reused; no rescan needed.",
+            {"job_id": existing.id or 0, "reader_version": JOB_READER_VERSION},
+        )
+        complete_run(session, run, "Existing saved job reused.", status="reused")
         return job_output(session, user_id, existing.id or 0)
+    complete_step(
+        session,
+        dedupe_step,
+        "No reusable analysis found; scanning the submitted source.",
+        {"had_existing_job": bool(existing)},
+    )
 
+    extraction_step = start_step(session, run, "extract_job", "Extract job content and source metadata")
     try:
         extracted = extract_job_from_input(
             payload.source_url,
@@ -35,7 +89,10 @@ def create_or_analyze_job(session: Session, user_id: UUID, payload: JobCreateIn)
             payload.description_text,
         )
     except Exception as exc:
+        fail_step(session, extraction_step, str(exc), {"source_url": payload.source_url.strip()})
         if existing and existing.status == "analyzed":
+            attach_subject(session, run, "job", existing.id or 0)
+            complete_run(session, run, "Extraction failed, existing analyzed job reused.", status="reused")
             return job_output(session, user_id, existing.id or 0)
         job = existing or Job(user_id=user_id, content_hash=content_hash, created_at=_now())
         job.source_url = payload.source_url.strip()
@@ -48,7 +105,34 @@ def create_or_analyze_job(session: Session, user_id: UUID, payload: JobCreateIn)
         session.add(job)
         session.commit()
         session.refresh(job)
+        attach_subject(session, run, "job", job.id or 0)
+        fail_run(session, run, str(exc), "Job reader failed during extraction.")
         return job_output(session, user_id, job.id or 0)
+    complete_step(
+        session,
+        extraction_step,
+        "Job content extracted and normalized.",
+        {
+            "company": extracted.company,
+            "role": extracted.role,
+            "source_confidence": round(extracted.source_confidence, 3),
+            "description_chars": len(extracted.description_text),
+        },
+    )
+
+    classifier_step = start_step(session, run, "classify_requirements", "Classify requirements and constraints")
+    complete_step(
+        session,
+        classifier_step,
+        "Requirements classified into must-have, preferred, nice-to-have, experience, and constraints.",
+        {
+            "must_have": len(extracted.requirements.must_have_skills),
+            "preferred": len(extracted.requirements.preferred_skills),
+            "nice_to_have": len(extracted.requirements.nice_to_have_skills),
+            "extraction_completeness": round(extracted.requirements.extraction_completeness, 3),
+            "reader_version": extracted.requirements.reader_version,
+        },
+    )
 
     job = existing or Job(user_id=user_id, content_hash=content_hash, created_at=_now())
     job.source_url = extracted.source_url
@@ -66,7 +150,33 @@ def create_or_analyze_job(session: Session, user_id: UUID, payload: JobCreateIn)
     session.add(job)
     session.commit()
     session.refresh(job)
-    _save_match(session, user_id, profile, job)
+    attach_subject(session, run, "job", job.id or 0)
+    match_step = start_step(session, run, "match_profile_evidence", "Match profile evidence to requirements")
+    try:
+        match = _save_match(session, user_id, profile, job)
+    except Exception as exc:
+        fail_step(session, match_step, str(exc), {"job_id": job.id or 0})
+        fail_run(session, run, str(exc), "Job reader failed during evidence matching.")
+        raise
+    complete_step(
+        session,
+        match_step,
+        "Evidence matcher scored the role and generated resume direction.",
+        {
+            "score": round(match.score, 2),
+            "fit_level": match.fit_level,
+            "confidence": round(match.confidence, 3),
+            "model_version": match.model_version,
+        },
+    )
+    advice_step = start_step(session, run, "validate_resume_advice", "Validate resume advice is fact-constrained")
+    complete_step(
+        session,
+        advice_step,
+        "Resume advice stored from evidenced projects, skills, and about templates.",
+        {"match_id": match.id or 0},
+    )
+    complete_run(session, run, "Job analyzed, matched, and saved.")
     return job_output(session, user_id, job.id or 0)
 
 
@@ -142,6 +252,69 @@ def list_jobs(session: Session, user_id: UUID, query: str = "", limit: int = 100
         )
         for job in jobs
     ]
+
+
+def list_job_summaries(session: Session, user_id: UUID, query: str = "", limit: int = 100) -> list[JobSummaryOut]:
+    filters = [Job.user_id == user_id]
+    if query.strip():
+        pattern = f"%{query.strip()}%"
+        filters.append(
+            or_(
+                Job.company.ilike(pattern),
+                Job.role.ilike(pattern),
+                Job.location.ilike(pattern),
+                Job.source_url.ilike(pattern),
+                Job.description_text.ilike(pattern),
+                Job.requirements_json.ilike(pattern),
+            )
+        )
+
+    statement = (
+        select(
+            Job.id,
+            Job.source_url,
+            Job.company,
+            Job.role,
+            Job.location,
+            Job.source_confidence,
+            Job.application_link,
+            Job.status,
+            Job.error,
+            Job.created_at,
+            Job.updated_at,
+            Job.requirements_json,
+        )
+        .where(*filters)
+        .order_by(Job.updated_at.desc())
+        .limit(limit)
+    )
+    rows = list(session.exec(statement).all())
+    if not rows:
+        return []
+
+    job_ids = [int(row[0]) for row in rows if row[0] is not None]
+    matches = list(
+        session.exec(
+            select(JobMatch).where(JobMatch.user_id == user_id, JobMatch.job_id.in_(job_ids))
+        ).all()
+    )
+    matches_by_job = {match.job_id: match for match in matches}
+
+    profile = session.exec(select(Profile).where(Profile.user_id == user_id)).first()
+    if profile and profile.status == "ready":
+        stale_ids = [
+            job_id
+            for job_id in job_ids
+            if (match := matches_by_job.get(job_id)) and _is_after(profile.updated_at, match.analyzed_at)
+        ]
+        if stale_ids:
+            stale_jobs = session.exec(
+                select(Job).where(Job.user_id == user_id, Job.id.in_(stale_ids))
+            ).all()
+            for stale_job in stale_jobs:
+                matches_by_job[stale_job.id or 0] = _save_match(session, user_id, profile, stale_job)
+
+    return [_summary_from_row(row, matches_by_job.get(int(row[0]))) for row in rows]
 
 
 def job_output(session: Session, user_id: UUID, job_id: int) -> JobOut:
@@ -223,6 +396,58 @@ def _job_to_out(session: Session, user_id: UUID, job: Job) -> JobOut:
     return _job_to_out_from_loaded(job, match, {}, {}, session=session, user_id=user_id)
 
 
+def _summary_from_row(row, match: JobMatch | None) -> JobSummaryOut:
+    (
+        job_id,
+        source_url,
+        company,
+        role,
+        location,
+        source_confidence,
+        application_link,
+        status,
+        error,
+        created_at,
+        updated_at,
+        requirements_json,
+    ) = row
+    requirements = requirements_from_json(requirements_json)
+    top_skills = _unique_limited(
+        [*requirements.must_have_skills, *requirements.preferred_skills, *requirements.nice_to_have_skills],
+        7,
+    )
+    missing = _load_list(match.missing_blockers_json) if match else []
+    gaps = _load_list(match.gaps_json) if match else []
+    primary_signal = (
+        missing[0]
+        if missing
+        else gaps[0]
+        if gaps
+        else error
+        if status == "failed" and error
+        else requirements.summary
+    )
+    return JobSummaryOut(
+        id=int(job_id),
+        source_url=source_url,
+        company=company,
+        role=role,
+        location=location,
+        source_confidence=float(source_confidence or 0),
+        application_link=application_link,
+        status=status,
+        error=error,
+        created_at=created_at,
+        updated_at=updated_at,
+        requirement_summary=requirements.summary,
+        top_skills=top_skills,
+        min_years_experience=requirements.min_years_experience,
+        extraction_completeness=requirements.extraction_completeness,
+        primary_signal=primary_signal,
+        match=_match_summary_to_out(match) if match else None,
+    )
+
+
 def _job_to_out_from_loaded(
     job: Job,
     match: JobMatch | None,
@@ -234,6 +459,7 @@ def _job_to_out_from_loaded(
 ) -> JobOut:
     match_id = match.id or 0 if match else 0
     match_out = None
+    agent_run_out = None
     if match:
         if session is not None and user_id is not None:
             match_out = _match_out(session, user_id, match)
@@ -243,6 +469,8 @@ def _job_to_out_from_loaded(
                 advice_by_match.get(match_id),
                 events_by_match.get(match_id, []),
             )
+    if session is not None and user_id is not None and job.id is not None:
+        agent_run_out = latest_agent_run_for_subject(session, user_id, "job_reader", "job", job.id)
     return JobOut(
         id=job.id or 0,
         source_url=job.source_url,
@@ -259,6 +487,18 @@ def _job_to_out_from_loaded(
         updated_at=job.updated_at,
         requirements=RequirementModel.model_validate(asdict(requirements_from_json(job.requirements_json))),
         match=match_out,
+        agent_run=agent_run_out,
+    )
+
+
+def _match_summary_to_out(match: JobMatch) -> JobMatchSummaryOut:
+    return JobMatchSummaryOut(
+        id=match.id or 0,
+        score=match.score,
+        fit_level=match.fit_level,  # type: ignore[arg-type]
+        confidence=match.confidence,
+        status=match.status,  # type: ignore[arg-type]
+        analyzed_at=match.analyzed_at,
     )
 
 
@@ -351,6 +591,21 @@ def _load_dict(value: str) -> dict[str, float]:
             output[str(key)] = float(item)
         except (TypeError, ValueError):
             continue
+    return output
+
+
+def _unique_limited(values: list[str], limit: int) -> list[str]:
+    output: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        cleaned = " ".join(str(value).split())
+        key = cleaned.lower()
+        if not cleaned or key in seen:
+            continue
+        seen.add(key)
+        output.append(cleaned)
+        if len(output) >= limit:
+            break
     return output
 
 

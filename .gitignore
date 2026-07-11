@@ -6,6 +6,7 @@ __pycache__/
 data/
 tmp/
 output/
+careerAI_Huggingface/
 frontend/node_modules/
 frontend/.next/
 frontend/tsconfig.tsbuildinfo

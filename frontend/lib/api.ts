@@ -72,6 +72,91 @@ export type JobMatch = {
   analyzed_at: string;
 };
 
+export type JobMatchSummary = {
+  id: number;
+  score: number;
+  fit_level: "Strong" | "Medium" | "Weak";
+  confidence: number;
+  status: JobStatus;
+  analyzed_at: string;
+};
+
+export type AgentStep = {
+  id: number;
+  step_key: string;
+  title: string;
+  status: string;
+  attempt: number;
+  progress: string;
+  output: Record<string, unknown>;
+  error: string;
+  started_at: string;
+  completed_at: string | null;
+};
+
+export type AgentRun = {
+  id: number;
+  workflow_type: string;
+  subject_type: string;
+  subject_id: number | null;
+  status: string;
+  version: string;
+  summary: string;
+  error: string;
+  created_at: string;
+  completed_at: string | null;
+  steps: AgentStep[];
+};
+
+export type JobRequirements = {
+  must_have_skills: string[];
+  preferred_skills: string[];
+  nice_to_have_skills: string[];
+  all_skills: string[];
+  min_years_experience: number;
+  seniority: string;
+  education: string;
+  work_mode: string;
+  domain: string;
+  summary: string;
+  languages: string[];
+  location_requirement: string;
+  work_authorization: string;
+  availability: string;
+  responsibilities: string[];
+  evidence_by_requirement: Record<string, string>;
+  ontology_version: string;
+  skill_groups: Array<{
+    priority: string;
+    mode: string;
+    skills: string[];
+    evidence: string;
+  }>;
+  experience_requirement_known: boolean;
+  reader_version: string;
+  extraction_completeness: number;
+};
+
+export type TrackedJobSummary = {
+  id: number;
+  source_url: string;
+  company: string;
+  role: string;
+  location: string;
+  source_confidence: number;
+  application_link: string;
+  status: string;
+  error: string;
+  created_at: string;
+  updated_at: string;
+  requirement_summary: string;
+  top_skills: string[];
+  min_years_experience: number;
+  extraction_completeness: number;
+  primary_signal: string;
+  match: JobMatchSummary | null;
+};
+
 export type TrackedJob = {
   id: number;
   source_url: string;
@@ -86,35 +171,9 @@ export type TrackedJob = {
   error: string;
   created_at: string;
   updated_at: string;
-  requirements: {
-    must_have_skills: string[];
-    preferred_skills: string[];
-    nice_to_have_skills: string[];
-    all_skills: string[];
-    min_years_experience: number;
-    seniority: string;
-    education: string;
-    work_mode: string;
-    domain: string;
-    summary: string;
-    languages: string[];
-    location_requirement: string;
-    work_authorization: string;
-    availability: string;
-    responsibilities: string[];
-    evidence_by_requirement: Record<string, string>;
-    ontology_version: string;
-    skill_groups: Array<{
-      priority: string;
-      mode: string;
-      skills: string[];
-      evidence: string;
-    }>;
-    experience_requirement_known: boolean;
-    reader_version: string;
-    extraction_completeness: number;
-  };
+  requirements: JobRequirements;
   match: JobMatch | null;
+  agent_run: AgentRun | null;
 };
 
 export type JobCreate = {
@@ -218,6 +277,15 @@ export function getJobs(query = "") {
   return request<TrackedJob[]>(`/api/jobs${suffix}`);
 }
 
+export function getJobSummaries(query = "") {
+  const suffix = query.trim() ? `?query=${encodeURIComponent(query.trim())}` : "";
+  return request<TrackedJobSummary[]>(`/api/jobs/summary${suffix}`);
+}
+
+export function getJob(jobId: number) {
+  return request<TrackedJob>(`/api/jobs/${jobId}`);
+}
+
 export function createJob(payload: JobCreate) {
   return request<TrackedJob>("/api/jobs", {
     method: "POST",
@@ -230,6 +298,43 @@ export function updateJobStatus(jobId: number, status: JobStatus) {
     method: "PATCH",
     body: JSON.stringify({ status })
   });
+}
+
+export function toJobSummary(job: TrackedJob): TrackedJobSummary {
+  const missing = job.match?.missing_blockers[0];
+  const gap = job.match?.gaps[0];
+  return {
+    id: job.id,
+    source_url: job.source_url,
+    company: job.company,
+    role: job.role,
+    location: job.location,
+    source_confidence: job.source_confidence,
+    application_link: job.application_link,
+    status: job.status,
+    error: job.error,
+    created_at: job.created_at,
+    updated_at: job.updated_at,
+    requirement_summary: job.requirements.summary,
+    top_skills: [
+      ...job.requirements.must_have_skills,
+      ...job.requirements.preferred_skills,
+      ...job.requirements.nice_to_have_skills
+    ].filter((skill, index, list) => skill && list.findIndex((candidate) => candidate.toLowerCase() === skill.toLowerCase()) === index).slice(0, 7),
+    min_years_experience: job.requirements.min_years_experience,
+    extraction_completeness: job.requirements.extraction_completeness,
+    primary_signal: missing || gap || job.error || job.requirements.summary,
+    match: job.match
+      ? {
+          id: job.match.id,
+          score: job.match.score,
+          fit_level: job.match.fit_level,
+          confidence: job.match.confidence,
+          status: job.match.status,
+          analyzed_at: job.match.analyzed_at
+        }
+      : null
+  };
 }
 
 export function formatDate(value: string | null) {

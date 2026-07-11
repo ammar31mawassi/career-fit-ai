@@ -4,7 +4,7 @@ import re
 from dataclasses import dataclass
 
 
-ONTOLOGY_VERSION = "skills-v1.2.0"
+ONTOLOGY_VERSION = "skills-v1.2.2"
 
 
 @dataclass(frozen=True)
@@ -155,7 +155,7 @@ def extract_skills(text: str) -> list[str]:
     occupied: list[tuple[int, int]] = []
     for alias, canonical in _ALIASES:
         pattern = _term_pattern(alias)
-        flags = 0 if alias in {"c", "r"} else re.IGNORECASE
+        flags = 0 if alias in {"c", "r", "go", "rest"} else re.IGNORECASE
         for match in re.finditer(pattern, text, flags=flags):
             span = match.span()
             if any(span[0] < end and span[1] > start for start, end in occupied):
@@ -205,6 +205,14 @@ def _term_pattern(term: str) -> str:
     # doing so turns every `.com` address into evidence for C.
     if term == "c":
         return r"(?<![A-Za-z0-9])C(?![A-Za-z0-9+#])"
+    if term == "go":
+        # Go is also a common English verb. Only count the language when it is
+        # written as the proper noun "Go"; "Golang" remains case-insensitive.
+        return r"(?<![A-Za-z0-9])Go(?![A-Za-z0-9+#])"
+    if term == "rest":
+        # REST as an API style is conventionally uppercase; lowercase "rest"
+        # is ordinary English and caused false positives in legal/job boilerplate.
+        return r"(?<![A-Za-z0-9])REST(?![A-Za-z0-9+#])"
     escaped = re.escape(term.lower()).replace(r"\ ", r"\s+")
     return rf"(?<![a-z0-9]){escaped}(?![a-z0-9])"
 

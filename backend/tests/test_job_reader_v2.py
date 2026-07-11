@@ -10,6 +10,7 @@ from app.models import Profile, ProfileSource
 from app.schemas import JobCreateIn
 from app.services import job_research
 from app.services.job_research import JOB_READER_VERSION, classify_requirements, extract_job_from_input
+from app.services.ontology import extract_skills
 from app.services.jobs import create_or_analyze_job
 from app.services.profile import analyze_profile
 
@@ -57,7 +58,13 @@ def test_json_ld_url_only_extracts_job_identity(monkeypatch):
         "title": "Backend Engineer",
         "description": description,
         "hiringOrganization": {"name": "Example Labs"},
-        "jobLocation": {"address": {"addressLocality": "Tel Aviv", "addressCountry": "Israel"}},
+        "jobLocation": {
+            "address": {
+                "addressLocality": "Tel Aviv",
+                "addressRegion": "Tel Aviv District,Israel",
+                "addressCountry": {"@type": "Country", "name": "Israel"},
+            }
+        },
         "url": "https://example.com/jobs/123"
     })}
     </script></head><body></body></html>
@@ -69,7 +76,7 @@ def test_json_ld_url_only_extracts_job_identity(monkeypatch):
 
     assert job.company == "Example Labs"
     assert job.role == "Backend Engineer"
-    assert job.location == "Tel Aviv, Israel"
+    assert job.location == "Tel Aviv, Tel Aviv District, Israel"
     assert job.requirements.min_years_experience == 2
     assert job.requirements.reader_version == JOB_READER_VERSION
     assert job.source_confidence >= 0.8
@@ -136,6 +143,33 @@ def test_metadata_recovers_identity_and_description_from_provider_error_page(mon
     assert job.role == "Senior Product Designer"
     assert len(job.description_text) >= 500
     assert job.requirements.min_years_experience == 5
+
+
+def test_comeet_generic_title_uses_role_part(monkeypatch):
+    description = (
+        "Cyber R&D Python Developer. Responsibilities: Design production-grade services. "
+        "The Dream Skill Set: 5+ years of experience with Python. "
+        "Understand and troubleshoot networking and routing. " * 3
+    )
+    html = f"""
+    <html><head>
+      <title>Join Our Team | Python Developer</title>
+      <meta property="og:title" content="Join Our Team | Python Developer">
+    </head><body><main>{description}</main></body></html>
+    """
+    monkeypatch.setattr(job_research, "validate_public_job_url", lambda _: None)
+    monkeypatch.setattr(job_research, "_fetch", lambda _: html)
+
+    job = extract_job_from_input(
+        "https://dreamgroup.com/comeet-positions/python-developer-7296b",
+        "",
+        "",
+        "",
+    )
+
+    assert job.role == "Python Developer"
+    assert job.requirements.min_years_experience == 5
+    assert "python" in job.requirements.must_have_skills
 
 
 def test_greenhouse_company_can_come_from_document_title(monkeypatch):
@@ -217,6 +251,40 @@ def test_alternative_languages_and_experience_are_typed():
     assert len(requirements.skill_groups) == 1
     assert requirements.skill_groups[0].mode == "one_of"
     assert requirements.skill_groups[0].skills == ["python", "c", "c++", "java", "javascript"]
+
+
+def test_internship_graduation_remaining_is_not_professional_experience():
+    requirements = classify_requirements(
+        """
+        General Summary:
+        Design and develop tools for embedded systems validation.
+        Key Responsibilities:
+        Implement tools and scripts (primarily in Python) to improve test efficiency.
+        Minimum Qualifications
+        · Student pursuing a B.Sc. in Computer Science, Software Engineering, or Electrical Engineering
+        · At least 2 year remaining until graduation | Minimum 3 days a week at office
+        · Strong programming skills (Python preferred)
+        Preferred Qualifications
+        · Experience or coursework in AI / Machine Learning / Data Analysis
+        · Experience with Git or other version control systems
+        """,
+        "Intern FY27 - System Integration and Testing Intern - Haifa",
+    )
+
+    assert requirements.min_years_experience == 0
+    assert requirements.experience_requirement_known is True
+    assert requirements.seniority == "student"
+    assert requirements.availability == "2 years remaining until graduation, minimum 3 days/week onsite"
+    assert requirements.education == "B.Sc. student in Computer Science / Software Engineering / Electrical Engineering"
+    assert "python" not in requirements.must_have_skills
+    assert "python" in requirements.preferred_skills
+    assert "git" in requirements.preferred_skills
+
+
+def test_go_and_rest_common_words_are_not_skills():
+    assert extract_skills("Ready to go through support issues for Gong customers.") == []
+    assert extract_skills("Rest assured that the hiring process is accessible.") == []
+    assert extract_skills("Experience with Go and REST API services.") == ["go", "rest api"]
 
 
 def test_written_and_ranged_experience_use_the_required_minimum():

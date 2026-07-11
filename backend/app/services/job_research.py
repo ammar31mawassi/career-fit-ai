@@ -20,7 +20,7 @@ USER_AGENT = (
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36"
 )
 
-JOB_READER_VERSION = "reader-v2.0.0"
+JOB_READER_VERSION = "reader-v2.1.0"
 
 CAREER_HINTS = ("career", "careers", "job", "jobs", "position", "greenhouse", "lever", "workday", "comeet", "workable")
 MUST_HINTS = ("must", "required", "requirements", "qualification", "you have", "minimum", "mandatory")
@@ -202,7 +202,7 @@ def classify_requirements(text: str, role: str = "") -> JobRequirements:
             ],
         ]
     )
-    min_years, experience_known = _experience_requirement(lower)
+    min_years, experience_known = _experience_requirement(f"{role.lower()} {lower}")
 
     return JobRequirements(
         must_have_skills=must_have,
@@ -419,10 +419,15 @@ def _json_ld_location(posting: dict) -> str:
         address = location.get("address") or {}
         if not isinstance(address, dict):
             continue
-        values.extend(
-            str(address.get(key) or "")
-            for key in ("addressLocality", "addressRegion", "addressCountry")
-        )
+        for key in ("addressLocality", "addressRegion", "addressCountry"):
+            value = address.get(key) or ""
+            if isinstance(value, dict):
+                value = value.get("name") or value.get("identifier") or value.get("value") or ""
+            if isinstance(value, list):
+                value = ", ".join(str(item) for item in value if item)
+            if value:
+                parts = [part.strip() for part in str(value).split(",") if part.strip()]
+                values.extend(parts or [str(value)])
     if str(posting.get("jobLocationType") or "").upper() == "TELECOMMUTE":
         values.append("Remote")
     return ", ".join(_dedupe([clean_text(value) for value in values if value])) or "Not specified"
@@ -438,6 +443,7 @@ def _normalize_job_text(value: str) -> str:
     value = html.unescape(value).replace("\u00a0", " ")
     value = re.sub(r"(?i)<br\s*/?>|</(?:p|div|li|h[1-6])>", "\n", value)
     value = re.sub(r"<[^>]+>", " ", value)
+    value = re.sub(r"[\u2022\u25cf\u25aa\u25e6\u00b7]", "\n• ", value)
     value = re.sub(r"[•●▪◦]", "\n• ", value)
     lines = [re.sub(r"[ \t]+", " ", line).strip(" \t") for line in value.splitlines()]
     output: list[str] = []
@@ -507,7 +513,7 @@ def _requirement_completeness(requirements: JobRequirements, text: str) -> float
     return round(sum(checks) / len(checks), 3)
 
 
-def _requirement_segments(text: str) -> list[tuple[str, str]]:
+def _requirement_segments_legacy(text: str) -> list[tuple[str, str]]:
     text = re.sub(
         r"\s+[\u2013\u2014-]\s*(must|required|mandatory|advantage|preferred)\b",
         lambda match: f" {match.group(0).strip()}.\n",
@@ -543,6 +549,69 @@ def _requirement_segments(text: str) -> list[tuple[str, str]]:
             current = "nice"
         elif re.match(r"^(responsibilities|what you(?:'|’)ll do)\s*:", lower):
             current = "responsibility"
+
+        priority = current
+        if any(hint in lower for hint in NICE_HINTS):
+            priority = "nice"
+        elif any(hint in lower for hint in PREFERRED_HINTS):
+            priority = "preferred"
+        elif any(hint in lower for hint in MUST_HINTS):
+            priority = "must"
+        segments.append((priority, segment))
+    return segments
+
+
+def _requirement_segments(text: str) -> list[tuple[str, str]]:
+    normalized = re.sub(r"[\u2022\u25cf\u25aa\u25e6\u00b7]", "\n• ", text)
+    normalized = re.sub(
+        r"\s+[\u2013\u2014-]\s*(must|required|mandatory|advantage|preferred)\b",
+        lambda match: f" {match.group(0).strip()}.\n",
+        normalized,
+        flags=re.IGNORECASE,
+    )
+    heading_pattern = re.compile(
+        r"(?im)(^|\n)\s*("
+        r"preferred\s+qualifications?|minimum\s+qualifications?|basic\s+qualifications?|required\s+qualifications?|"
+        r"key\s+responsibilities|responsibilities|what\s+you(?:'|’|â€™)ll\s+do|"
+        r"nice[- ]to[- ]have|requirements?|qualifications?|general\s+summary|about\s+the\s+position|the\s+dream\s+skill\s+set"
+        r")\s*:?"
+    )
+    normalized = heading_pattern.sub(lambda match: f"\n{match.group(2)}:", normalized)
+    raw_parts = re.split(r"\n+|[•*â€¢]|(?<=[.!?;])\s+", normalized)
+    current = "unspecified"
+    segments: list[tuple[str, str]] = []
+    for raw in raw_parts:
+        segment = clean_text(raw)
+        if not segment:
+            continue
+        lower = segment.lower()
+        heading_only = lower.rstrip(":").strip()
+        if re.match(r"^(general summary|about the position)\s*:", lower):
+            current = "unspecified"
+            if heading_only in {"general summary", "about the position"}:
+                continue
+        elif re.match(r"^(key responsibilities|responsibilities|what you(?:'|â€™|’)ll do)\s*:", lower):
+            current = "responsibility"
+            if re.match(r"^(key responsibilities|responsibilities|what you(?:'|â€™|’)ll do)$", heading_only):
+                continue
+        elif re.match(r"^preferred\s+qualifications?\s*:", lower):
+            current = "preferred"
+            if re.match(r"^preferred\s+qualifications?$", heading_only):
+                continue
+        elif re.match(r"^nice[- ]to[- ]have\s*:", lower):
+            current = "nice"
+            if re.match(r"^nice[- ]to[- ]have$", heading_only):
+                continue
+        elif re.match(
+            r"^(minimum qualifications?|basic qualifications?|required qualifications?|requirements?|qualifications?|the dream skill set)\s*:",
+            lower,
+        ):
+            current = "must"
+            if re.match(
+                r"^(minimum qualifications?|basic qualifications?|required qualifications?|requirements?|qualifications?|the dream skill set)$",
+                heading_only,
+            ):
+                continue
 
         priority = current
         if any(hint in lower for hint in NICE_HINTS):
@@ -631,7 +700,7 @@ def _skills_from_sentences(sentences: list[str]) -> list[str]:
     return _dedupe([skill for sentence in sentences for skill in extract_skills(sentence)])
 
 
-def _experience_requirement(lower: str) -> tuple[float, bool]:
+def _experience_requirement_legacy(lower: str) -> tuple[float, bool]:
     number_words = {
         "one": "1",
         "two": "2",
@@ -683,6 +752,110 @@ def _experience_requirement(lower: str) -> tuple[float, bool]:
     return 0.0, False
 
 
+def _experience_requirement(lower: str) -> tuple[float, bool]:
+    number_words = {
+        "one": "1",
+        "two": "2",
+        "three": "3",
+        "four": "4",
+        "five": "5",
+        "six": "6",
+        "seven": "7",
+        "eight": "8",
+        "nine": "9",
+        "ten": "10",
+    }
+    normalized = re.sub(
+        r"\b(?:" + "|".join(number_words) + r")\b",
+        lambda match: number_words[match.group(0)],
+        lower,
+    )
+    year_patterns = (
+        re.compile(
+            r"\b(\d+(?:\.\d+)?)\s*(?:[-\u2013\u2014]|\bto\b)\s*"
+            r"(\d+(?:\.\d+)?)\+?\s*(?:years?|yrs)\b"
+        ),
+        re.compile(
+            r"\b(\d+(?:\.\d+)?)\+?\s*(?:years?|yrs)(?:\s+of)?\s+"
+            r"(?:[a-z][a-z0-9+#./-]*\s+){0,5}experience\b"
+        ),
+        re.compile(
+            r"\b(\d+(?:\.\d+)?)\+?\s*(?:years?|yrs)\s+"
+            r"(?:working|developing|building|using|with|in)\b"
+        ),
+        re.compile(r"\b(?:minimum|at least)\s+(\d+(?:\.\d+)?)\+?\s*(?:years?|yrs)\b"),
+    )
+    values: list[float] = []
+    occupied_ranges: list[tuple[int, int]] = []
+    for index, pattern in enumerate(year_patterns):
+        for match in pattern.finditer(normalized):
+            span = match.span()
+            if index > 0 and any(span[0] < end and span[1] > start for start, end in occupied_ranges):
+                continue
+            if _is_professional_years_context(normalized, match.start(), match.end()):
+                values.append(float(match.group(1)))
+                if index == 0:
+                    occupied_ranges.append(span)
+    if values:
+        return max(values), True
+    if any(
+        term in lower
+        for term in (
+            "no experience required",
+            "no previous experience",
+            "entry level",
+            "entry-level",
+            "student position",
+            "internship",
+        )
+    ) or re.search(r"\b(intern|student role|student job)\b", lower[:4000]):
+        return 0.0, True
+    return 0.0, False
+
+
+def _is_professional_years_context(text: str, start: int, end: int) -> bool:
+    left = max(text.rfind(separator, 0, start) for separator in ("\n", ".", ";", "|", "•"))
+    right_candidates = [
+        position
+        for separator in ("\n", ".", ";", "|", "•")
+        for position in [text.find(separator, end)]
+        if position != -1
+    ]
+    right = min(right_candidates) if right_candidates else min(len(text), end + 180)
+    sentence = text[left + 1 : right].lower()
+    non_experience_terms = (
+        "remaining until graduation",
+        "left until graduation",
+        "until graduation",
+        "semesters remaining",
+        "semesters left",
+        "days a week",
+        "days per week",
+        "day a week",
+        "day per week",
+        "at office",
+        "at the office",
+        "in office",
+        "onsite",
+    )
+    if any(term in sentence for term in non_experience_terms):
+        return False
+    professional_terms = (
+        "experience",
+        "professional",
+        "industry",
+        "commercial",
+        "production",
+        "software development",
+        "working",
+        "developing",
+        "building",
+        "using",
+        "hands-on",
+    )
+    return any(term in sentence for term in professional_terms)
+
+
 def _min_years(lower: str) -> float:
     return _experience_requirement(lower)[0]
 
@@ -705,8 +878,17 @@ def _seniority(role: str, lower: str, min_years: float) -> str:
 
 
 def _education(lower: str) -> str:
+    fields: list[str] = []
     if "computer science" in lower:
-        return "Computer Science"
+        fields.append("Computer Science")
+    if "software engineering" in lower:
+        fields.append("Software Engineering")
+    if "electrical engineering" in lower:
+        fields.append("Electrical Engineering")
+    if fields and any(term in lower for term in ("student pursuing", "pursuing a b.sc", "pursuing b.sc", "currently pursuing")):
+        return "B.Sc. student in " + " / ".join(_dedupe(fields))
+    if fields:
+        return " / ".join(_dedupe(fields))
     if "b.sc" in lower or "bachelor" in lower or "degree" in lower:
         return "Relevant degree"
     return ""
@@ -768,13 +950,33 @@ def _work_authorization(lower: str) -> str:
 
 
 def _availability(lower: str) -> str:
+    values: list[str] = []
     if "full-time" in lower or "full time" in lower:
-        return "full-time"
+        values.append("full-time")
     if "part-time" in lower or "part time" in lower:
-        return "part-time"
+        values.append("part-time")
     if "immediate start" in lower or "start immediately" in lower:
-        return "immediate"
-    return ""
+        values.append("immediate")
+    graduation_years = re.search(
+        r"\b(?:at least|minimum)?\s*(\d+(?:\.\d+)?)\s*years?\s+(?:remaining|left)\s+until\s+graduation\b",
+        lower,
+    )
+    if graduation_years:
+        amount = graduation_years.group(1).rstrip("0").rstrip(".")
+        values.append(f"{amount} years remaining until graduation")
+    graduation_semesters = re.search(
+        r"\b(?:at least|minimum)?\s*(\d+)\s*semesters?\s+(?:remaining|left)\b",
+        lower,
+    )
+    if graduation_semesters:
+        values.append(f"{graduation_semesters.group(1)} semesters remaining")
+    onsite_days = re.search(
+        r"\b(?:minimum|at least)\s+(\d+)\s+days?\s+(?:a|per)?\s*week(?:\s+(?:at|in)\s+(?:the\s+)?office|\s+onsite)?\b",
+        lower,
+    )
+    if onsite_days:
+        values.append(f"minimum {onsite_days.group(1)} days/week onsite")
+    return ", ".join(_dedupe(values))
 
 
 def _summary(sentences: list[str]) -> str:
@@ -927,10 +1129,51 @@ def _company_from_url(url: str) -> str:
     return company.upper() if len(company) <= 4 and company.isalpha() else company
 
 
-def _role_from_title(title: str) -> str:
+def _role_from_title_legacy(title: str) -> str:
     title = clean_text(title)
     title = re.split(r"\s+[|–—-]\s+", title)[0]
     return title[:180] or "Unknown Role"
+
+
+def _role_from_title(title: str) -> str:
+    title = clean_text(title)
+    parts = [clean_text(part) for part in re.split(r"\s+(?:[|]|\u2013|\u2014|-)\s+", title) if clean_text(part)]
+    if not parts:
+        return title[:180] or "Unknown Role"
+    generic_titles = {
+        "join our team",
+        "careers",
+        "jobs",
+        "job openings",
+        "current openings",
+        "collaborative recruiting",
+    }
+    role_terms = (
+        "engineer",
+        "developer",
+        "intern",
+        "student",
+        "analyst",
+        "researcher",
+        "tester",
+        "qa",
+        "manager",
+        "designer",
+        "architect",
+        "specialist",
+        "scientist",
+    )
+    for part in parts:
+        lower = part.lower()
+        if lower in generic_titles or lower.endswith(" careers"):
+            continue
+        if any(term in lower for term in role_terms):
+            return part[:180]
+    for part in parts:
+        lower = part.lower()
+        if lower not in generic_titles and not lower.endswith(" careers"):
+            return part[:180]
+    return parts[0][:180] or "Unknown Role"
 
 
 def _role_from_text(text: str) -> str:
