@@ -28,6 +28,7 @@ from ..schemas import (
     ProfileSourcesIn,
 )
 from .ontology import canonical_skill, extract_skills, infer_domain, skill_domain
+from .document_reader import PDF_PARSER_VERSION, read_pdf_document
 from .profile_extraction import (
     EXTRACTOR_VERSION,
     ExtractedFact,
@@ -36,7 +37,7 @@ from .profile_extraction import (
     fact_key,
 )
 from .storage import load_private_file, save_private_file
-from .text import PDF_PARSER_VERSION, read_pdf_text, safe_filename
+from .text import safe_filename
 
 
 PROJECT_HINTS = (
@@ -110,13 +111,13 @@ def upload_cv_source(session: Session, user_id: UUID, filename: str, data: bytes
     profile = get_or_create_profile(session, user_id)
     cleaned_filename = safe_filename(filename)
     storage_path = save_private_file(user_id, f"cv-{cleaned_filename}", data, "application/pdf")
-    parsed_text = read_pdf_text(data)
+    read_result = read_pdf_document(data)
     existing = _source_by_type(session, profile, "cv")
     source = existing or ProfileSource(user_id=user_id, profile_id=profile.id or 0, source_type="cv")
     source.title = cleaned_filename
     source.storage_path = storage_path
-    source.content_text = parsed_text
-    source.metadata_json = json.dumps({"filename": cleaned_filename, "chars": len(parsed_text), "parser_version": PDF_PARSER_VERSION})
+    source.content_text = read_result.text
+    source.metadata_json = json.dumps({"filename": cleaned_filename, **read_result.metadata()}, sort_keys=True)
     source.updated_at = _now()
     profile.status = "needs_analysis"
     profile.updated_at = _now()
@@ -130,7 +131,7 @@ def upload_linkedin_pdf_source(session: Session, user_id: UUID, filename: str, d
     profile = get_or_create_profile(session, user_id)
     cleaned_filename = safe_filename(filename)
     storage_path = save_private_file(user_id, f"linkedin-{cleaned_filename}", data, "application/pdf")
-    parsed_text = read_pdf_text(data)
+    read_result = read_pdf_document(data)
     source = _source_by_type(session, profile, "linkedin_pdf") or ProfileSource(
         user_id=user_id,
         profile_id=profile.id or 0,
@@ -138,10 +139,10 @@ def upload_linkedin_pdf_source(session: Session, user_id: UUID, filename: str, d
     )
     source.title = cleaned_filename
     source.storage_path = storage_path
-    source.content_text = parsed_text
-    source.metadata_json = json.dumps({"filename": cleaned_filename, "chars": len(parsed_text), "parser_version": PDF_PARSER_VERSION})
+    source.content_text = read_result.text
+    source.metadata_json = json.dumps({"filename": cleaned_filename, **read_result.metadata()}, sort_keys=True)
     source.updated_at = _now()
-    profile.linkedin_text = parsed_text[:50000]
+    profile.linkedin_text = read_result.text[:50000]
     profile.status = "needs_analysis"
     profile.updated_at = _now()
     session.add(source)
@@ -595,11 +596,9 @@ def _refresh_pdf_sources(session: Session, sources: list[ProfileSource]) -> None
         data = load_private_file(source.storage_path)
         if not data:
             continue
-        parsed_text = read_pdf_text(data)
-        if not parsed_text:
-            continue
-        source.content_text = parsed_text
-        metadata.update({"chars": len(parsed_text), "parser_version": PDF_PARSER_VERSION})
+        read_result = read_pdf_document(data)
+        source.content_text = read_result.text
+        metadata.update(read_result.metadata())
         source.metadata_json = json.dumps(metadata, sort_keys=True)
         source.updated_at = _now()
         session.add(source)

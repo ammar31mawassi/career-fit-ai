@@ -32,8 +32,8 @@ from .agent_workflows import (
     start_step,
 )
 from .job_research import JOB_READER_VERSION, extract_job_from_input, requirements_from_json
-from .matcher import score_match
 from .profile import candidate_snapshot, get_or_create_profile
+from .scoring import get_match_scorer
 
 
 def create_or_analyze_job(session: Session, user_id: UUID, payload: JobCreateIn) -> JobOut:
@@ -214,19 +214,6 @@ def list_jobs(session: Session, user_id: UUID, query: str = "", limit: int = 100
     )
     matches_by_job = {match.job_id: match for match in matches}
 
-    # A profile edit invalidates its saved scores. Recalculate only stale rows, then
-    # batch-load the related data instead of issuing several queries for every job.
-    profile = session.exec(select(Profile).where(Profile.user_id == user_id)).first()
-    if profile and profile.status == "ready":
-        stale_jobs = [
-            job for job in jobs
-            if job.id is not None
-            and (match := matches_by_job.get(job.id))
-            and _is_after(profile.updated_at, match.analyzed_at)
-        ]
-        for job in stale_jobs:
-            matches_by_job[job.id or 0] = _save_match(session, user_id, profile, job)
-
     match_ids = [match.id for match in matches_by_job.values() if match.id is not None]
     advice_by_match: dict[int, ResumeAdvice] = {}
     events_by_match: dict[int, list[JobStatusEvent]] = {match_id: [] for match_id in match_ids}
@@ -300,20 +287,6 @@ def list_job_summaries(session: Session, user_id: UUID, query: str = "", limit: 
     )
     matches_by_job = {match.job_id: match for match in matches}
 
-    profile = session.exec(select(Profile).where(Profile.user_id == user_id)).first()
-    if profile and profile.status == "ready":
-        stale_ids = [
-            job_id
-            for job_id in job_ids
-            if (match := matches_by_job.get(job_id)) and _is_after(profile.updated_at, match.analyzed_at)
-        ]
-        if stale_ids:
-            stale_jobs = session.exec(
-                select(Job).where(Job.user_id == user_id, Job.id.in_(stale_ids))
-            ).all()
-            for stale_job in stale_jobs:
-                matches_by_job[stale_job.id or 0] = _save_match(session, user_id, profile, stale_job)
-
     return [_summary_from_row(row, matches_by_job.get(int(row[0]))) for row in rows]
 
 
@@ -345,7 +318,13 @@ def update_job_status(session: Session, user_id: UUID, job_id: int, status: str)
 def _save_match(session: Session, user_id: UUID, profile: Profile, job: Job) -> JobMatch:
     requirements = requirements_from_json(job.requirements_json)
     snapshot = candidate_snapshot(session, profile)
-    result = score_match(snapshot, job.company, job.role, requirements, job.source_confidence)
+    result = get_match_scorer().score(
+        snapshot,
+        job.company,
+        job.role,
+        requirements,
+        job.source_confidence,
+    )
     match = session.exec(select(JobMatch).where(JobMatch.user_id == user_id, JobMatch.job_id == job.id)).first()
     if match is None:
         match = JobMatch(user_id=user_id, job_id=job.id or 0)

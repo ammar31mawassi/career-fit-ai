@@ -240,6 +240,12 @@ class JobOut(BaseModel):
     agent_run: AgentRunOut | None = None
 
 
+class WorkspaceBootstrapOut(BaseModel):
+    user_id: str
+    profile: ProfileOut
+    jobs: list[JobSummaryOut] = Field(default_factory=list)
+
+
 class JobCreateIn(BaseModel):
     source_url: str = Field(default="", max_length=2000)
     company: str = Field(default="", max_length=160)

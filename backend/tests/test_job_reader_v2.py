@@ -281,6 +281,58 @@ def test_internship_graduation_remaining_is_not_professional_experience():
     assert "git" in requirements.preferred_skills
 
 
+def test_teamme_uses_richer_dom_without_turning_tech_context_into_must_haves(monkeypatch):
+    html = """
+    <html><head>
+      <title>Backend Tech Lead - Quantum Machines | Teamme.link</title>
+      <meta property="og:title" content="Backend Tech Lead - Quantum Machines">
+      <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "JobPosting",
+        "title": "Backend Tech Lead",
+        "hiringOrganization": {"@type": "Organization", "name": "Quantum Machines"},
+        "jobLocation": {"@type": "Place", "address": {"addressLocality": "Tel Aviv-Yafo", "addressCountry": "IL"}},
+        "description": "Backend Tech Lead at Quantum Machines. We are a global leader in quantum control systems. Apply for the Backend Tech Lead role.",
+        "url": "https://qm.teamme.link/jobs/13.05B"
+      }
+      </script>
+    </head><body><main>
+      <h1>Backend Tech Lead</h1>
+      <p>Quantum Machines</p><p>Israel, Tel Aviv Office</p><p>Hybrid</p>
+      <h2>Requirements</h2>
+      <p>We are looking for a hands-on Tech Lead to drive the technical direction of the core backend layer over the company's flagship product and lead the engineers building it.</p>
+      <p>The systems handle bursty, high-throughput workloads with strict latency requirements, distributed coordination, and hard concurrency problems.</p>
+      <h2>What Makes This Role Different</h2>
+      <p>Our backend team is the orchestration layer between hardware control systems (C++), a client SDK (Python), reporting systems (Go), and business logic (Java, Kotlin and Spring).</p>
+      <h2>What You'll Own</h2>
+      <ul>
+        <li>Technical direction: architecture, concurrency models, resource pooling, distributed coordination and API boundaries.</li>
+        <li>Design quality: lead design reviews and raise the engineering bar.</li>
+        <li>Team growth: mentor engineers through design conversations and code reviews.</li>
+        <li>Cross-team alignment across C++, Python and Go teams.</li>
+        <li>Production ownership and root-cause analysis.</li>
+      </ul>
+    </main></body></html>
+    """
+    monkeypatch.setattr(job_research, "validate_public_job_url", lambda _: None)
+    monkeypatch.setattr(job_research, "_fetch", lambda _: html)
+
+    job = extract_job_from_input("https://qm.teamme.link/jobs/13.05B", "", "", "")
+
+    assert job.company == "Quantum Machines"
+    assert job.role == "Backend Tech Lead"
+    assert len(job.description_text) > 900
+    assert "What You'll Own" in job.description_text
+    assert job.requirements.seniority == "senior"
+    assert job.requirements.min_years_experience == 0
+    assert job.requirements.experience_requirement_known is False
+    assert not {"c++", "python", "go", "java", "kotlin", "spring"}.intersection(
+        job.requirements.must_have_skills
+    )
+    assert job.requirements.responsibilities
+
+
 def test_go_and_rest_common_words_are_not_skills():
     assert extract_skills("Ready to go through support issues for Gong customers.") == []
     assert extract_skills("Rest assured that the hiring process is accessible.") == []

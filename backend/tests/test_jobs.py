@@ -4,8 +4,11 @@ from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel, create_engine, select
 from uuid import UUID
 
+import pytest
 from app.models import AgentRun, AgentStep, Job, Profile, ProfileFact, ProfileSource
 from app.schemas import JobCreateIn
+from app.api.routes import workspace_bootstrap
+from app.services import jobs as jobs_service
 from app.services.jobs import create_or_analyze_job, list_job_summaries, list_jobs, update_job_status
 from app.services.profile import analyze_profile
 
@@ -205,6 +208,55 @@ def test_job_summaries_omit_heavy_detail_but_keep_match_signal():
     assert not hasattr(summary, "description_text")
     assert not hasattr(summary.match, "resume_advice")
     assert [item.id for item in skill_summaries] == [job.id]
+
+
+def test_job_lists_never_recalculate_matches(monkeypatch):
+    engine = _engine()
+    SQLModel.metadata.create_all(engine)
+    with Session(engine) as session:
+        _ready_profile(session)
+        job = create_or_analyze_job(
+            session,
+            USER_ID,
+            JobCreateIn(
+                company="Read Only Co",
+                role="Backend Developer",
+                description_text="Requirements: Python and SQL.",
+            ),
+        )
+        monkeypatch.setattr(
+            jobs_service,
+            "_save_match",
+            lambda *_: pytest.fail("list endpoint attempted to mutate a match"),
+        )
+
+        summaries = list_job_summaries(session, USER_ID)
+        full_jobs = list_jobs(session, USER_ID)
+
+    assert [item.id for item in summaries] == [job.id]
+    assert [item.id for item in full_jobs] == [job.id]
+
+
+def test_workspace_bootstrap_returns_profile_and_lightweight_jobs():
+    engine = _engine()
+    SQLModel.metadata.create_all(engine)
+    with Session(engine) as session:
+        _ready_profile(session)
+        job = create_or_analyze_job(
+            session,
+            USER_ID,
+            JobCreateIn(
+                company="Bootstrap Co",
+                role="Backend Developer",
+                description_text="Requirements: Python and SQL.",
+            ),
+        )
+
+        result = workspace_bootstrap(50, USER_ID, session)
+
+    assert result.user_id == str(USER_ID)
+    assert result.profile.status == "ready"
+    assert [item.id for item in result.jobs] == [job.id]
 
 
 def test_job_scan_records_agent_workflow_trace():

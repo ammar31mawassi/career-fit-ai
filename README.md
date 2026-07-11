@@ -9,7 +9,7 @@ The beta does not use OpenAI, ChatGPT, or another hosted generative model. Profi
 
 ## Scope
 
-- Public beta accounts through Supabase Auth, protected by lightweight signup/API rate limits.
+- Public beta accounts through Supabase Auth, protected by atomic Postgres-backed signup/API rate limits.
 - First-use onboarding plus authenticated Home and Profile pages.
 - One required CV PDF.
 - Optional GitHub, LinkedIn PDF/text, and manual notes.
@@ -20,6 +20,8 @@ The beta does not use OpenAI, ChatGPT, or another hosted generative model. Profi
 - Twenty-four evidence-backed About templates selected by career stage and role family.
 - Lead, Applied, Interview, Rejected, Withdrawn, and Offer outcome history.
 - Resume advice for each job: projects, skill order, and a fitting About section.
+- Cached JWKS token verification and a one-call workspace bootstrap for faster authenticated loading.
+- Scanned-PDF detection with an optional private OCR fallback configured through `OCR_SERVICE_URL`.
 
 Out of scope for v1: Goozali scanning, Gmail, WhatsApp, automatic applications, multiple CVs, and LinkedIn scraping.
 

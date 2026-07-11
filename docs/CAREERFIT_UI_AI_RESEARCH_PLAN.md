@@ -22,6 +22,28 @@ The highest-priority technical work is not fine-tuning. It is:
 4. Improve extraction and fact reconciliation with embeddings and confidence gates.
 5. Add calibrated supervised models only after enough reviewed data exists.
 
+## Implementation status — 2026-07-11
+
+Completed in the current roadmap patch:
+
+- User-scoped workspace caches with logout/login invalidation.
+- One-call authenticated workspace bootstrap for profile + lightweight job summaries.
+- Cached JWKS verification for asymmetric Supabase tokens, with a legacy-key fallback.
+- Atomic Postgres-backed public-beta rate limits in a private schema.
+- Read-only job lists: list/search no longer recalculate and commit stale matches.
+- Job reader v2.2 source fusion, including a TeamMe regression fixture and live-link verification.
+- Replaceable `MatchScorer` boundary around the deterministic scorer.
+- OCR-ready document reader: scanned PDFs are detected and can use a configured private OCR service.
+- First module split for Home, profile review, job source selection, document reading, and scoring.
+
+Next implementation slice:
+
+- Replace synchronous scans with a Supabase Queue worker and real persisted progress polling.
+- Finish splitting profile extraction/reconciliation and requirement parsing/advice modules.
+- Split global CSS into tokens, shared primitives, Home, Profile, and responsive layers.
+- Add pagination/ETags and correction controls for extracted job requirements.
+- Deploy a small OCR worker, benchmark it on anonymized scanned CV fixtures, then enable the fallback.
+
 ## Research scope and limitations
 
 The audit covered:
@@ -511,6 +533,7 @@ Exit: Home becomes usable quickly without downloading every job detail.
 - Implement real progress updates and resumable failure states.
 - Add extraction-confidence gates and manual-description recovery.
 - Expand job-source test fixtures, especially Goozali and common ATS pages.
+- Design a later browser extension that submits the active tab's user-visible job text only when normal extraction is blocked; keep it out of the web MVP until the server-side fallback matrix is measured.
 
 Exit: closing/reloading the page does not lose a scan; low-quality extraction never silently produces a confident match.
 
@@ -520,6 +543,7 @@ Exit: closing/reloading the page does not lose a scan; low-quality extraction ne
 - Add conflict resolution and evidence comparison UI.
 - Capture all approve/edit/reject events as labeled feedback.
 - Improve onboarding review before allowing entry.
+- Deploy and benchmark the OCR worker for scanned CVs; preserve page provenance and flag low-confidence OCR facts for mandatory review.
 
 Exit: duplicate merge precision and fact extraction quality improve on the frozen benchmark.
 

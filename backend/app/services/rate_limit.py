@@ -6,7 +6,11 @@ from dataclasses import dataclass
 from threading import Lock
 
 from fastapi import Request
+from sqlalchemy import text
 from starlette.responses import JSONResponse
+
+from ..config import get_settings
+from ..database import engine
 
 
 @dataclass(frozen=True)
@@ -59,14 +63,15 @@ _buckets: dict[str, Bucket] = {}
 _lock = Lock()
 
 
-def rate_limit_key(request: Request, policy: RateLimitPolicy) -> str:
+def rate_limit_keys(request: Request, policy: RateLimitPolicy) -> list[str]:
     authorization = request.headers.get("authorization", "")
+    forwarded = request.headers.get("x-forwarded-for", "").split(",", 1)[0].strip()
+    address = forwarded or request.headers.get("x-real-ip") or (request.client.host if request.client else "unknown")
+    keys = [f"{policy.key}:ip:{hashlib.sha256(address.encode('utf-8')).hexdigest()[:24]}"]
     if authorization.lower().startswith("bearer "):
-        subject = "bearer:" + hashlib.sha256(authorization.encode("utf-8")).hexdigest()[:24]
-    else:
-        forwarded = request.headers.get("x-forwarded-for", "").split(",", 1)[0].strip()
-        subject = "ip:" + (forwarded or request.headers.get("x-real-ip") or (request.client.host if request.client else "unknown"))
-    return f"{policy.key}:{subject}"
+        token_digest = hashlib.sha256(authorization.encode("utf-8")).hexdigest()[:24]
+        keys.insert(0, f"{policy.key}:bearer:{token_digest}")
+    return keys
 
 
 def matching_policies(request: Request) -> list[RateLimitPolicy]:
@@ -85,6 +90,25 @@ def matching_policies(request: Request) -> list[RateLimitPolicy]:
 
 
 def check_rate_limit(request: Request) -> JSONResponse | None:
+    policies = matching_policies(request)
+    if not policies:
+        return None
+    settings = get_settings()
+    if settings.app_env == "production":
+        try:
+            for policy in policies:
+                for key in rate_limit_keys(request, policy):
+                    result = _consume_distributed(key, policy.limit, policy.window_seconds)
+                    if not result["allowed"]:
+                        return _limited_response(policy, result["retry_after"], result["remaining"])
+        except Exception:
+            return JSONResponse(
+                {"detail": "Request protection is temporarily unavailable. Try again shortly."},
+                status_code=503,
+                headers={"Retry-After": "10"},
+            )
+        return None
+
     now = time.time()
     expired_before = now - 24 * 60 * 60
     with _lock:
@@ -93,23 +117,52 @@ def check_rate_limit(request: Request) -> JSONResponse | None:
                 if bucket.reset_at < expired_before:
                     _buckets.pop(key, None)
 
-        for policy in matching_policies(request):
-            key = rate_limit_key(request, policy)
-            bucket = _buckets.get(key)
-            if bucket is None or bucket.reset_at <= now:
-                bucket = Bucket(count=0, reset_at=now + policy.window_seconds)
-                _buckets[key] = bucket
-            if bucket.count >= policy.limit:
-                retry_after = max(1, int(bucket.reset_at - now))
-                return JSONResponse(
-                    {"detail": f"Rate limit reached for {policy.key}. Try again later."},
-                    status_code=429,
-                    headers={
-                        "Retry-After": str(retry_after),
-                        "X-RateLimit-Limit": str(policy.limit),
-                        "X-RateLimit-Remaining": "0",
-                        "X-RateLimit-Reset": str(int(bucket.reset_at)),
-                    },
-                )
-            bucket.count += 1
+        for policy in policies:
+            for key in rate_limit_keys(request, policy):
+                bucket = _buckets.get(key)
+                if bucket is None or bucket.reset_at <= now:
+                    bucket = Bucket(count=0, reset_at=now + policy.window_seconds)
+                    _buckets[key] = bucket
+                if bucket.count >= policy.limit:
+                    retry_after = max(1, int(bucket.reset_at - now))
+                    return _limited_response(policy, retry_after, 0, reset_at=int(bucket.reset_at))
+                bucket.count += 1
     return None
+
+
+def _consume_distributed(key: str, limit: int, window_seconds: int) -> dict[str, int | bool]:
+    statement = text(
+        "select allowed, remaining, retry_after "
+        "from public.consume_rate_limit(:bucket_key, :request_limit, :window_seconds)"
+    )
+    with engine.begin() as connection:
+        row = connection.execute(
+            statement,
+            {"bucket_key": key, "request_limit": limit, "window_seconds": window_seconds},
+        ).mappings().one()
+    return {
+        "allowed": bool(row["allowed"]),
+        "remaining": int(row["remaining"]),
+        "retry_after": int(row["retry_after"]),
+    }
+
+
+def _limited_response(
+    policy: RateLimitPolicy,
+    retry_after: int,
+    remaining: int,
+    *,
+    reset_at: int | None = None,
+) -> JSONResponse:
+    headers = {
+        "Retry-After": str(max(1, retry_after)),
+        "X-RateLimit-Limit": str(policy.limit),
+        "X-RateLimit-Remaining": str(max(0, remaining)),
+    }
+    if reset_at is not None:
+        headers["X-RateLimit-Reset"] = str(reset_at)
+    return JSONResponse(
+        {"detail": f"Rate limit reached for {policy.key}. Try again later."},
+        status_code=429,
+        headers=headers,
+    )

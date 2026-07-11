@@ -13,7 +13,8 @@ import {
   type ReactNode,
   type SetStateAction
 } from "react";
-import { getJobSummaries, getProfile, type Profile, type TrackedJobSummary } from "@/lib/api";
+import { getJobSummaries, getProfile, getWorkspaceBootstrap, type Profile, type TrackedJobSummary } from "@/lib/api";
+import { createClient } from "@/lib/supabase/client";
 
 type AppData = {
   profile: Profile | null;
@@ -29,7 +30,7 @@ type AppData = {
 };
 
 const AppDataContext = createContext<AppData | null>(null);
-const WORKSPACE_CACHE_KEY = "careerfit:workspace:v3";
+const WORKSPACE_CACHE_PREFIX = "careerfit:workspace:v4:";
 const WORKSPACE_CACHE_TTL = 5 * 60 * 1000;
 
 type WorkspaceCache = {
@@ -38,13 +39,29 @@ type WorkspaceCache = {
   jobs: TrackedJobSummary[];
 };
 
-function readWorkspaceCache(): WorkspaceCache | null {
+function workspaceCacheKey(userId: string) {
+  return `${WORKSPACE_CACHE_PREFIX}${userId}`;
+}
+
+export function clearWorkspaceCaches() {
   try {
-    const raw = sessionStorage.getItem(WORKSPACE_CACHE_KEY);
+    for (let index = sessionStorage.length - 1; index >= 0; index -= 1) {
+      const key = sessionStorage.key(index);
+      if (key?.startsWith("careerfit:workspace:")) sessionStorage.removeItem(key);
+    }
+  } catch {
+    // Session storage is optional and may be unavailable in hardened browsers.
+  }
+}
+
+function readWorkspaceCache(userId: string): WorkspaceCache | null {
+  try {
+    const key = workspaceCacheKey(userId);
+    const raw = sessionStorage.getItem(key);
     if (!raw) return null;
     const cached = JSON.parse(raw) as WorkspaceCache;
     if (!cached.savedAt || Date.now() - cached.savedAt > WORKSPACE_CACHE_TTL) {
-      sessionStorage.removeItem(WORKSPACE_CACHE_KEY);
+      sessionStorage.removeItem(key);
       return null;
     }
     return cached;
@@ -57,6 +74,7 @@ export function AppDataProvider({ children }: { children: ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
   const cacheHydrated = useRef(false);
+  const [userId, setUserId] = useState<string | null | undefined>(undefined);
   const [profile, setProfile] = useState<Profile | null>(null);
   const [jobs, setJobs] = useState<TrackedJobSummary[]>([]);
   const [profileLoading, setProfileLoading] = useState(true);
@@ -87,15 +105,56 @@ export function AppDataProvider({ children }: { children: ReactNode }) {
 
   const refreshAll = useCallback(async () => {
     setDataError("");
-    const results = await Promise.allSettled([refreshProfile(), refreshJobs()]);
-    const failure = results.find((result) => result.status === "rejected");
-    if (failure?.status === "rejected") {
-      setDataError(failure.reason instanceof Error ? failure.reason.message : "Could not refresh your workspace.");
+    setProfileLoading(true);
+    setJobsLoading(true);
+    try {
+      const data = await getWorkspaceBootstrap();
+      setProfile(data.profile);
+      setJobs(data.jobs);
+    } catch (error) {
+      setDataError(error instanceof Error ? error.message : "Could not refresh your workspace.");
+      throw error;
+    } finally {
+      setProfileLoading(false);
+      setJobsLoading(false);
     }
-  }, [refreshJobs, refreshProfile]);
+  }, []);
 
   useEffect(() => {
-    if (pathname === "/login") {
+    let active = true;
+    try {
+      const supabase = createClient();
+      void supabase.auth.getSession().then(({ data }) => {
+        if (active) setUserId(data.session?.user.id ?? null);
+      });
+      const { data } = supabase.auth.onAuthStateChange((_event, session) => {
+        if (active) setUserId(session?.user.id ?? null);
+      });
+      return () => { active = false; data.subscription.unsubscribe(); };
+    } catch {
+      setUserId(null);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (userId === undefined) return;
+    cacheHydrated.current = false;
+    setProfile(null);
+    setJobs([]);
+    setDataError("");
+    if (!userId) {
+      clearWorkspaceCaches();
+      setProfileLoading(false);
+      setJobsLoading(false);
+    } else {
+      setProfileLoading(true);
+      setJobsLoading(true);
+    }
+  }, [userId]);
+
+  useEffect(() => {
+    if (userId === undefined) return;
+    if (pathname === "/login" || !userId) {
       setProfileLoading(false);
       setJobsLoading(false);
       return;
@@ -103,7 +162,7 @@ export function AppDataProvider({ children }: { children: ReactNode }) {
 
     if (!cacheHydrated.current) {
       cacheHydrated.current = true;
-      const cached = readWorkspaceCache();
+      const cached = readWorkspaceCache(userId);
       if (cached) {
         setProfile(cached.profile);
         setJobs(cached.jobs);
@@ -120,7 +179,7 @@ export function AppDataProvider({ children }: { children: ReactNode }) {
     } else if (pathname === "/") {
       void refreshAll();
     }
-  }, [pathname, refreshAll, refreshProfile]);
+  }, [pathname, refreshAll, refreshProfile, userId]);
 
   useEffect(() => {
     if (pathname === "/login" || profileLoading || !profile) return;
@@ -132,16 +191,16 @@ export function AppDataProvider({ children }: { children: ReactNode }) {
   }, [pathname, profile, profileLoading, router]);
 
   useEffect(() => {
-    if (pathname === "/login" || profileLoading || jobsLoading) return;
+    if (pathname === "/login" || !userId || profileLoading || jobsLoading) return;
     try {
       sessionStorage.setItem(
-        WORKSPACE_CACHE_KEY,
+        workspaceCacheKey(userId),
         JSON.stringify({ savedAt: Date.now(), profile, jobs } satisfies WorkspaceCache)
       );
     } catch {
       // A private in-memory session cache is an optimization, never a requirement.
     }
-  }, [jobs, jobsLoading, pathname, profile, profileLoading]);
+  }, [jobs, jobsLoading, pathname, profile, profileLoading, userId]);
 
   const value = useMemo(
     () => ({

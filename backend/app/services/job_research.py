@@ -11,6 +11,7 @@ import urllib.request
 from dataclasses import asdict, dataclass, field, replace
 from html.parser import HTMLParser
 
+from .job_reader.source_selection import choose_description
 from .ontology import ONTOLOGY_VERSION, extract_skills, infer_domain, skill_domain
 from .text import clean_text
 
@@ -20,7 +21,7 @@ USER_AGENT = (
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36"
 )
 
-JOB_READER_VERSION = "reader-v2.1.0"
+JOB_READER_VERSION = "reader-v2.2.0"
 
 CAREER_HINTS = ("career", "careers", "job", "jobs", "position", "greenhouse", "lever", "workday", "comeet", "workable")
 MUST_HINTS = ("must", "required", "requirements", "qualification", "you have", "minimum", "mandatory")
@@ -103,9 +104,10 @@ def extract_job_from_input(
         source = _structured_source(source_url, html_text)
         parser = _JobHtmlParser(source_url)
         parser.feed(html_text)
+        scoped_parts = parser.main_text_parts if len(" ".join(parser.main_text_parts)) >= 180 else parser.text_parts
+        dom_text = _normalize_job_text("\n".join(scoped_parts))[:20000]
         if source is None:
-            scoped_parts = parser.main_text_parts if len(" ".join(parser.main_text_parts)) >= 180 else parser.text_parts
-            text = _normalize_job_text("\n".join(scoped_parts))[:20000]
+            text = dom_text
             meta_text = _normalize_job_text(
                 parser.meta.get("og:description") or parser.meta.get("description") or ""
             )
@@ -129,13 +131,15 @@ def extract_job_from_input(
             location = _guess_location(text)
             application_link = _find_application_link(parser.links, source_url)
         else:
-            text = _normalize_job_text(source["description"])[:20000]
+            structured_text = _normalize_job_text(source["description"])[:20000]
+            selection = choose_description(structured_text, dom_text)
+            text = selection.text
             title = source["title"] or _extract_title(html_text) or parser.title or role
             guessed_company = company or source["company"] or _company_from_url(source_url)
             guessed_role = role or source["title"] or _role_from_title(title)
             location = source["location"] or _guess_location(text)
             application_link = source["application_link"] or _find_application_link(parser.links, source_url)
-            method = source["method"]
+            method = f"{source['method']}+scoped_html" if selection.used_dom else source["method"]
         text = _trim_provider_noise(text, source_url)
         confidence = _source_confidence(
             guessed_company, guessed_role, source_url, title, text, method
@@ -572,13 +576,16 @@ def _requirement_segments(text: str) -> list[tuple[str, str]]:
     heading_pattern = re.compile(
         r"(?im)(^|\n)\s*("
         r"preferred\s+qualifications?|minimum\s+qualifications?|basic\s+qualifications?|required\s+qualifications?|"
-        r"key\s+responsibilities|responsibilities|what\s+you(?:'|’|â€™)ll\s+do|"
-        r"nice[- ]to[- ]have|requirements?|qualifications?|general\s+summary|about\s+the\s+position|the\s+dream\s+skill\s+set"
+        r"key\s+responsibilities|responsibilities|what\s+you(?:'|’|â€™)ll\s+(?:do|own)|"
+        r"nice[- ]to[- ]have|requirements?|qualifications?|general\s+summary|about\s+the\s+position|about\s+(?:us|the\s+company)|"
+        r"what\s+makes\s+this\s+role\s+different|our\s+tech\s+stack|tech\s+stack|who\s+you\s+are|"
+        r"what\s+you(?:'|’|â€™)ll\s+bring|the\s+dream\s+skill\s+set"
         r")\s*:?"
     )
     normalized = heading_pattern.sub(lambda match: f"\n{match.group(2)}:", normalized)
     raw_parts = re.split(r"\n+|[•*â€¢]|(?<=[.!?;])\s+", normalized)
     current = "unspecified"
+    current_section = "unspecified"
     segments: list[tuple[str, str]] = []
     for raw in raw_parts:
         segment = clean_text(raw)
@@ -586,42 +593,95 @@ def _requirement_segments(text: str) -> list[tuple[str, str]]:
             continue
         lower = segment.lower()
         heading_only = lower.rstrip(":").strip()
-        if re.match(r"^(general summary|about the position)\s*:", lower):
+        if re.match(
+            r"^(general summary|about the position|about us|about the company|what makes this role different|our tech stack|tech stack)\s*:",
+            lower,
+        ):
             current = "unspecified"
-            if heading_only in {"general summary", "about the position"}:
+            current_section = "context"
+            if heading_only in {
+                "general summary",
+                "about the position",
+                "about us",
+                "about the company",
+                "what makes this role different",
+                "our tech stack",
+                "tech stack",
+            }:
                 continue
-        elif re.match(r"^(key responsibilities|responsibilities|what you(?:'|â€™|’)ll do)\s*:", lower):
+        elif re.match(r"^(key responsibilities|responsibilities|what you(?:'|â€™|’)ll (?:do|own))\s*:", lower):
             current = "responsibility"
-            if re.match(r"^(key responsibilities|responsibilities|what you(?:'|â€™|’)ll do)$", heading_only):
+            current_section = "responsibility"
+            if re.match(r"^(key responsibilities|responsibilities|what you(?:'|â€™|’)ll (?:do|own))$", heading_only):
                 continue
         elif re.match(r"^preferred\s+qualifications?\s*:", lower):
             current = "preferred"
+            current_section = "preferred"
             if re.match(r"^preferred\s+qualifications?$", heading_only):
                 continue
         elif re.match(r"^nice[- ]to[- ]have\s*:", lower):
             current = "nice"
+            current_section = "nice"
             if re.match(r"^nice[- ]to[- ]have$", heading_only):
                 continue
         elif re.match(
-            r"^(minimum qualifications?|basic qualifications?|required qualifications?|requirements?|qualifications?|the dream skill set)\s*:",
+            r"^(minimum qualifications?|basic qualifications?|required qualifications?|requirements?|qualifications?|who you are|what you(?:'|’|â€™)ll bring|the dream skill set)\s*:",
             lower,
         ):
             current = "must"
+            current_section = "generic_requirements" if re.match(r"^(requirements?|qualifications?)\s*:", lower) else "explicit_requirements"
             if re.match(
-                r"^(minimum qualifications?|basic qualifications?|required qualifications?|requirements?|qualifications?|the dream skill set)$",
+                r"^(minimum qualifications?|basic qualifications?|required qualifications?|requirements?|qualifications?|who you are|what you(?:'|’|â€™)ll bring|the dream skill set)$",
                 heading_only,
             ):
                 continue
 
         priority = current
+        contextual = (
+            priority == "must"
+            and current_section == "generic_requirements"
+            and _looks_like_role_context(segment)
+        )
+        if contextual:
+            priority = "unspecified"
         if any(hint in lower for hint in NICE_HINTS):
             priority = "nice"
         elif any(hint in lower for hint in PREFERRED_HINTS):
             priority = "preferred"
-        elif any(hint in lower for hint in MUST_HINTS):
+        elif not contextual and any(hint in lower for hint in MUST_HINTS):
             priority = "must"
         segments.append((priority, segment))
     return segments
+
+
+def _looks_like_role_context(segment: str) -> bool:
+    lower = segment.lower().strip()
+    if len(lower) < 120:
+        return False
+    if any(
+        cue in lower
+        for cue in (
+            "required",
+            "must have",
+            "minimum of",
+            "at least",
+            "years of experience",
+            "proficiency in",
+            "degree in",
+        )
+    ):
+        return False
+    return lower.startswith(
+        (
+            "we are ",
+            "we're ",
+            "our ",
+            "the systems",
+            "this role ",
+            "this position ",
+            "it is ",
+        )
+    )
 
 
 def _skill_groups(segments: list[tuple[str, str]]) -> list[RequirementGroup]:
@@ -1052,7 +1112,7 @@ def _source_confidence(
         score += 0.1
     if any(hint in visible for hint in ("apply", "requirements", "qualifications", "responsibilities", "experience")):
         score += 0.15
-    if method in {"json_ld", "workday_api"}:
+    if method.startswith("json_ld") or method == "workday_api":
         score += 0.15
     elif method == "pasted":
         score += 0.1

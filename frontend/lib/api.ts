@@ -189,6 +189,12 @@ export type ProfileAnalyzeResult = {
   open_questions: number;
 };
 
+export type WorkspaceBootstrap = {
+  user_id: string;
+  profile: Profile;
+  jobs: TrackedJobSummary[];
+};
+
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "/backend";
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
@@ -215,6 +221,10 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
 
 export function getProfile() {
   return request<Profile>("/api/profile");
+}
+
+export function getWorkspaceBootstrap() {
+  return request<WorkspaceBootstrap>("/api/workspace/bootstrap");
 }
 
 export function uploadCv(file: File) {

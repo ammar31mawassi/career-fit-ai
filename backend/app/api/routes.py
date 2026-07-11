@@ -18,6 +18,7 @@ from ..schemas import (
     ProfileOut,
     ProfilePreferencesIn,
     ProfileSourcesIn,
+    WorkspaceBootstrapOut,
 )
 from ..services.auth import current_user_id
 from ..services.jobs import create_or_analyze_job, job_output, list_job_summaries, list_jobs, update_job_status
@@ -41,6 +42,19 @@ router = APIRouter(prefix="/api")
 @router.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@router.get("/workspace/bootstrap", response_model=WorkspaceBootstrapOut)
+def workspace_bootstrap(
+    limit: int = Query(default=50, ge=1, le=100),
+    user_id: UUID = Depends(current_user_id),
+    session: Session = Depends(get_session),
+) -> WorkspaceBootstrapOut:
+    return WorkspaceBootstrapOut(
+        user_id=str(user_id),
+        profile=profile_output(session, user_id),
+        jobs=list_job_summaries(session, user_id, limit=limit),
+    )
 
 
 @router.get("/profile", response_model=ProfileOut)

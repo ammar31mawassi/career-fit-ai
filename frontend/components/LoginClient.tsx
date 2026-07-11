@@ -3,6 +3,7 @@
 import { useState, type FormEvent } from "react";
 import { useRouter } from "next/navigation";
 import { Waypoints } from "lucide-react";
+import { clearWorkspaceCaches } from "@/components/AppDataProvider";
 import { createClient } from "@/lib/supabase/client";
 
 export function LoginClient() {
@@ -19,6 +20,7 @@ export function LoginClient() {
     setMessage("");
     try {
       if (mode === "signup") {
+        clearWorkspaceCaches();
         const body = new FormData();
         body.set("email", email);
         body.set("password", password);
@@ -27,12 +29,19 @@ export function LoginClient() {
           const payload = await response.json();
           throw new Error(payload.detail ?? "Signup failed.");
         }
+        const payload = await response.json() as { requiresEmailConfirmation?: boolean };
+        if (payload.requiresEmailConfirmation) {
+          setMessage("Account created. Check your email to confirm it, then sign in.");
+          setMode("login");
+          return;
+        }
         const supabase = createClient();
         const { error } = await supabase.auth.signInWithPassword({ email, password });
         if (error) throw error;
         router.push("/onboarding");
         router.refresh();
       } else {
+        clearWorkspaceCaches();
         const supabase = createClient();
         const { error } = await supabase.auth.signInWithPassword({ email, password });
         if (error) throw error;
