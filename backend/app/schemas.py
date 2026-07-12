@@ -22,7 +22,21 @@ class ProfileSourceOut(BaseModel):
     scanned_pdf_detected: bool = False
     ocr_attempted: bool = False
     ocr_confidence: float | None = None
+    ocr_recommended: bool = False
     updated_at: datetime
+
+
+class BrowserOcrPageIn(BaseModel):
+    page_number: int = Field(ge=1, le=8)
+    confidence: float = Field(ge=0, le=1)
+    word_count: int = Field(default=0, ge=0, le=100000)
+
+
+class BrowserOcrIn(BaseModel):
+    text: str = Field(min_length=1, max_length=200000)
+    confidence: float = Field(ge=0, le=1)
+    engine: Literal["tesseract.js"] = "tesseract.js"
+    pages: list[BrowserOcrPageIn] = Field(default_factory=list, max_length=8)
 
 
 class ProfileFactOut(BaseModel):

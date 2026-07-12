@@ -4,13 +4,16 @@ import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { FileCheck2, FileText, Github, Linkedin, RefreshCw, Save, ScanText, Sparkles, UploadCloud } from "lucide-react";
 import { useAppData } from "@/components/AppDataProvider";
 import { CareerInterestPicker } from "@/components/CareerInterestPicker";
+import { LongTaskProgress } from "@/components/LongTaskProgress";
 import { ClarificationPanel } from "@/components/profile/ClarificationPanel";
 import { ProfileFactsEditor } from "@/components/profile/ProfileFactsEditor";
+import { recognizePdfInBrowser } from "@/lib/browserOcr";
 import {
   addProfileFact,
   analyzeProfile,
   answerProfileQuestion,
   formatDate,
+  saveBrowserOcr,
   saveProfileSources,
   saveProfilePreferences,
   updateProfileFact,
@@ -30,6 +33,7 @@ export function ProfileClient() {
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
+  const [task, setTask] = useState<{ title: string; detail: string; progress: number; activeStep: number } | null>(null);
 
   async function refresh() {
     await refreshProfile();
@@ -54,6 +58,7 @@ export function ProfileClient() {
     setSaving(true);
     setError("");
     setMessage("");
+    setTask({ title: "Updating your evidence", detail: "Preparing your selected sources", progress: 4, activeStep: 0 });
     try {
       const saved = await persistSources();
       setProfile(saved);
@@ -62,6 +67,7 @@ export function ProfileClient() {
       setError(err instanceof Error ? err.message : "Could not save profile sources.");
     } finally {
       setSaving(false);
+      setTask(null);
     }
   }
 
@@ -69,8 +75,10 @@ export function ProfileClient() {
     setSaving(true);
     setError("");
     setMessage("");
+    setTask({ title: "Rebuilding your profile", detail: "Preparing your selected sources", progress: 4, activeStep: 0 });
     try {
       await persistSources();
+      setTask({ title: "Rebuilding your profile", detail: "Extracting facts and checking supporting evidence", progress: 82, activeStep: 3 });
       const result = await analyzeProfile();
       setProfile(result.profile);
       if (result.profile.status === "ready") {
@@ -84,18 +92,53 @@ export function ProfileClient() {
       setError(err instanceof Error ? err.message : "Could not analyze profile.");
     } finally {
       setSaving(false);
+      setTask(null);
     }
   }
 
   async function persistSources() {
     if (cvFile) {
-      await uploadCv(cvFile);
+      const selectedCv = cvFile;
+      setTask((current) => ({
+        title: current?.title || "Updating your evidence",
+        detail: "Securely uploading your CV",
+        progress: 8,
+        activeStep: 0
+      }));
+      let uploaded = await uploadCv(selectedCv);
+      setProfile(uploaded);
+      const uploadedCv = uploaded.sources.find((source) => source.source_type === "cv");
+      if (uploadedCv?.ocr_recommended) {
+        setTask((current) => ({ ...(current || { title: "Reading your CV", activeStep: 1 }), detail: "Preparing private browser OCR", progress: 18, activeStep: 1 }));
+        const ocr = await recognizePdfInBrowser(selectedCv, (update) => {
+          setTask((current) => ({
+            title: current?.title || "Reading your CV",
+            detail: update.detail,
+            progress: 18 + update.progress * 46,
+            activeStep: 1
+          }));
+        });
+        uploaded = await saveBrowserOcr(ocr);
+        setProfile(uploaded);
+      }
       setCvFile(null);
     }
     if (linkedinFile) {
+      setTask((current) => ({
+        title: current?.title || "Updating your evidence",
+        detail: "Reading your LinkedIn export",
+        progress: 66,
+        activeStep: 2
+      }));
       await uploadLinkedInPdf(linkedinFile);
       setLinkedinFile(null);
     }
+    setTask((current) => ({
+      title: current?.title || "Updating your evidence",
+      detail: "Connecting CV, GitHub, LinkedIn, and your notes",
+      progress: 72,
+      activeStep: 2
+    }));
     return saveProfileSources({ github_url: githubUrl, linkedin_text: linkedinText, manual_info: manualInfo });
   }
 
@@ -132,6 +175,20 @@ export function ProfileClient() {
 
   return (
     <>
+      {task ? (
+        <LongTaskProgress
+          activeStep={task.activeStep}
+          detail={task.detail}
+          progress={task.progress}
+          steps={[
+            { label: "Secure upload" },
+            { label: "Read CV", detail: "Local OCR runs only when needed" },
+            { label: "Connect evidence" },
+            { label: "Rebuild profile" }
+          ]}
+          title={task.title}
+        />
+      ) : null}
       <header className="page-heading profile-hero">
         <div>
           <span className="eyebrow"><Sparkles size={14} /> Profile intelligence</span>
@@ -187,11 +244,11 @@ export function ProfileClient() {
           </label>
         </div>
         {cvSource?.scanned_pdf_detected ? (
-          <div className={`source-read-status ${cvSource.read_method === "ocr_service" ? "recovered" : "warning"}`}>
+          <div className={`source-read-status ${["ocr_service", "browser_ocr"].includes(cvSource.read_method) ? "recovered" : "warning"}`}>
             <ScanText size={17} />
             <div>
-              <strong>{cvSource.read_method === "ocr_service" ? "Scanned CV recovered with OCR" : "Scanned CV needs a clearer source"}</strong>
-              <span>{cvSource.read_method === "ocr_service" && cvSource.ocr_confidence !== null ? `${Math.round(cvSource.ocr_confidence * 100)}% OCR confidence · review extracted facts below` : "OCR could not recover enough reliable text. A text-based PDF will give better results."}</span>
+              <strong>{["ocr_service", "browser_ocr"].includes(cvSource.read_method) ? `${cvSource.read_method === "browser_ocr" ? "Scanned CV recovered privately in your browser" : "Scanned CV recovered with OCR"}` : "Scanned CV needs a clearer source"}</strong>
+              <span>{["ocr_service", "browser_ocr"].includes(cvSource.read_method) && cvSource.ocr_confidence !== null ? `${Math.round(cvSource.ocr_confidence * 100)}% OCR confidence · review extracted facts below` : "OCR could not recover enough reliable text. A text-based PDF will give better results."}</span>
             </div>
           </div>
         ) : null}

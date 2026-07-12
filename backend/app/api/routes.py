@@ -7,6 +7,7 @@ from uuid import UUID
 from ..config import get_settings
 from ..database import get_session
 from ..schemas import (
+    BrowserOcrIn,
     ClarificationAnswerIn,
     JobCreateIn,
     JobOut,
@@ -23,6 +24,7 @@ from ..schemas import (
 from ..services.auth import current_user_id
 from ..services.jobs import create_or_analyze_job, job_output, list_job_summaries, list_jobs, update_job_status
 from ..services.profile import (
+    apply_browser_ocr,
     analyze_profile,
     add_fact,
     answer_question,
@@ -80,6 +82,18 @@ async def upload_cv(
     if len(data) > get_settings().max_upload_bytes:
         raise HTTPException(status_code=413, detail="Uploaded CV is too large. Use a PDF under 5 MB.")
     return upload_cv_source(session, user_id, file.filename or "cv.pdf", data)
+
+
+@router.post("/profile/cv/browser-ocr", response_model=ProfileOut)
+def save_browser_ocr(
+    payload: BrowserOcrIn,
+    user_id: UUID = Depends(current_user_id),
+    session: Session = Depends(get_session),
+) -> ProfileOut:
+    try:
+        return apply_browser_ocr(session, user_id, payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.post("/profile/linkedin-pdf", response_model=ProfileOut)

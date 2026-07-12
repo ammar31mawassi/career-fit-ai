@@ -26,6 +26,7 @@ class Settings:
     max_upload_bytes: int
     ocr_service_url: str | None
     ocr_service_token: str | None
+    github_token: str | None
 
 
 def _csv_values(value: str) -> tuple[str, ...]:
@@ -58,4 +59,5 @@ def get_settings() -> Settings:
         max_upload_bytes=int(os.getenv("MAX_UPLOAD_BYTES", str(5 * 1024 * 1024))),
         ocr_service_url=os.getenv("OCR_SERVICE_URL") or None,
         ocr_service_token=os.getenv("OCR_SERVICE_TOKEN") or None,
+        github_token=os.getenv("GITHUB_TOKEN") or None,
     )

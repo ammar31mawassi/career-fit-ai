@@ -55,7 +55,7 @@ POLICIES: tuple[RateLimitPolicy, ...] = (
         limit=8,
         window_seconds=60 * 60,
         methods=frozenset({"POST"}),
-        paths=frozenset({"/api/profile/cv", "/api/profile/linkedin-pdf"}),
+        paths=frozenset({"/api/profile/cv", "/api/profile/cv/browser-ocr", "/api/profile/linkedin-pdf"}),
     ),
     RateLimitPolicy(
         key="general-write",

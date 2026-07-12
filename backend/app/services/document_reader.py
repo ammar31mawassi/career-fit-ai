@@ -25,6 +25,14 @@ class DocumentReadResult:
     page_evidence: list[dict[str, object]] = field(default_factory=list)
 
     def metadata(self) -> dict[str, object]:
+        page_summaries = [
+            {
+                key: value
+                for key, value in page.items()
+                if key in {"page_number", "confidence", "word_count"}
+            }
+            for page in self.page_evidence
+        ]
         return {
             "chars": len(self.text),
             "parser_version": PDF_PARSER_VERSION,
@@ -33,7 +41,9 @@ class DocumentReadResult:
             "ocr_attempted": self.ocr_attempted,
             "ocr_confidence": self.ocr_confidence,
             "ocr_engine": self.ocr_engine,
-            "ocr_pages": self.page_evidence,
+            # Page text belongs in content_text only. Keeping it out of metadata
+            # avoids storing a second copy of sensitive CV content.
+            "ocr_pages": page_summaries,
         }
 
 
@@ -122,7 +132,7 @@ def _read_configured_ocr(data: bytes) -> OCRServiceResult:
 
 
 def _meaningful_character_count(text: str) -> int:
-    return len(re.findall(r"[A-Za-z0-9]", text))
+    return sum(character.isalnum() for character in text)
 
 
 def _repair_split_vocabulary(text: str) -> str:

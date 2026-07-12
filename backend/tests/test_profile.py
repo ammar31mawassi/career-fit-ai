@@ -6,11 +6,15 @@ from sqlmodel import Session, SQLModel, create_engine, select
 from uuid import UUID
 
 from app.models import ClarificationQuestion, Profile, ProfileFactFeedback, ProfileSource
-from app.schemas import ProfilePreferencesIn, ProfileSourcesIn
+from app.schemas import BrowserOcrIn, BrowserOcrPageIn, ProfilePreferencesIn, ProfileSourcesIn
 from app.services.profile import (
+    _cached_github_text,
+    _github_text,
+    _github_username,
     add_fact,
     analyze_profile,
     answer_question,
+    apply_browser_ocr,
     candidate_snapshot,
     complete_onboarding,
     patch_fact,
@@ -182,6 +186,104 @@ def test_unreadable_cv_is_reported_instead_of_showing_ready():
 
     assert analyzed.profile.status == "cv_unreadable"
     assert analyzed.profile.onboarding_completed is False
+
+
+def test_browser_ocr_recovers_only_an_unreadable_scanned_cv():
+    engine = _engine()
+    SQLModel.metadata.create_all(engine)
+    with Session(engine) as session:
+        profile = Profile(user_id=USER_ID, status="needs_analysis")
+        session.add(profile)
+        session.commit()
+        session.refresh(profile)
+        session.add(
+            ProfileSource(
+                user_id=USER_ID,
+                profile_id=profile.id or 0,
+                source_type="cv",
+                title="scan.pdf",
+                content_text="",
+                metadata_json='{"read_method":"pypdf_layout","scanned_pdf_detected":true}',
+            )
+        )
+        session.commit()
+
+        recovered = apply_browser_ocr(
+            session,
+            USER_ID,
+            BrowserOcrIn(
+                text=("Computer Science student. Skills: Python, FastAPI, PostgreSQL, React. " * 3),
+                confidence=0.88,
+                pages=[BrowserOcrPageIn(page_number=1, confidence=0.88, word_count=24)],
+            ),
+        )
+
+    source = recovered.sources[0]
+    assert source.read_method == "browser_ocr"
+    assert source.ocr_confidence == pytest.approx(0.88)
+    assert source.ocr_recommended is False
+    assert source.has_text is True
+
+
+def test_browser_ocr_cannot_replace_successful_pdf_extraction():
+    engine = _engine()
+    SQLModel.metadata.create_all(engine)
+    with Session(engine) as session:
+        profile = Profile(user_id=USER_ID, status="needs_analysis")
+        session.add(profile)
+        session.commit()
+        session.refresh(profile)
+        session.add(
+            ProfileSource(
+                user_id=USER_ID,
+                profile_id=profile.id or 0,
+                source_type="cv",
+                title="text.pdf",
+                content_text="Readable CV text with Python and FastAPI experience. " * 4,
+                metadata_json='{"read_method":"pypdf_layout","scanned_pdf_detected":false}',
+            )
+        )
+        session.commit()
+
+        with pytest.raises(ValueError, match="only accepted"):
+            apply_browser_ocr(
+                session,
+                USER_ID,
+                BrowserOcrIn(text="Incorrect replacement text " * 10, confidence=0.99),
+            )
+
+
+def test_github_reader_validates_urls_and_ranks_useful_repositories(monkeypatch):
+    profile_payload = {"name": "Test Developer", "bio": "Backend engineer", "location": "Haifa"}
+    repo_payload = [
+        {"name": "forked", "fork": True, "description": "Ignore", "pushed_at": "2026-07-01"},
+        {"name": "archived", "archived": True, "description": "Ignore", "pushed_at": "2026-07-01"},
+        {
+            "name": "career-fit",
+            "description": "Evidence based job matching",
+            "language": "Python",
+            "topics": ["fastapi", "postgresql"],
+            "stargazers_count": 5,
+            "size": 800,
+            "pushed_at": "2026-07-10T00:00:00Z",
+        },
+    ]
+
+    def fake_api(path: str):
+        return repo_payload if "/repos?" in path else profile_payload
+
+    monkeypatch.setattr("app.services.profile._github_api_json", fake_api)
+    _cached_github_text.cache_clear()
+    text = _github_text("https://github.com/Valid-User")
+
+    assert _github_username("Valid-User") == "Valid-User"
+    assert _github_username("https://gitlab.com/not-github") == ""
+    assert _github_username("https://github.com/settings/profile") == ""
+    assert "GitHub bio: Backend engineer" in text
+    assert "Project career-fit" in text
+    assert "Topics: fastapi, postgresql" in text
+    assert "forked" not in text
+    assert "archived" not in text
 
 
 def test_profile_analysis_extracts_facts_and_questions_from_cv():

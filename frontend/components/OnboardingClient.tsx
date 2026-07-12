@@ -4,10 +4,13 @@ import { useEffect, useState, type FormEvent } from "react";
 import { ArrowRight, FileCheck2, Github, Linkedin, Sparkles, Waypoints } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { CareerInterestPicker } from "@/components/CareerInterestPicker";
+import { LongTaskProgress } from "@/components/LongTaskProgress";
 import { useAppData } from "@/components/AppDataProvider";
+import { recognizePdfInBrowser } from "@/lib/browserOcr";
 import {
   analyzeProfile,
   completeOnboarding,
+  saveBrowserOcr,
   saveProfilePreferences,
   saveProfileSources,
   uploadCv,
@@ -25,6 +28,8 @@ export function OnboardingClient() {
   const [interests, setInterests] = useState<string[]>([]);
   const [stage, setStage] = useState<"form" | "analyzing" | "review">("form");
   const [progress, setProgress] = useState("");
+  const [progressValue, setProgressValue] = useState(0);
+  const [activeStep, setActiveStep] = useState(0);
   const [error, setError] = useState("");
 
   useEffect(() => {
@@ -49,22 +54,42 @@ export function OnboardingClient() {
     }
     setStage("analyzing");
     setError("");
+    setActiveStep(0);
+    setProgressValue(4);
+    setProgress("Securely uploading your sources");
     try {
       if (cvFile) {
-        setProgress("Reading your CV…");
-        const uploadedProfile = await uploadCv(cvFile);
+        const selectedCv = cvFile;
+        const uploadedProfile = await uploadCv(selectedCv);
         setProfile(uploadedProfile);
+        setActiveStep(1);
+        setProgressValue(16);
+        setProgress("Checking the PDF text layer");
+        const cvSource = uploadedProfile.sources.find((source) => source.source_type === "cv");
+        if (cvSource?.ocr_recommended) {
+          const ocr = await recognizePdfInBrowser(selectedCv, (update) => {
+            setProgress(update.detail);
+            setProgressValue(16 + update.progress * 45);
+          });
+          const recoveredProfile = await saveBrowserOcr(ocr);
+          setProfile(recoveredProfile);
+        }
         setCvFile(null);
+        setProgressValue(62);
       }
       let resolvedLinkedinText = linkedinText;
       if (linkedinFile) {
-        setProgress("Adding LinkedIn context…");
+        setActiveStep(2);
+        setProgressValue(66);
+        setProgress("Adding LinkedIn context");
         const uploaded = await uploadLinkedInPdf(linkedinFile);
         setProfile(uploaded);
         setLinkedinFile(null);
         if (!resolvedLinkedinText.trim()) resolvedLinkedinText = uploaded.linkedin_text;
       }
-      setProgress("Connecting your evidence…");
+      setActiveStep(2);
+      setProgressValue(72);
+      setProgress("Connecting CV, GitHub, LinkedIn, and your notes");
       const sourcedProfile = await saveProfileSources({
         github_url: githubUrl,
         linkedin_text: resolvedLinkedinText,
@@ -73,10 +98,13 @@ export function OnboardingClient() {
       setProfile(sourcedProfile);
       const preferredProfile = await saveProfilePreferences(interests);
       setProfile(preferredProfile);
-      setProgress("Building your profile…");
+      setActiveStep(3);
+      setProgressValue(84);
+      setProgress("Building and cross-checking your evidence profile");
       const result = await analyzeProfile();
       setProfile(result.profile);
-      setProgress("");
+      setProgressValue(100);
+      setProgress("Profile analysis complete");
       if (result.profile.status !== "ready") {
         setError(profileAnalysisError(result.profile.status));
         setStage("form");
@@ -97,6 +125,9 @@ export function OnboardingClient() {
       return;
     }
     setProgress("Opening your workspace…");
+    setActiveStep(3);
+    setProgressValue(96);
+    setStage("analyzing");
     setError("");
     try {
       const completed = await completeOnboarding();
@@ -106,7 +137,26 @@ export function OnboardingClient() {
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not finish onboarding.");
       setProgress("");
+      setStage("review");
     }
+  }
+
+  if (stage === "analyzing") {
+    return (
+      <LongTaskProgress
+        activeStep={activeStep}
+        detail={progress || "Preparing your evidence"}
+        mode="page"
+        progress={progressValue}
+        steps={[
+          { label: "Secure upload", detail: "Store the selected sources" },
+          { label: "Read your CV", detail: "Use local OCR only if PDF text is unreadable" },
+          { label: "Connect evidence", detail: "Cross-check optional professional sources" },
+          { label: "Build your profile", detail: "Extract facts and clarification questions" }
+        ]}
+        title={activeStep < 2 ? "Reading your professional story" : "Building your evidence profile"}
+      />
+    );
   }
 
   if (stage === "review") {
@@ -177,14 +227,14 @@ export function OnboardingClient() {
 
           <section className="onboarding-section interests-section">
             <div className="onboarding-section-heading"><span>03</span><div><h2>What are you interested in?</h2><p>Select one or more fields. You can change these later.</p></div></div>
-            <CareerInterestPicker disabled={stage === "analyzing"} onChange={setInterests} selected={interests} />
+            <CareerInterestPicker onChange={setInterests} selected={interests} />
             <small className="interest-source">Role taxonomy adapted from Goozali’s public Israeli tech job board.</small>
           </section>
 
           <div className="onboarding-actions">
             <span>{interests.length ? `${interests.length} field${interests.length === 1 ? "" : "s"} selected` : "Choose at least one field"}</span>
-            <button className="button primary" disabled={profileLoading || stage === "analyzing"} type="submit">
-              <Sparkles size={16} /> {stage === "analyzing" ? progress || "Analyzing…" : "Analyze and build profile"}
+            <button className="button primary" disabled={profileLoading} type="submit">
+              <Sparkles size={16} /> Analyze and build profile
             </button>
           </div>
         </div>

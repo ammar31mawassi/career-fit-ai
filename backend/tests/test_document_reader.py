@@ -35,3 +35,15 @@ def test_text_pdf_skips_ocr(monkeypatch):
     assert result.method == "pypdf_layout"
     assert result.scanned_pdf_detected is False
     assert result.ocr_attempted is False
+
+
+def test_ocr_page_text_is_not_duplicated_in_metadata():
+    result = document_reader.DocumentReadResult(
+        text="private cv text",
+        method="ocr_service",
+        scanned_pdf_detected=True,
+        ocr_attempted=True,
+        page_evidence=[{"page_number": 1, "confidence": 0.9, "word_count": 3, "text": "private cv text"}],
+    )
+
+    assert result.metadata()["ocr_pages"] == [{"page_number": 1, "confidence": 0.9, "word_count": 3}]

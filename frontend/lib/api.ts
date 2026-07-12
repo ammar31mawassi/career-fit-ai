@@ -8,6 +8,7 @@ export type ProfileSource = {
   scanned_pdf_detected: boolean;
   ocr_attempted: boolean;
   ocr_confidence: number | null;
+  ocr_recommended: boolean;
   updated_at: string;
 };
 
@@ -235,6 +236,18 @@ export function uploadCv(file: File) {
   const body = new FormData();
   body.set("file", file);
   return request<Profile>("/api/profile/cv", { method: "POST", body });
+}
+
+export function saveBrowserOcr(payload: {
+  text: string;
+  confidence: number;
+  engine: "tesseract.js";
+  pages: Array<{ page_number: number; confidence: number; word_count: number }>;
+}) {
+  return request<Profile>("/api/profile/cv/browser-ocr", {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
 }
 
 export function uploadLinkedInPdf(file: File) {

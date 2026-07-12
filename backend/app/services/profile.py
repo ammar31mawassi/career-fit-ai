@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import json
 import re
+import time
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from functools import lru_cache
 from uuid import UUID
 
 from sqlmodel import Session, select
@@ -19,6 +21,7 @@ from ..models import (
     ProfileSource,
 )
 from ..schemas import (
+    BrowserOcrIn,
     ClarificationQuestionOut,
     ProfileAnalyzeResult,
     ProfileFactOut,
@@ -27,6 +30,7 @@ from ..schemas import (
     ProfileSourceOut,
     ProfileSourcesIn,
 )
+from ..config import get_settings
 from .ontology import canonical_skill, extract_skills, infer_domain, skill_domain
 from .document_reader import PDF_PARSER_VERSION, read_pdf_document
 from .profile_extraction import (
@@ -118,6 +122,49 @@ def upload_cv_source(session: Session, user_id: UUID, filename: str, data: bytes
     source.storage_path = storage_path
     source.content_text = read_result.text
     source.metadata_json = json.dumps({"filename": cleaned_filename, **read_result.metadata()}, sort_keys=True)
+    source.updated_at = _now()
+    profile.status = "needs_analysis"
+    profile.updated_at = _now()
+    session.add(source)
+    session.add(profile)
+    session.commit()
+    return profile_output(session, user_id)
+
+
+def apply_browser_ocr(session: Session, user_id: UUID, payload: BrowserOcrIn) -> ProfileOut:
+    """Persist local OCR only when the original PDF parser could not read the CV.
+
+    The browser performs the expensive OCR locally. The API accepts only the
+    recovered text and compact quality metadata, never rendered page images.
+    """
+    profile = get_or_create_profile(session, user_id)
+    source = _source_by_type(session, profile, "cv")
+    if not source:
+        raise ValueError("Upload the CV PDF before submitting browser OCR results.")
+
+    metadata = _json_dict(source.metadata_json)
+    extracted_characters = _meaningful_character_count(source.content_text)
+    if not bool(metadata.get("scanned_pdf_detected")) or extracted_characters >= 80:
+        raise ValueError("Browser OCR is only accepted when normal PDF extraction is insufficient.")
+
+    recovered_text = payload.text.strip()
+    if _meaningful_character_count(recovered_text) < 80:
+        raise ValueError("Browser OCR could not recover enough readable CV text.")
+
+    source.content_text = recovered_text
+    source.metadata_json = json.dumps(
+        {
+            **metadata,
+            "chars": len(recovered_text),
+            "read_method": "browser_ocr",
+            "scanned_pdf_detected": True,
+            "ocr_attempted": True,
+            "ocr_confidence": round(payload.confidence, 4),
+            "ocr_engine": payload.engine,
+            "ocr_pages": [page.model_dump() for page in payload.pages],
+        },
+        sort_keys=True,
+    )
     source.updated_at = _now()
     profile.status = "needs_analysis"
     profile.updated_at = _now()
@@ -371,6 +418,10 @@ def _profile_source_output(source: ProfileSource) -> ProfileSourceOut:
         scanned_pdf_detected=bool(metadata.get("scanned_pdf_detected")),
         ocr_attempted=bool(metadata.get("ocr_attempted")),
         ocr_confidence=ocr_confidence,
+        ocr_recommended=(
+            bool(metadata.get("scanned_pdf_detected"))
+            and _meaningful_character_count(source.content_text) < 80
+        ),
         updated_at=source.updated_at,
     )
 
@@ -860,24 +911,90 @@ def _github_text(github_url: str) -> str:
         return ""
     username = _github_username(github_url)
     if not username:
-        return github_url.strip()
+        return f"GitHub profile could not be read: {github_url.strip()}"
+    return _cached_github_text(username.lower(), int(time.time() // 900))
+
+
+@lru_cache(maxsize=256)
+def _cached_github_text(username: str, _time_bucket: int) -> str:
+    canonical_url = f"https://github.com/{username}"
     try:
-        url = f"https://api.github.com/users/{urllib.parse.quote(username)}/repos?per_page=12&sort=updated"
-        request = urllib.request.Request(url, headers={"User-Agent": "career-fit-ai"})
-        with urllib.request.urlopen(request, timeout=8) as response:
-            repos = json.loads(response.read().decode("utf-8"))
+        profile = _github_api_json(f"/users/{urllib.parse.quote(username)}")
+        repos = _github_api_json(
+            f"/users/{urllib.parse.quote(username)}/repos?per_page=100&sort=pushed&direction=desc&type=owner"
+        )
     except Exception:
-        return f"GitHub profile: {github_url.strip()}"
+        return f"GitHub profile: {canonical_url}"
     if not isinstance(repos, list):
-        return f"GitHub profile: {github_url.strip()}"
-    lines = [f"GitHub profile: {github_url.strip()}"]
-    for repo in repos[:12]:
-        if isinstance(repo, dict) and not repo.get("fork"):
-            lines.append(
-                "Project "
-                + " ".join(str(repo.get(key) or "") for key in ("name", "description", "language"))
-            )
+        return f"GitHub profile: {canonical_url}"
+
+    lines = [f"GitHub profile: {canonical_url}"]
+    if isinstance(profile, dict):
+        name = str(profile.get("name") or "").strip()
+        bio = str(profile.get("bio") or "").strip()
+        location = str(profile.get("location") or "").strip()
+        blog = str(profile.get("blog") or "").strip()
+        if name:
+            lines.append(f"GitHub name: {name}")
+        if bio:
+            lines.append(f"GitHub bio: {bio}")
+        if location:
+            lines.append(f"GitHub location: {location}")
+        if blog:
+            lines.append(f"GitHub website: {blog}")
+
+    ranked = sorted(
+        [repo for repo in repos if _usable_github_repo(repo)],
+        key=_github_repo_rank,
+        reverse=True,
+    )
+    for repo in ranked[:12]:
+        topics = [str(topic) for topic in repo.get("topics", []) if str(topic).strip()]
+        details = [str(repo.get("description") or "").strip()]
+        language = str(repo.get("language") or "").strip()
+        if language:
+            details.append(f"Language: {language}")
+        if topics:
+            details.append(f"Topics: {', '.join(topics[:8])}")
+        stars = int(repo.get("stargazers_count") or 0)
+        if stars:
+            details.append(f"Stars: {stars}")
+        pushed_at = str(repo.get("pushed_at") or "")[:10]
+        if pushed_at:
+            details.append(f"Last pushed: {pushed_at}")
+        lines.append(f"Project {repo.get('name')}: " + ". ".join(part for part in details if part))
     return "\n".join(lines)
+
+
+def _github_api_json(path: str) -> object:
+    settings = get_settings()
+    headers = {
+        "User-Agent": "career-fit-ai",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2026-03-10",
+    }
+    if settings.github_token:
+        headers["Authorization"] = f"Bearer {settings.github_token}"
+    request = urllib.request.Request(f"https://api.github.com{path}", headers=headers)
+    with urllib.request.urlopen(request, timeout=6) as response:
+        return json.loads(response.read(2_000_000).decode("utf-8"))
+
+
+def _usable_github_repo(repo: object) -> bool:
+    return bool(
+        isinstance(repo, dict)
+        and repo.get("name")
+        and not repo.get("fork")
+        and not repo.get("archived")
+        and not repo.get("disabled")
+    )
+
+
+def _github_repo_rank(repo: dict[str, object]) -> tuple[int, int, int, str]:
+    evidence = int(bool(repo.get("description"))) + int(bool(repo.get("language"))) + int(bool(repo.get("topics")))
+    stars = min(int(repo.get("stargazers_count") or 0), 1000)
+    size = min(int(repo.get("size") or 0), 100000)
+    return evidence, stars, size, str(repo.get("pushed_at") or "")
 
 
 def _github_username(github_url: str) -> str:
@@ -885,10 +1002,23 @@ def _github_username(github_url: str) -> str:
     if not value:
         return ""
     if "/" not in value:
-        return re.sub(r"[^A-Za-z0-9-]", "", value)
-    parsed = urllib.parse.urlparse(value if "://" in value else f"https://{value}")
-    parts = [part for part in parsed.path.split("/") if part]
-    return parts[0] if parts else ""
+        username = value
+    else:
+        parsed = urllib.parse.urlparse(value if "://" in value else f"https://{value}")
+        if parsed.hostname not in {"github.com", "www.github.com"}:
+            return ""
+        parts = [part for part in parsed.path.split("/") if part]
+        username = parts[0] if parts else ""
+    reserved = {"about", "apps", "collections", "enterprise", "events", "explore", "features", "issues", "login", "marketplace", "new", "notifications", "orgs", "pricing", "pulls", "search", "settings", "signup", "sponsors", "topics"}
+    if username.lower() in reserved:
+        return ""
+    if not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?", username):
+        return ""
+    return username
+
+
+def _meaningful_character_count(text: str) -> int:
+    return sum(character.isalnum() for character in text)
 
 
 def _extract_professional_years(text: str) -> float:
