@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { createClient } from "@supabase/supabase-js";
+import { AuthError, createClient } from "@supabase/supabase-js";
 import { NextResponse } from "next/server";
 
 const SIGNUP_WINDOW_SECONDS = 60 * 60;
@@ -58,7 +58,7 @@ export async function POST(request: Request) {
   const form = await request.formData();
   const email = String(form.get("email") ?? "").trim().toLowerCase();
   const password = String(form.get("password") ?? "");
-  if (!email || password.length < 8) {
+  if (!email || email.length > 320 || password.length < 8 || password.length > 128) {
     return NextResponse.json(
       { detail: "Use a valid email and a password with at least 8 characters." },
       { status: 400 }
@@ -91,9 +91,34 @@ export async function POST(request: Request) {
   const publicClient = createClient(url, publishableKey, {
     auth: { autoRefreshToken: false, persistSession: false }
   });
-  const { data, error } = await publicClient.auth.signUp({ email, password });
+  const siteUrl = process.env.NEXT_PUBLIC_SITE_URL?.replace(/\/$/, "");
+  const { data, error } = await publicClient.auth.signUp({
+    email,
+    password,
+    options: siteUrl ? { emailRedirectTo: `${siteUrl}/onboarding` } : undefined
+  });
   if (error) {
-    return NextResponse.json({ detail: "Could not create the account. Check the details and try again." }, { status: 400 });
+    const response = NextResponse.json(
+      { detail: signupErrorMessage(error) },
+      { status: error.status === 429 ? 429 : error.status === 422 ? 503 : 400 }
+    );
+    response.headers.set("Cache-Control", "no-store");
+    return response;
   }
-  return NextResponse.json({ ok: true, requiresEmailConfirmation: !data.session });
+  const response = NextResponse.json({ ok: true, requiresEmailConfirmation: !data.session });
+  response.headers.set("Cache-Control", "no-store");
+  return response;
+}
+
+export function signupErrorMessage(error: Pick<AuthError, "code" | "message" | "status">) {
+  if (error.code === "signup_disabled" || /signups? not allowed/i.test(error.message)) {
+    return "Account creation is temporarily unavailable. The beta signup service is disabled.";
+  }
+  if (error.status === 429 || error.code === "over_email_send_rate_limit") {
+    return "The signup email limit was reached. Try again later.";
+  }
+  if (error.code === "weak_password") {
+    return "Choose a stronger password with at least 8 characters.";
+  }
+  return "Could not create the account. Check the email and password, then try again.";
 }

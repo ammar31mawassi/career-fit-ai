@@ -52,21 +52,27 @@ export function OnboardingClient() {
     try {
       if (cvFile) {
         setProgress("Reading your CV…");
-        await uploadCv(cvFile);
+        const uploadedProfile = await uploadCv(cvFile);
+        setProfile(uploadedProfile);
+        setCvFile(null);
       }
       let resolvedLinkedinText = linkedinText;
       if (linkedinFile) {
         setProgress("Adding LinkedIn context…");
         const uploaded = await uploadLinkedInPdf(linkedinFile);
+        setProfile(uploaded);
+        setLinkedinFile(null);
         if (!resolvedLinkedinText.trim()) resolvedLinkedinText = uploaded.linkedin_text;
       }
       setProgress("Connecting your evidence…");
-      await saveProfileSources({
+      const sourcedProfile = await saveProfileSources({
         github_url: githubUrl,
         linkedin_text: resolvedLinkedinText,
         manual_info: manualInfo
       });
-      await saveProfilePreferences(interests);
+      setProfile(sourcedProfile);
+      const preferredProfile = await saveProfilePreferences(interests);
+      setProfile(preferredProfile);
       setProgress("Building your profile…");
       const result = await analyzeProfile();
       setProfile(result.profile);
@@ -189,7 +195,7 @@ export function OnboardingClient() {
 
 function profileAnalysisError(status: string) {
   if (status === "cv_unreadable") {
-    return "We couldn't read text from this CV. Upload a text-based PDF rather than a scanned image, then analyze again.";
+    return "We couldn't recover enough text from this CV. Try a clearer scan or upload a text-based PDF, then analyze again.";
   }
   if (status === "needs_cv") {
     return "Upload a readable CV PDF before continuing.";
