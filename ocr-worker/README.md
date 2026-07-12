@@ -13,13 +13,15 @@ Private-token PDF OCR service for CareerFit. It converts each PDF page to an ima
 
 ## Hugging Face Space
 
-1. Create a Docker Space on the free `cpu-basic` hardware.
+1. Create a Docker Space on `cpu-basic`. Hugging Face currently requires PRO for
+   newly created Gradio/Docker Spaces, even when the selected hardware is
+   `cpu-basic`; only Static Spaces are available to free accounts.
 2. Push this directory to the Space repository.
 3. Add `OCR_WORKER_TOKEN` as a Space secret.
 4. Optionally set `OCR_LANGUAGES=eng+heb+ara` and `OCR_MAX_PAGES=8` as variables.
 5. Set CareerFit backend `OCR_SERVICE_URL=https://<space>.hf.space/v1/ocr/pdf` and the same value as `OCR_SERVICE_TOKEN`.
 
-Free Spaces sleep after inactivity, so the first scanned CV after a sleep can be slower. CareerFit only calls this worker when normal PDF text extraction is insufficient.
+CPU Basic Spaces sleep after inactivity, so the first scanned CV after a sleep can be slower. CareerFit only calls this worker when normal PDF text extraction is insufficient.
 
 ## Unlimited OCR evaluation
 

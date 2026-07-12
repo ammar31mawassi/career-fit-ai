@@ -5,9 +5,11 @@ Date: 2026-07-12
 ## Decision
 
 Do not send production CVs to the public `baidu/Unlimited-OCR` Hugging Face Space.
-Keep the private-token Tesseract worker as the free production baseline. Revisit
-Unlimited OCR when CareerFit has private GPU hosting or an approved private
-inference endpoint.
+Keep the private-token Tesseract worker as the production baseline implementation,
+but deploy it only to a controlled host. Hugging Face currently requires PRO to
+create new Gradio or Docker Spaces, including CPU Basic; it is not a free hosting
+path. Revisit Unlimited OCR when CareerFit has private GPU hosting or an approved
+private inference endpoint.
 
 ## What was verified
 
@@ -17,6 +19,8 @@ inference endpoint.
 - Official inference loads the model on an NVIDIA GPU with CUDA and BF16.
 - Hugging Face does not currently offer this model through an Inference Provider.
 - Baidu's public demo runs on shared ZeroGPU infrastructure.
+- A live authenticated Space-creation attempt returned HTTP 402 and stated that
+  new Gradio/Docker Spaces on CPU Basic require a PRO subscription.
 - A synthetic CV image was uploaded to the public demo only. OCR completed in
   approximately 24 seconds and recovered 9/9 expected fields.
 - No real CV, candidate profile, or personal data was used in the benchmark.
