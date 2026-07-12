@@ -18,6 +18,10 @@ class ProfileSourceOut(BaseModel):
     title: str
     storage_path: str
     has_text: bool
+    read_method: str = ""
+    scanned_pdf_detected: bool = False
+    ocr_attempted: bool = False
+    ocr_confidence: float | None = None
     updated_at: datetime
 
 

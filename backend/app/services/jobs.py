@@ -33,6 +33,7 @@ from .agent_workflows import (
 )
 from .job_research import JOB_READER_VERSION, extract_job_from_input, requirements_from_json
 from .profile import candidate_snapshot, get_or_create_profile
+from .recommendations import catalog_and_enqueue_job
 from .scoring import get_match_scorer
 
 
@@ -72,6 +73,7 @@ def create_or_analyze_job(session: Session, user_id: UUID, payload: JobCreateIn)
             {"job_id": existing.id or 0, "reader_version": JOB_READER_VERSION},
         )
         complete_run(session, run, "Existing saved job reused.", status="reused")
+        _catalog_for_discovery(session, user_id, existing)
         return job_output(session, user_id, existing.id or 0)
     complete_step(
         session,
@@ -177,7 +179,16 @@ def create_or_analyze_job(session: Session, user_id: UUID, payload: JobCreateIn)
         {"match_id": match.id or 0},
     )
     complete_run(session, run, "Job analyzed, matched, and saved.")
+    _catalog_for_discovery(session, user_id, job)
     return job_output(session, user_id, job.id or 0)
+
+
+def _catalog_for_discovery(session: Session, user_id: UUID, job: Job) -> None:
+    try:
+        catalog_and_enqueue_job(session, user_id, job)
+    except Exception:
+        # Discovery enrichment must never make the scanner's own saved result fail.
+        session.rollback()
 
 
 def _can_reuse(job: Job, payload: JobCreateIn) -> bool:

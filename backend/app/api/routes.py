@@ -34,6 +34,7 @@ from ..services.profile import (
     upload_cv_source,
     upload_linkedin_pdf_source,
 )
+from ..services.recommendations import process_one_queued_recommendation
 
 
 router = APIRouter(prefix="/api")
@@ -177,6 +178,15 @@ def create_job(
         return create_or_analyze_job(session, user_id, payload)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/recommendations/process-pending")
+def process_pending_recommendation(
+    user_id: UUID = Depends(current_user_id),
+    session: Session = Depends(get_session),
+) -> dict[str, bool]:
+    del user_id
+    return {"processed": process_one_queued_recommendation(session) is not None}
 
 
 @router.get("/jobs", response_model=list[JobOut])

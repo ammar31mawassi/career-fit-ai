@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState, type FormEvent } from "react";
-import { FileText, Github, Linkedin, RefreshCw, Save, Sparkles } from "lucide-react";
+import { FileCheck2, FileText, Github, Linkedin, RefreshCw, Save, ScanText, Sparkles, UploadCloud } from "lucide-react";
 import { useAppData } from "@/components/AppDataProvider";
 import { CareerInterestPicker } from "@/components/CareerInterestPicker";
 import { ClarificationPanel } from "@/components/profile/ClarificationPanel";
@@ -47,6 +47,8 @@ export function ProfileClient() {
     () => (profile?.questions ?? []).filter((question) => question.status === "open"),
     [profile]
   );
+  const cvSource = profile?.sources.find((source) => source.source_type === "cv");
+  const linkedinSource = profile?.sources.find((source) => source.source_type === "linkedin_pdf");
   async function submitSources(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setSaving(true);
@@ -74,7 +76,7 @@ export function ProfileClient() {
       if (result.profile.status === "ready") {
         setMessage(`Profile analyzed: ${result.generated_facts} facts, ${result.open_questions} open questions.`);
       } else if (result.profile.status === "cv_unreadable") {
-        setError("We couldn't read text from this CV. Upload a text-based PDF rather than a scanned image, then analyze again.");
+        setError("We couldn't recover enough text from this CV. Try a clearer scan or upload a text-based PDF, then analyze again.");
       } else {
         setError("Profile analysis did not finish. Review your sources and analyze again.");
       }
@@ -164,18 +166,35 @@ export function ProfileClient() {
           </div>
           <FileText size={20} aria-hidden />
         </div>
-        <div className="form-grid">
-          <label className="field upload-field">
-            <span>CV PDF (required)</span>
+        <div className="form-grid source-upload-grid">
+          <label className={`source-upload-card ${cvFile || cvSource ? "has-file" : ""}`}>
             <input accept="application/pdf" onChange={(event) => setCvFile(event.target.files?.[0] ?? null)} type="file" />
-            <small>{profile?.sources.find((source) => source.source_type === "cv") ? "CV uploaded; selecting a new file replaces it." : "Upload one CV to unlock matching."}</small>
+            <span className="source-upload-icon">{cvFile || cvSource ? <FileCheck2 size={20} /> : <UploadCloud size={20} />}</span>
+            <span className="source-upload-copy">
+              <strong>{cvFile?.name || cvSource?.title || "Choose your CV PDF"}</strong>
+              <small>{cvSource ? "Ready · choose another file to replace it" : "Required to unlock matching"}</small>
+            </span>
+            <span className="source-upload-action">{cvFile || cvSource ? "Replace" : "Browse"}</span>
           </label>
-          <label className="field upload-field">
-            <span>LinkedIn PDF (optional)</span>
+          <label className={`source-upload-card ${linkedinFile || linkedinSource ? "has-file" : ""}`}>
             <input accept="application/pdf" onChange={(event) => setLinkedinFile(event.target.files?.[0] ?? null)} type="file" />
-            <small>Use PDF export or paste text below. No LinkedIn scraping.</small>
+            <span className="source-upload-icon">{linkedinFile || linkedinSource ? <FileCheck2 size={20} /> : <UploadCloud size={20} />}</span>
+            <span className="source-upload-copy">
+              <strong>{linkedinFile?.name || linkedinSource?.title || "Add a LinkedIn PDF"}</strong>
+              <small>Optional · PDF export or pasted text</small>
+            </span>
+            <span className="source-upload-action">{linkedinFile || linkedinSource ? "Replace" : "Browse"}</span>
           </label>
         </div>
+        {cvSource?.scanned_pdf_detected ? (
+          <div className={`source-read-status ${cvSource.read_method === "ocr_service" ? "recovered" : "warning"}`}>
+            <ScanText size={17} />
+            <div>
+              <strong>{cvSource.read_method === "ocr_service" ? "Scanned CV recovered with OCR" : "Scanned CV needs a clearer source"}</strong>
+              <span>{cvSource.read_method === "ocr_service" && cvSource.ocr_confidence !== null ? `${Math.round(cvSource.ocr_confidence * 100)}% OCR confidence · review extracted facts below` : "OCR could not recover enough reliable text. A text-based PDF will give better results."}</span>
+            </div>
+          </div>
+        ) : null}
         <label className="field">
           <span><Github size={14} /> GitHub URL or username (optional)</span>
           <input onChange={(event) => setGithubUrl(event.target.value)} placeholder="https://github.com/username" value={githubUrl} />

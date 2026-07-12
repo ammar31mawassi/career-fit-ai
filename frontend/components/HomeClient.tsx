@@ -11,6 +11,7 @@ import {
   createJob,
   getJob,
   getJobSummaries,
+  kickRecommendationWorker,
   toJobSummary,
   type JobCreate,
   type TrackedJob,
@@ -124,6 +125,7 @@ export function HomeClient() {
       setSearchResults((current) => current ? [summary, ...current.filter((item) => item.id !== job.id)] : current);
       setJobDetailsById((current) => ({ ...current, [job.id]: job }));
       setSelectedJobId(job.id);
+      if (job.status === "analyzed") void kickRecommendationWorker().catch(() => undefined);
       setForm(emptyJob);
       setQuery("");
     } catch (caught) {

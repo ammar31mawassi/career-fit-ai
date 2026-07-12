@@ -325,17 +325,7 @@ def profile_output(session: Session, user_id: UUID) -> ProfileOut:
         onboarding_completed=profile.onboarding_completed,
         career_interests=[interest.interest for interest in interests],
         last_analyzed_at=profile.last_analyzed_at,
-        sources=[
-            ProfileSourceOut(
-                id=source.id or 0,
-                source_type=source.source_type,
-                title=source.title,
-                storage_path=source.storage_path,
-                has_text=bool(source.content_text.strip()),
-                updated_at=source.updated_at,
-            )
-            for source in sources
-        ],
+        sources=[_profile_source_output(source) for source in sources],
         facts=[
             ProfileFactOut(
                 id=fact.id or 0,
@@ -361,6 +351,27 @@ def profile_output(session: Session, user_id: UUID) -> ProfileOut:
             )
             for question in questions
         ],
+    )
+
+
+def _profile_source_output(source: ProfileSource) -> ProfileSourceOut:
+    metadata = _json_dict(source.metadata_json)
+    raw_confidence = metadata.get("ocr_confidence")
+    try:
+        ocr_confidence = float(raw_confidence) if raw_confidence is not None else None
+    except (TypeError, ValueError):
+        ocr_confidence = None
+    return ProfileSourceOut(
+        id=source.id or 0,
+        source_type=source.source_type,
+        title=source.title,
+        storage_path=source.storage_path,
+        has_text=bool(source.content_text.strip()),
+        read_method=str(metadata.get("read_method") or ""),
+        scanned_pdf_detected=bool(metadata.get("scanned_pdf_detected")),
+        ocr_attempted=bool(metadata.get("ocr_attempted")),
+        ocr_confidence=ocr_confidence,
+        updated_at=source.updated_at,
     )
 
 

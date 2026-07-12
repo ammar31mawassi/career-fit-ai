@@ -4,6 +4,10 @@ export type ProfileSource = {
   title: string;
   storage_path: string;
   has_text: boolean;
+  read_method: string;
+  scanned_pdf_detected: boolean;
+  ocr_attempted: boolean;
+  ocr_confidence: number | null;
   updated_at: string;
 };
 
@@ -300,6 +304,13 @@ export function createJob(payload: JobCreate) {
   return request<TrackedJob>("/api/jobs", {
     method: "POST",
     body: JSON.stringify(payload)
+  });
+}
+
+export function kickRecommendationWorker() {
+  return request<{ processed: boolean }>("/api/recommendations/process-pending", {
+    method: "POST",
+    keepalive: true
   });
 }
 

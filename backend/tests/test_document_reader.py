@@ -5,13 +5,24 @@ from app.services import document_reader
 
 def test_scanned_pdf_attempts_configured_ocr(monkeypatch):
     monkeypatch.setattr(document_reader, "_read_pypdf", lambda _: "")
-    monkeypatch.setattr(document_reader, "_read_configured_ocr", lambda _: "OCR text " * 20)
+    monkeypatch.setattr(
+        document_reader,
+        "_read_configured_ocr",
+        lambda _: document_reader.OCRServiceResult(
+            text="OCR text " * 20,
+            confidence=0.91,
+            engine="tesseract",
+            pages=[{"page_number": 1, "confidence": 0.91}],
+        ),
+    )
 
     result = document_reader.read_pdf_document(b"scanned-pdf")
 
     assert result.method == "ocr_service"
     assert result.scanned_pdf_detected is True
     assert result.ocr_attempted is True
+    assert result.ocr_confidence == 0.91
+    assert result.page_evidence[0]["page_number"] == 1
     assert result.metadata()["parser_version"] == document_reader.PDF_PARSER_VERSION
 
 

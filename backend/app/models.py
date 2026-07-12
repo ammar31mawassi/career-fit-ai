@@ -212,3 +212,61 @@ class AgentStep(SQLModel, table=True):
     error: str = ""
     started_at: datetime = Field(default_factory=utc_now)
     completed_at: Optional[datetime] = None
+
+
+class SharedJobCatalog(SQLModel, table=True):
+    __tablename__ = "shared_job_catalog"
+    __table_args__ = (UniqueConstraint("content_hash", name="uq_shared_job_catalog_hash"),)
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    content_hash: str = Field(index=True)
+    source_url: str = ""
+    application_link: str = ""
+    company: str = Field(default="Unknown Company", index=True)
+    role: str = Field(default="Unknown Role", index=True)
+    location: str = ""
+    description_text: str = ""
+    requirements_json: str = "{}"
+    domain: str = Field(default="", index=True)
+    career_fields_json: str = "[]"
+    source_confidence: float = 0.0
+    first_seen_by: Optional[UUID] = Field(default=None, index=True)
+    active: bool = Field(default=True, index=True)
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
+
+
+class RecommendationRun(SQLModel, table=True):
+    __tablename__ = "recommendation_runs"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    catalog_job_id: int = Field(foreign_key="shared_job_catalog.id", index=True)
+    source_user_id: Optional[UUID] = Field(default=None, index=True)
+    status: str = Field(default="running", index=True)
+    candidate_count: int = 0
+    scored_count: int = 0
+    strong_count: int = 0
+    error: str = ""
+    created_at: datetime = Field(default_factory=utc_now)
+    completed_at: Optional[datetime] = None
+
+
+class JobRecommendation(SQLModel, table=True):
+    __tablename__ = "job_recommendations"
+    __table_args__ = (
+        UniqueConstraint("user_id", "catalog_job_id", "model_version", name="uq_job_recommendation_version"),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    user_id: UUID = Field(index=True)
+    catalog_job_id: int = Field(foreign_key="shared_job_catalog.id", index=True)
+    score: float = 0.0
+    fit_level: str = Field(default="Weak", index=True)
+    confidence: float = 0.0
+    career_fields_json: str = "[]"
+    reasons_json: str = "[]"
+    match_snapshot_json: str = "{}"
+    model_version: str = Field(default="", index=True)
+    status: str = Field(default="shadow", index=True)
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
