@@ -21,10 +21,17 @@ Private-token PDF OCR service for CareerFit. It converts each PDF page to an ima
 
 Free Spaces sleep after inactivity, so the first scanned CV after a sleep can be slower. CareerFit only calls this worker when normal PDF text extraction is insufficient.
 
+## Unlimited OCR evaluation
+
+`baidu/Unlimited-OCR` was tested successfully on a synthetic CV, but its public
+ZeroGPU demo is not used for production documents. It has shared daily quota and
+would send private CV data to a third-party public Space. See
+[`docs/UNLIMITED_OCR_EVALUATION.md`](../docs/UNLIMITED_OCR_EVALUATION.md) for the
+benchmark and the requirements for a private GPU deployment.
+
 ## Local
 
 ```bash
 docker build -t careerfit-ocr .
 docker run --rm -p 7860:7860 -e OCR_WORKER_TOKEN=local-secret careerfit-ocr
 ```
-
