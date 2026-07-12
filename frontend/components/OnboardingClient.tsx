@@ -173,7 +173,7 @@ export function OnboardingClient() {
             <div><strong>{openQuestions}</strong><span>questions to refine later</span></div>
           </div>
           {error ? <div className="notice error">{error}</div> : null}
-          <button className="button primary onboarding-continue" disabled={Boolean(progress)} onClick={() => void finish()} type="button">
+          <button className="button primary onboarding-continue" disabled={false} onClick={() => void finish()} type="button">
             Enter CareerFit <ArrowRight size={16} />
           </button>
           {progress ? <small>{progress}</small> : null}
