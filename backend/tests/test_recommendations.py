@@ -48,6 +48,14 @@ class _StrongScorer:
         )
 
 
+class _ObservationScorer(_StrongScorer):
+    def score(self, *_args, **_kwargs):
+        result = super().score()
+        result.score = 68.0
+        result.fit_level = "Medium"
+        return result
+
+
 def test_job_routing_uses_domain_and_role_hints():
     backend = classify_requirements("Requirements: Python, FastAPI and SQL.", "Backend Developer")
     hardware = classify_requirements("Requirements: Verilog and FPGA.", "FPGA Verification Engineer")
@@ -92,7 +100,7 @@ def test_shadow_recommendations_prefilter_candidates_and_hide_scanner(monkeypatc
     assert run.strong_count == 1
     assert [item.user_id for item in recommendations] == [RELEVANT]
     assert str(SCANNER) not in recommendations[0].reasons_json
-    assert recommendations[0].status == "shadow"
+    assert recommendations[0].status == "shadow_eligible"
 
 
 def test_candidate_who_already_saved_job_is_not_rescored(monkeypatch):
@@ -121,3 +129,30 @@ def test_candidate_who_already_saved_job_is_not_rescored(monkeypatch):
     assert run.candidate_count == 1
     assert run.scored_count == 0
     assert run.strong_count == 0
+
+
+def test_non_eligible_scores_are_kept_for_shadow_calibration(monkeypatch):
+    engine = _engine()
+    SQLModel.metadata.create_all(engine)
+    monkeypatch.setattr("app.services.recommendations.get_match_scorer", lambda: _ObservationScorer())
+
+    with Session(engine) as session:
+        _profile(session, RELEVANT, "Software Engineering")
+        requirements = classify_requirements("Requirements: Python and SQL.", "Backend Developer")
+        job = Job(
+            user_id=SCANNER,
+            content_hash="observation-job",
+            role="Backend Developer",
+            requirements_json=requirements.to_json(),
+            status="analyzed",
+        )
+        session.add(job)
+        session.commit()
+        catalog = catalog_and_enqueue_job(session, SCANNER, job)
+        assert catalog is not None and catalog.id is not None
+        run = generate_shadow_recommendations(session, catalog.id, SCANNER)
+        recommendation = session.exec(select(JobRecommendation)).one()
+
+    assert run.scored_count == 1
+    assert run.strong_count == 0
+    assert recommendation.status == "shadow_observation"

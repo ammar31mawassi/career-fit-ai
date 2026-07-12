@@ -53,7 +53,7 @@ create table if not exists public.job_recommendations (
   reasons_json text not null default '[]',
   match_snapshot_json text not null default '{}',
   model_version text not null default '',
-  status text not null default 'shadow',
+  status text not null default 'shadow_observation',
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
   constraint uq_job_recommendation_version unique (user_id, catalog_job_id, model_version)

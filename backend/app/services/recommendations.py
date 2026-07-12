@@ -109,13 +109,12 @@ def generate_shadow_recommendations(
                 catalog.source_confidence,
             )
             run.scored_count += 1
-            if (
-                result.fit_level != "Strong"
-                or result.score < SHADOW_SCORE_THRESHOLD
-                or result.confidence < SHADOW_CONFIDENCE_THRESHOLD
-                or result.missing_blockers
-            ):
-                continue
+            is_strong = (
+                result.fit_level == "Strong"
+                and result.score >= SHADOW_SCORE_THRESHOLD
+                and result.confidence >= SHADOW_CONFIDENCE_THRESHOLD
+                and not result.missing_blockers
+            )
             recommendation = session.exec(
                 select(JobRecommendation).where(
                     JobRecommendation.user_id == profile.user_id,
@@ -145,10 +144,11 @@ def generate_shadow_recommendations(
                 },
                 sort_keys=True,
             )
-            recommendation.status = "shadow"
+            recommendation.status = "shadow_eligible" if is_strong else "shadow_observation"
             recommendation.updated_at = _now()
             session.add(recommendation)
-            run.strong_count += 1
+            if is_strong:
+                run.strong_count += 1
         run.status = "completed"
         run.completed_at = _now()
         session.add(run)

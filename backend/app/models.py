@@ -267,6 +267,6 @@ class JobRecommendation(SQLModel, table=True):
     reasons_json: str = "[]"
     match_snapshot_json: str = "{}"
     model_version: str = Field(default="", index=True)
-    status: str = Field(default="shadow", index=True)
+    status: str = Field(default="shadow_observation", index=True)
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
