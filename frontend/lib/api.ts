@@ -2,7 +2,6 @@ export type ProfileSource = {
   id: number;
   source_type: string;
   title: string;
-  storage_path: string;
   has_text: boolean;
   read_method: string;
   scanned_pdf_detected: boolean;
@@ -200,6 +199,14 @@ export type WorkspaceBootstrap = {
   jobs: TrackedJobSummary[];
 };
 
+export type AccountExport = {
+  exported_at: string;
+  profile: Profile;
+  sources: Array<{ source_type: string; title: string; content_text: string; updated_at: string }>;
+  fact_feedback: Array<{ fact_type: string; action: string; original_value: string; corrected_value: string; created_at: string }>;
+  jobs: TrackedJob[];
+};
+
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "/backend";
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
@@ -224,12 +231,38 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
   return response.json() as Promise<T>;
 }
 
+async function requestEmpty(path: string, options?: RequestInit): Promise<void> {
+  const response = await fetch(`${API_BASE}${path}`, {
+    ...options,
+    headers: {
+      "Content-Type": "application/json",
+      ...(options?.headers ?? {})
+    },
+    cache: "no-store"
+  });
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({})) as { detail?: string };
+    throw new Error(body.detail ?? `Request failed with ${response.status}`);
+  }
+}
+
 export function getProfile() {
   return request<Profile>("/api/profile");
 }
 
 export function getWorkspaceBootstrap() {
   return request<WorkspaceBootstrap>("/api/workspace/bootstrap");
+}
+
+export function getAccountExport() {
+  return request<AccountExport>("/api/account/export");
+}
+
+export function deleteCareerFitAccount() {
+  return requestEmpty("/api/account", {
+    method: "DELETE",
+    body: JSON.stringify({ confirmation: "DELETE" })
+  });
 }
 
 export function uploadCv(file: File) {
@@ -285,6 +318,13 @@ export function updateProfileFact(factId: number, value: string, reviewStatus: P
   });
 }
 
+export function bulkUpdateProfileFacts(factIds: number[], reviewStatus: "approved" | "rejected") {
+  return request<Profile>("/api/profile/facts", {
+    method: "PATCH",
+    body: JSON.stringify({ fact_ids: factIds, review_status: reviewStatus })
+  });
+}
+
 export function addProfileFact(factType: string, value: string) {
   return request<Profile>("/api/profile/facts", {
     method: "POST",
@@ -313,10 +353,11 @@ export function getJob(jobId: number) {
   return request<TrackedJob>(`/api/jobs/${jobId}`);
 }
 
-export function createJob(payload: JobCreate) {
+export function createJob(payload: JobCreate, signal?: AbortSignal) {
   return request<TrackedJob>("/api/jobs", {
     method: "POST",
-    body: JSON.stringify(payload)
+    body: JSON.stringify(payload),
+    signal
   });
 }
 

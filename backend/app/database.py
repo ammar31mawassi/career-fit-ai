@@ -4,7 +4,6 @@ from pathlib import Path
 from typing import Generator
 
 from sqlalchemy import event
-from sqlalchemy.pool import NullPool
 from sqlmodel import Session, SQLModel, create_engine
 
 from .config import ROOT_DIR, get_settings
@@ -31,10 +30,18 @@ engine_options: dict[str, object] = {"echo": False, "pool_pre_ping": True}
 if database_url.startswith("sqlite"):
     engine_options["connect_args"] = {"check_same_thread": False}
 else:
-    # Supabase transaction pooling already multiplexes connections. Disable named
-    # prepared statements and application-side pooling for serverless runtimes.
+    # Supabase transaction pooling multiplexes database sessions. Keep one tiny
+    # warm application pool per serverless instance so middleware and endpoint
+    # work can reuse the same TLS connection instead of reconnecting twice per
+    # request. The small cap prevents a serverless scale-out connection storm.
     engine_options["connect_args"] = {"prepare_threshold": None}
-    engine_options["poolclass"] = NullPool
+    engine_options.update(
+        pool_size=settings.database_pool_size,
+        max_overflow=settings.database_max_overflow,
+        pool_timeout=8,
+        pool_recycle=180,
+        pool_use_lifo=True,
+    )
 engine = create_engine(database_url, **engine_options)
 
 

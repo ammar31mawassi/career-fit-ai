@@ -23,12 +23,18 @@ ROLE_CASES = [
 ]
 
 
-def _candidate(skills: list[str], domain: str, strength: float = 0.82, years: float = 0) -> CandidateSnapshot:
+def _candidate(
+    skills: list[str],
+    domain: str,
+    strength: float = 0.82,
+    years: float = 0,
+    evidence_type: str = "project",
+) -> CandidateSnapshot:
     evidence = {
         skill: SkillEvidence(
             skill=skill,
             strength=strength,
-            evidence_type="project",
+            evidence_type=evidence_type,
             evidence=f"Built a project using {skill}.",
             fact_id=index + 1,
             source_id=1,
@@ -95,7 +101,7 @@ for domain, role, skills in ROLE_CASES:
 def test_reviewed_calibration_ranges(case_id, candidate, requirements, minimum, maximum):
     result = score_match(candidate, "Ignored Company", case_id, requirements, 1.0)
     assert minimum <= result.score <= maximum
-    assert result.model_version == "fit-v2.1.0"
+    assert result.model_version == "fit-v2.2.0"
     assert result.feature_snapshot["component_scores"]
 
 
@@ -115,3 +121,29 @@ def test_protected_text_cannot_change_score_because_it_is_not_a_feature():
     second = score_match(candidate, "Different Company", "Backend Developer", requirements, 1.0)
     assert first.score == second.score
     assert first.feature_snapshot == second.feature_snapshot
+
+
+def test_declared_skill_is_recognized_without_claiming_demonstrated_evidence():
+    requirements = _requirements("cloud", ["docker"])
+    declared = score_match(
+        _candidate(["docker"], "cloud", strength=0.54, evidence_type="declared_skill"),
+        "Company",
+        "Cloud Developer",
+        requirements,
+        1.0,
+    )
+    confirmed = score_match(
+        _candidate(["docker"], "cloud", strength=0.64, evidence_type="declared_skill"),
+        "Company",
+        "Cloud Developer",
+        requirements,
+        1.0,
+    )
+
+    assert not declared.missing_blockers
+    assert any("listed in the profile" in gap for gap in declared.gaps)
+    assert confirmed.score > declared.score
+    assert not any(
+        "listed in the profile" in gap or "weak" in gap.lower()
+        for gap in confirmed.gaps
+    )

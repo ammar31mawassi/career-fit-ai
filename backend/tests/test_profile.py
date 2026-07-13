@@ -18,6 +18,7 @@ from app.services.profile import (
     candidate_snapshot,
     complete_onboarding,
     patch_fact,
+    patch_facts_bulk,
     update_profile_sources,
     update_profile_preferences,
 )
@@ -318,6 +319,71 @@ def test_profile_analysis_extracts_facts_and_questions_from_cv():
     assert any(question.field_key == "years_experience" for question in questions)
 
 
+def test_action_only_project_bullets_are_preserved_from_pdf_layout_text():
+    engine = _engine()
+    SQLModel.metadata.create_all(engine)
+    with Session(engine) as session:
+        profile = Profile(user_id=USER_ID, status="needs_analysis")
+        session.add(profile)
+        session.commit()
+        session.refresh(profile)
+        session.add(
+            ProfileSource(
+                user_id=USER_ID,
+                profile_id=profile.id or 0,
+                source_type="cv",
+                title="cv.pdf",
+                content_text=(
+                    "B.Sc. Computer Science student, 2 semesters remaining.\n"
+                    "Skills\nPython, FastAPI, PostgreSQL, React, TypeScript, Git, Docker, Linux, SQL\n"
+                    "Projects\n"
+                    "Built an evidence-based job matching platform using Python, FastAPI, React, PostgreSQL and Docker.\n"
+                    "Developed a concurrent C++ robotics simulator with unit tests and CI.\n"
+                    "Experience\nSoftware Engineering Intern, 6 months. Implemented REST APIs and automated testing."
+                ),
+            )
+        )
+        session.commit()
+
+        result = analyze_profile(session, USER_ID)
+
+    projects = [fact.value for fact in result.profile.facts if fact.fact_type == "project"]
+    assert len(projects) == 2
+    assert any("job matching platform" in project.lower() for project in projects)
+    assert any("robotics simulator" in project.lower() for project in projects)
+
+
+def test_declared_and_confirmed_skills_have_distinct_useful_strengths():
+    engine = _engine()
+    SQLModel.metadata.create_all(engine)
+    with Session(engine) as session:
+        profile = Profile(user_id=USER_ID, status="needs_analysis")
+        session.add(profile)
+        session.commit()
+        session.refresh(profile)
+        session.add(
+            ProfileSource(
+                user_id=USER_ID,
+                profile_id=profile.id or 0,
+                source_type="cv",
+                title="cv.pdf",
+                content_text="B.Sc. Computer Science\nSkills\nPython, Docker, Git",
+            )
+        )
+        session.commit()
+        analyzed = analyze_profile(session, USER_ID)
+        session.refresh(profile)
+        before = candidate_snapshot(session, profile).skill_evidence["docker"].strength
+        docker = next(fact for fact in analyzed.profile.facts if fact.fact_type == "skill" and fact.value == "docker")
+        patch_fact(session, USER_ID, docker.id, docker.value, "approved")
+        session.refresh(profile)
+        after = candidate_snapshot(session, profile).skill_evidence["docker"].strength
+
+    assert 0.5 <= before < 0.6
+    assert after >= 0.6
+    assert after > before
+
+
 def test_student_semesters_are_extracted_without_counting_projects_as_work_experience():
     engine = _engine()
     SQLModel.metadata.create_all(engine)
@@ -554,6 +620,40 @@ def test_rejected_fact_is_excluded_from_matching_and_feedback_is_saved():
     assert "python" in snapshot.skills
     assert "java" not in updated.summary
     assert feedback[-1].action == "rejected"
+
+
+def test_bulk_fact_review_updates_once_and_records_each_decision():
+    engine = _engine()
+    SQLModel.metadata.create_all(engine)
+    with Session(engine) as session:
+        profile = Profile(user_id=USER_ID, status="needs_analysis")
+        session.add(profile)
+        session.commit()
+        session.refresh(profile)
+        session.add(
+            ProfileSource(
+                user_id=USER_ID,
+                profile_id=profile.id or 0,
+                source_type="cv",
+                title="cv.pdf",
+                content_text="B.Sc. Computer Science\nSkills\nPython, Docker, Git",
+            )
+        )
+        session.commit()
+        analyzed = analyze_profile(session, USER_ID)
+        selected = [
+            fact.id
+            for fact in analyzed.profile.facts
+            if fact.fact_type == "skill" and fact.value in {"python", "docker"}
+        ]
+
+        updated = patch_facts_bulk(session, USER_ID, selected, "approved")
+        feedback = session.exec(select(ProfileFactFeedback)).all()
+
+    reviewed = [fact for fact in updated.facts if fact.id in selected]
+    assert len(reviewed) == 2
+    assert all(fact.review_status == "approved" and fact.user_approved for fact in reviewed)
+    assert [item.action for item in feedback[-2:]] == ["approved", "approved"]
 
 
 def test_answered_questions_disappear_and_manual_facts_refresh_questions():

@@ -1,7 +1,7 @@
 import { type NextRequest, NextResponse } from "next/server";
 import { createServerClient } from "@supabase/ssr";
 
-const PUBLIC_PATHS = ["/login", "/auth/signup", "/auth/logout", "/icon.svg"];
+const PUBLIC_PATHS = ["/login", "/recover", "/privacy", "/auth/signup", "/auth/logout", "/auth/callback", "/icon.svg"];
 
 function secure(response: NextResponse) {
   response.headers.set("X-Content-Type-Options", "nosniff");

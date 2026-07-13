@@ -6,12 +6,14 @@ import { useAppData } from "@/components/AppDataProvider";
 import { CareerInterestPicker } from "@/components/CareerInterestPicker";
 import { LongTaskProgress } from "@/components/LongTaskProgress";
 import { ClarificationPanel } from "@/components/profile/ClarificationPanel";
+import { AccountControls } from "@/components/profile/AccountControls";
 import { ProfileFactsEditor } from "@/components/profile/ProfileFactsEditor";
 import { recognizePdfInBrowser } from "@/lib/browserOcr";
 import {
   addProfileFact,
   analyzeProfile,
   answerProfileQuestion,
+  bulkUpdateProfileFacts,
   formatDate,
   saveBrowserOcr,
   saveProfileSources,
@@ -165,6 +167,31 @@ export function ProfileClient() {
     }
   }
 
+  async function reviewFacts(facts: ProfileFact[], status: "approved" | "rejected") {
+    const originals = new Map(facts.map((fact) => [fact.id, fact]));
+    const ids = facts.map((fact) => fact.id);
+    setError("");
+    setProfile((current) => current ? {
+      ...current,
+      facts: current.facts.map((fact) => originals.has(fact.id) ? {
+        ...fact,
+        review_status: status,
+        user_approved: status === "approved"
+      } : fact)
+    } : current);
+    try {
+      setProfile(await bulkUpdateProfileFacts(ids, status));
+    } catch (caught) {
+      setProfile((current) => current ? {
+        ...current,
+        facts: current.facts.map((fact) => originals.get(fact.id) ?? fact)
+      } : current);
+      const message = caught instanceof Error ? caught.message : "Could not save the selected reviews.";
+      setError(`Bulk review was rolled back: ${message}`);
+      throw caught;
+    }
+  }
+
   async function answer(questionId: number, value: string) {
     if (!value.trim()) return;
     const originalQuestion = profile?.questions.find((question) => question.id === questionId);
@@ -276,6 +303,11 @@ export function ProfileClient() {
         </div>
       </section>
 
+      <section className={`content-grid profile-review-grid ${openQuestions.length ? "" : "single"}`}>
+        <ProfileFactsEditor facts={profile?.facts ?? []} onAdd={addFact} onBulkReview={reviewFacts} onReview={reviewFact} />
+        {openQuestions.length ? <ClarificationPanel onAnswer={answer} questions={openQuestions} /> : null}
+      </section>
+
       <form className="panel source-form" onSubmit={submitSources}>
         <div className="section-heading">
           <div>
@@ -349,10 +381,7 @@ export function ProfileClient() {
         </div>
       </section>
 
-      <section className={`content-grid ${openQuestions.length ? "" : "single"}`}>
-        <ProfileFactsEditor facts={profile?.facts ?? []} onAdd={addFact} onReview={reviewFact} />
-        {openQuestions.length ? <ClarificationPanel onAnswer={answer} questions={openQuestions} /> : null}
-      </section>
+      <AccountControls />
     </>
   );
 }

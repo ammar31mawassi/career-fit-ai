@@ -22,8 +22,18 @@ The beta does not use OpenAI, ChatGPT, or another hosted generative model. Profi
 - Resume advice for each job: projects, skill order, and a fitting About section.
 - Cached JWKS token verification and a one-call workspace bootstrap for faster authenticated loading.
 - Scanned-PDF detection with an optional private OCR fallback configured through `OCR_SERVICE_URL`.
+- Browser-side OCR fallback when direct PDF text extraction is insufficient.
+- Bulk profile fact confirmation/rejection with pending-first review.
+- Password recovery, private JSON export, account deletion, and a public privacy explanation.
+- Abortable job scans with retained input and idempotent retry.
 
 Out of scope for v1: Goozali scanning, Gmail, WhatsApp, automatic applications, multiple CVs, and LinkedIn scraping.
+
+## Engineering records
+
+- [Senior QA remediation](docs/QA_REMEDIATION_2026-07-13.md)
+- [Future product and engineering proposals](docs/CEO_FUTURE_IMPROVEMENTS.md)
+- [UI, performance, and agent research plan](docs/CAREERFIT_UI_AI_RESEARCH_PLAN.md)
 
 ## Local development
 

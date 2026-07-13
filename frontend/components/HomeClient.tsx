@@ -28,6 +28,7 @@ export function HomeClient() {
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const [scanStartedAt, setScanStartedAt] = useState(0);
+  const [failedScan, setFailedScan] = useState<JobCreate | null>(null);
   const [selectedJobId, setSelectedJobId] = useState<number | null>(null);
   const [jobDetailsById, setJobDetailsById] = useState<Record<number, TrackedJob>>({});
   const [detailsLoading, setDetailsLoading] = useState(false);
@@ -36,6 +37,7 @@ export function HomeClient() {
   const [searchLoading, setSearchLoading] = useState(false);
   const [searchError, setSearchError] = useState("");
   const pendingDetailIds = useRef(new Set<number>());
+  const scanAbort = useRef<AbortController | null>(null);
 
   const profileReady = profile ? profile.status === "ready" : true;
   const profileConfirmedIncomplete = !profileLoading && profile !== null && profile.status !== "ready";
@@ -113,12 +115,20 @@ export function HomeClient() {
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    await runScan(form);
+  }
+
+  async function runScan(payload: JobCreate) {
+    const controller = new AbortController();
+    scanAbort.current?.abort();
+    scanAbort.current = controller;
     setSubmitting(true);
     setScanStartedAt(Date.now());
     setError("");
     setMessage("");
+    setFailedScan(null);
     try {
-      const job = await createJob(form);
+      const job = await createJob(payload, controller.signal);
       const summary = toJobSummary(job);
       setMessage(job.status === "failed" ? job.error : `${job.company} — ${job.role} analyzed and saved.`);
       setJobs((current) => [summary, ...current.filter((item) => item.id !== job.id)]);
@@ -129,8 +139,14 @@ export function HomeClient() {
       setForm(emptyJob);
       setQuery("");
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Could not analyze this job.");
+      if (controller.signal.aborted) {
+        setMessage("Stopped waiting. The server may still finish this scan; use Refresh in a moment before retrying.");
+      } else {
+        setFailedScan(payload);
+        setError(caught instanceof Error ? caught.message : "Could not analyze this job.");
+      }
     } finally {
+      if (scanAbort.current === controller) scanAbort.current = null;
       setSubmitting(false);
       setScanStartedAt(0);
     }
@@ -149,11 +165,11 @@ export function HomeClient() {
         <div><span className="eyebrow"><Sparkles size={14} /> Career signal radar</span><h1>Scan the role.<br /><em>Trust the evidence.</em></h1><p>CareerFit reads an opportunity, compares it to your verified profile, and shows the exact resume changes that improve your fit.</p></div>
         <button className="button quiet" onClick={() => void refreshAll()} type="button"><RefreshCw size={16} /> Refresh</button>
       </header>
-      {error || dataError || searchError ? <div className="notice error">{error || dataError || searchError}</div> : null}
+      {error || dataError || searchError ? <div className="notice error action-notice"><span>{error || dataError || searchError}</span>{failedScan ? <button className="button compact" onClick={() => void runScan(failedScan)} type="button">Retry safely</button> : null}</div> : null}
       {message ? <div className="notice success">{message}</div> : null}
       {profileConfirmedIncomplete ? <section className="panel warning-panel"><FileText size={22} aria-hidden /><div><h2>Profile is not ready</h2><p>Upload one CV and run profile analysis before job matching. GitHub and LinkedIn are optional.</p></div><a className="button primary" href="/profile">Complete profile</a></section> : null}
 
-      <JobScanner form={form} onSubmit={submit} profileReady={profileReady} scanStartedAt={scanStartedAt} setForm={setForm} submitting={submitting} />
+      <JobScanner form={form} onCancel={() => scanAbort.current?.abort()} onSubmit={submit} profileReady={profileReady} scanStartedAt={scanStartedAt} setForm={setForm} submitting={submitting} />
 
       <section className="stats signal-stats" aria-label="Job search overview">
         <div><span>Opportunities mapped</span><strong>{stats.scanned}</strong><small>Cached summaries for quick switching</small></div>

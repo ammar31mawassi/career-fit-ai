@@ -176,7 +176,7 @@ def test_resume_advice_and_status_are_saved():
     assert updated.match.resume_advice.skill_order
     assert updated.match.resume_advice.template_id
     assert "<" not in updated.match.resume_advice.about_text
-    assert updated.match.model_version == "fit-v2.1.0"
+    assert updated.match.model_version == "fit-v2.2.0"
     assert [event.status for event in updated.match.status_history] == ["Lead", "Applied"]
     assert [job.id for job in searched] == [job.id]
 

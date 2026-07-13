@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from .ontology import extract_skills, infer_domain, skill_domain
 
 
-EXTRACTOR_VERSION = "profile-rules-v1.1.0"
+EXTRACTOR_VERSION = "profile-rules-v1.2.0"
 
 SECTION_WORDS = {
     "profile",
@@ -78,10 +78,15 @@ def extract_profile_facts(source_type: str, text: str) -> list[ExtractedFact]:
     if not lines:
         return []
     facts: list[ExtractedFact] = []
+    declared_skill_evidence = _declared_skill_lines(lines)
 
     for skill in extract_skills(text):
         evidence = evidence_for_term(lines, skill)
-        evidence_type = _skill_evidence_type(source_type, evidence)
+        evidence_type = _skill_evidence_type(
+            source_type,
+            evidence,
+            evidence in declared_skill_evidence,
+        )
         facts.append(
             ExtractedFact(
                 "skill",
@@ -212,13 +217,26 @@ def _projects(source_type: str, lines: list[str]) -> list[tuple[str, str]]:
 
     output: list[tuple[str, str]] = []
     in_projects = False
+    project_title = ""
     for index, line in enumerate(lines):
         section = _section(line)
         if section:
             in_projects = section in {"projects", "selected projects", "selected engineering projects", "hackathons"}
+            project_title = ""
             continue
         lower = line.lower()
         has_action = any(re.search(rf"\b{word}\b", lower) for word in ACTION_WORDS)
+        if in_projects and has_action:
+            if output and line in output[-1][1]:
+                # The preceding title/look-ahead pair already captured this
+                # bullet; do not create a second action-only project.
+                continue
+            evidence = " ".join(part for part in (project_title, line) if part)[:320]
+            value = f"{project_title}: {line}" if project_title else line
+            output.append((value[:300], evidence))
+            # Keep a real title for consecutive bullets so they reconcile to
+            # one project key. Action-only entries remain independent.
+            continue
         if has_action and "project" in lower and not any(phrase in lower for phrase in ("seeking", "collaborate", "experience in")):
             output.append((line[:300], line[:320]))
             continue
@@ -233,6 +251,8 @@ def _projects(source_type: str, lines: list[str]) -> list[tuple[str, str]]:
             "",
         )
         if not action:
+            if in_projects and _project_title_candidate(line):
+                project_title = line.split("|", 1)[0].strip()
             continue
         title = line.split("|", 1)[0].strip()
         if title.lower() in {*LANGUAGES, *PROFICIENCY}:
@@ -248,6 +268,33 @@ def _projects(source_type: str, lines: list[str]) -> list[tuple[str, str]]:
         value = f"{title}: {action}" if title else action
         output.append((value[:300], " ".join([part for part in (title, action) if part])[:320]))
     return _dedupe_pairs(output)[:12]
+
+
+def _project_title_candidate(line: str) -> bool:
+    title = line.split("|", 1)[0].strip()
+    return bool(
+        2 <= len(title) <= 80
+        and not _is_heading(title)
+        and not title.endswith((".", ":"))
+        and len(extract_skills(title)) < 2
+        and title[:1].isupper()
+    )
+
+
+def _declared_skill_lines(lines: list[str]) -> set[str]:
+    declared: set[str] = set()
+    in_skills = False
+    skill_sections = {"technical skills", "skills", "tools"}
+    for line in lines:
+        section = _section(line)
+        if section:
+            in_skills = section in skill_sections
+            if in_skills and extract_skills(line):
+                declared.add(line)
+            continue
+        if in_skills and extract_skills(line):
+            declared.add(line)
+    return declared
 
 
 def _experiences(lines: list[str]) -> list[tuple[str, str]]:
@@ -386,7 +433,7 @@ def _work_authorization(text: str) -> str:
     return ""
 
 
-def _skill_evidence_type(source_type: str, evidence: str) -> str:
+def _skill_evidence_type(source_type: str, evidence: str, declared: bool = False) -> str:
     lower = evidence.lower()
     if source_type == "manual":
         return "self_reported"
@@ -398,6 +445,8 @@ def _skill_evidence_type(source_type: str, evidence: str) -> str:
         return "coursework"
     if source_type.startswith("linkedin") and any(word in lower for word in ROLE_WORDS):
         return "professional"
+    if declared:
+        return "declared_skill"
     return "cv_mention"
 
 
@@ -459,6 +508,8 @@ def _skill_confidence(source_type: str, evidence_type: str) -> float:
         return 0.82
     if evidence_type == "coursework":
         return 0.68
+    if evidence_type == "declared_skill":
+        return 0.76
     if source_type == "manual":
         return 0.56
     return 0.66

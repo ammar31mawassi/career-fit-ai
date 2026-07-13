@@ -1,12 +1,14 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile
 from sqlmodel import Session
 from uuid import UUID
 
 from ..config import get_settings
 from ..database import get_session
 from ..schemas import (
+    AccountDeleteIn,
+    AccountExportOut,
     BrowserOcrIn,
     ClarificationAnswerIn,
     JobCreateIn,
@@ -14,6 +16,7 @@ from ..schemas import (
     JobStatusPatchIn,
     JobSummaryOut,
     ProfileAnalyzeResult,
+    ProfileFactBulkReviewIn,
     ProfileFactCreateIn,
     ProfileFactPatchIn,
     ProfileOut,
@@ -21,6 +24,7 @@ from ..schemas import (
     ProfileSourcesIn,
     WorkspaceBootstrapOut,
 )
+from ..services.account import delete_account, export_account
 from ..services.auth import current_user_id
 from ..services.jobs import create_or_analyze_job, job_output, list_job_summaries, list_jobs, update_job_status
 from ..services.profile import (
@@ -30,6 +34,7 @@ from ..services.profile import (
     answer_question,
     complete_onboarding,
     patch_fact,
+    patch_facts_bulk,
     profile_output,
     update_profile_sources,
     update_profile_preferences,
@@ -45,6 +50,28 @@ router = APIRouter(prefix="/api")
 @router.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@router.get("/account/export", response_model=AccountExportOut)
+def download_account_export(
+    user_id: UUID = Depends(current_user_id),
+    session: Session = Depends(get_session),
+) -> AccountExportOut:
+    return export_account(session, user_id)
+
+
+@router.delete("/account", status_code=204)
+def remove_account(
+    payload: AccountDeleteIn,
+    user_id: UUID = Depends(current_user_id),
+    session: Session = Depends(get_session),
+) -> Response:
+    del payload
+    try:
+        delete_account(session, user_id)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return Response(status_code=204)
 
 
 @router.get("/workspace/bootstrap", response_model=WorkspaceBootstrapOut)
@@ -156,6 +183,18 @@ def update_fact(
 ) -> ProfileOut:
     try:
         return patch_fact(session, user_id, fact_id, payload.value, payload.review_status)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.patch("/profile/facts", response_model=ProfileOut)
+def bulk_update_facts(
+    payload: ProfileFactBulkReviewIn,
+    user_id: UUID = Depends(current_user_id),
+    session: Session = Depends(get_session),
+) -> ProfileOut:
+    try:
+        return patch_facts_bulk(session, user_id, payload.fact_ids, payload.review_status)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 

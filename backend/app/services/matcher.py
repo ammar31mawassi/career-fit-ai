@@ -8,7 +8,7 @@ from .ontology import ONTOLOGY_VERSION, extract_skills, skill_match_strength
 from .profile import CandidateSnapshot, SkillEvidence
 
 
-MODEL_VERSION = "fit-v2.1.0"
+MODEL_VERSION = "fit-v2.2.0"
 
 
 @dataclass(frozen=True)
@@ -18,6 +18,7 @@ class SkillMatch:
     transfer_strength: float
     evidence_strength: float
     combined_strength: float
+    evidence_type: str
     evidence: str
     fact_id: int | None
 
@@ -181,7 +182,13 @@ def score_match(
         evidence = requirements.evidence_by_requirement.get(skill, "Explicitly listed as required.")
         blockers.append(f"Missing must-have skill: {skill}. Job evidence: {evidence}")
     for skill in weak_must:
-        gaps.append(f"Must-have evidence is weak or only transferable: {skill}.")
+        match = skill_matches[skill]
+        if match and match.evidence_type == "declared_skill":
+            gaps.append(
+                f"{skill} is listed in the profile but is not yet backed by project or work evidence."
+            )
+        else:
+            gaps.append(f"Must-have evidence is weak or only transferable: {skill}.")
     for group in missing_groups:
         blockers.append(
             "Missing required alternative: one of "
@@ -356,6 +363,7 @@ def _best_skill_match(candidate: CandidateSnapshot, requirement: str) -> SkillMa
             transfer_strength=transfer,
             evidence_strength=evidence.strength,
             combined_strength=combined,
+            evidence_type=evidence.evidence_type,
             evidence=evidence.evidence,
             fact_id=evidence.fact_id,
         )

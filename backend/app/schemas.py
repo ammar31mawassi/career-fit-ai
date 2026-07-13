@@ -16,7 +16,6 @@ class ProfileSourceOut(BaseModel):
     id: int
     source_type: str
     title: str
-    storage_path: str
     has_text: bool
     read_method: str = ""
     scanned_pdf_detected: bool = False
@@ -98,6 +97,16 @@ class ProfilePreferencesIn(BaseModel):
 class ProfileFactPatchIn(BaseModel):
     value: str = Field(min_length=1, max_length=1000)
     review_status: Literal["pending", "approved", "rejected"] = "approved"
+
+
+class ProfileFactBulkReviewIn(BaseModel):
+    fact_ids: list[int] = Field(min_length=1, max_length=100)
+    review_status: Literal["approved", "rejected"]
+
+    @field_validator("fact_ids")
+    @classmethod
+    def unique_fact_ids(cls, values: list[int]) -> list[int]:
+        return list(dict.fromkeys(values))
 
 
 class ProfileFactCreateIn(BaseModel):
@@ -262,6 +271,33 @@ class WorkspaceBootstrapOut(BaseModel):
     user_id: str
     profile: ProfileOut
     jobs: list[JobSummaryOut] = Field(default_factory=list)
+
+
+class AccountSourceExportOut(BaseModel):
+    source_type: str
+    title: str
+    content_text: str
+    updated_at: datetime
+
+
+class AccountFeedbackExportOut(BaseModel):
+    fact_type: str
+    action: str
+    original_value: str
+    corrected_value: str
+    created_at: datetime
+
+
+class AccountExportOut(BaseModel):
+    exported_at: datetime
+    profile: ProfileOut
+    sources: list[AccountSourceExportOut] = Field(default_factory=list)
+    fact_feedback: list[AccountFeedbackExportOut] = Field(default_factory=list)
+    jobs: list[JobOut] = Field(default_factory=list)
+
+
+class AccountDeleteIn(BaseModel):
+    confirmation: Literal["DELETE"]
 
 
 class JobCreateIn(BaseModel):

@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState, type Dispatch, type FormEvent, type SetStateAction } from "react";
-import { ArrowUpRight, ChevronDown, Radar } from "lucide-react";
+import { ArrowUpRight, ChevronDown, Radar, X } from "lucide-react";
 import type { JobCreate } from "@/lib/api";
 
 export function JobScanner({
@@ -10,7 +10,8 @@ export function JobScanner({
   submitting,
   scanStartedAt,
   profileReady,
-  onSubmit
+  onSubmit,
+  onCancel
 }: {
   form: JobCreate;
   setForm: Dispatch<SetStateAction<JobCreate>>;
@@ -18,6 +19,7 @@ export function JobScanner({
   scanStartedAt: number;
   profileReady: boolean;
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
+  onCancel: () => void;
 }) {
   return (
     <form aria-busy={submitting} className={`panel job-form${submitting ? " is-scanning" : ""}`} onSubmit={onSubmit}>
@@ -61,11 +63,11 @@ export function JobScanner({
           </label>
         </div>
       </details>
-      {submitting ? <ScanProgress hasSourceUrl={Boolean(form.source_url.trim())} startedAt={scanStartedAt} /> : null}
+      {submitting ? <ScanProgress hasSourceUrl={Boolean(form.source_url.trim())} onCancel={onCancel} startedAt={scanStartedAt} /> : null}
     </form>
   );
 }
-function ScanProgress({ startedAt, hasSourceUrl }: { startedAt: number; hasSourceUrl: boolean }) {
+function ScanProgress({ startedAt, hasSourceUrl, onCancel }: { startedAt: number; hasSourceUrl: boolean; onCancel: () => void }) {
   const [elapsed, setElapsed] = useState(0);
 
   useEffect(() => {
@@ -93,6 +95,7 @@ function ScanProgress({ startedAt, hasSourceUrl }: { startedAt: number; hasSourc
         <ol className="scan-stage-list">
           {stages.map((stage, index) => <li className={index <= activeStage ? "active" : ""} key={stage}>{stage}</li>)}
         </ol>
+        <button className="button compact quiet scan-cancel" onClick={onCancel} type="button"><X size={13} /> Stop waiting</button>
       </div>
       <div className="scan-progress-rail" aria-hidden><span /></div>
     </section>

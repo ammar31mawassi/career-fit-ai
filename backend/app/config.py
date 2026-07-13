@@ -16,6 +16,8 @@ load_dotenv(ROOT_DIR / ".env")
 class Settings:
     app_env: str
     database_url: str
+    database_pool_size: int
+    database_max_overflow: int
     allowed_origins: tuple[str, ...]
     backend_api_key: str | None
     supabase_url: str | None
@@ -43,6 +45,8 @@ def get_settings() -> Settings:
     return Settings(
         app_env=os.getenv("APP_ENV", "development").strip().lower(),
         database_url=os.getenv("DATABASE_URL", "sqlite:///./data/career_fit_ai.db"),
+        database_pool_size=max(1, int(os.getenv("DATABASE_POOL_SIZE", "1"))),
+        database_max_overflow=max(0, int(os.getenv("DATABASE_MAX_OVERFLOW", "1"))),
         allowed_origins=_csv_values(
             os.getenv("ALLOWED_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000")
         ),

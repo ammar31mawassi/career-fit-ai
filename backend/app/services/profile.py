@@ -412,7 +412,6 @@ def _profile_source_output(source: ProfileSource) -> ProfileSourceOut:
         id=source.id or 0,
         source_type=source.source_type,
         title=source.title,
-        storage_path=source.storage_path,
         has_text=bool(source.content_text.strip()),
         read_method=str(metadata.get("read_method") or ""),
         scanned_pdf_detected=bool(metadata.get("scanned_pdf_detected")),
@@ -458,6 +457,53 @@ def patch_fact(session: Session, user_id: UUID, fact_id: int, value: str, review
     )
     session.flush()
     profile = session.get(Profile, fact.profile_id)
+    if profile:
+        _rebuild_profile_state(session, profile)
+    session.commit()
+    return profile_output(session, user_id)
+
+
+def patch_facts_bulk(
+    session: Session,
+    user_id: UUID,
+    fact_ids: list[int],
+    review_status: str,
+) -> ProfileOut:
+    ids = list(dict.fromkeys(fact_ids))
+    facts = list(
+        session.exec(
+            select(ProfileFact).where(
+                ProfileFact.user_id == user_id,
+                ProfileFact.id.in_(ids),
+            )
+        ).all()
+    )
+    if len(facts) != len(ids):
+        raise ValueError("One or more profile facts were not found.")
+    now = _now()
+    for fact in facts:
+        fact.review_status = review_status
+        fact.user_approved = review_status == "approved"
+        fact.reviewed_at = now
+        fact.extraction_key = fact.extraction_key or fact_key(fact.fact_type, fact.value)
+        fact.updated_at = now
+        session.add(fact)
+        session.add(
+            ProfileFactFeedback(
+                user_id=user_id,
+                profile_id=fact.profile_id,
+                fact_id=fact.id,
+                fact_type=fact.fact_type,
+                extraction_key=fact.extraction_key,
+                action=review_status,
+                original_value=fact.value,
+                corrected_value="",
+                source_ids_json=fact.source_ids_json,
+                extractor_version=EXTRACTOR_VERSION,
+            )
+        )
+    session.flush()
+    profile = session.get(Profile, facts[0].profile_id)
     if profile:
         _rebuild_profile_state(session, profile)
     session.commit()
@@ -1186,13 +1232,16 @@ def _evidence_strength(
         "internship": 0.85,
         "project": 0.8,
         "github_project": 0.65,
+        "declared_skill": 0.58,
         "coursework": 0.55,
         "user_approved": 0.45,
         "self_reported": 0.4,
         "cv_mention": 0.35,
     }.get(evidence_type, 0.3)
     if approved:
-        base = max(base, 0.5)
+        # Confirmation must change the match outcome, while demonstrated
+        # project/work evidence remains the strongest signal.
+        base = max(base, 0.7)
     return round(
         min(1.0, base * (0.7 + 0.3 * max(0.0, min(1.0, confidence))) * recency_factor),
         3,
