@@ -25,13 +25,31 @@ export function OpportunityInspector({
   onStatusChanged: (job: TrackedJob) => void;
 }) {
   const [saving, setSaving] = useState(false);
+  const [statusError, setStatusError] = useState("");
   const match = job?.match ?? null;
 
   async function setStatus(status: JobStatus) {
-    if (!job) return;
+    if (!job?.match || job.match.status === status) return;
+    const previous = job;
+    const optimistic: TrackedJob = {
+      ...job,
+      match: {
+        ...job.match,
+        status,
+        status_history: [
+          ...job.match.status_history,
+          { status, created_at: new Date().toISOString() }
+        ]
+      }
+    };
+    onStatusChanged(optimistic);
+    setStatusError("");
     setSaving(true);
     try {
       onStatusChanged(await updateJobStatus(job.id, status));
+    } catch (caught) {
+      onStatusChanged(previous);
+      setStatusError(caught instanceof Error ? `Stage change was rolled back: ${caught.message}` : "Stage change was rolled back.");
     } finally {
       setSaving(false);
     }
@@ -65,9 +83,11 @@ export function OpportunityInspector({
             <select disabled={saving} onChange={(event) => void setStatus(event.target.value as JobStatus)} value={match.status}>
               {(["Lead", "Applied", "Interview", "Rejected", "Withdrawn", "Offer"] as JobStatus[]).map((status) => <option key={status}>{status}</option>)}
             </select>
+            {saving ? <small>Saved · syncing</small> : null}
           </label>
         ) : null}
       </div>
+      {statusError ? <div className="notice error compact-notice" role="alert">{statusError}</div> : null}
 
       <div className="detail-grid inspector-metrics">
         <Detail icon={<Gauge size={14} />} label="Match confidence" value={`${Math.round((match?.confidence ?? 0) * 100)}%`} />

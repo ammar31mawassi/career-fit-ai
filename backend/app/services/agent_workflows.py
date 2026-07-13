@@ -35,8 +35,7 @@ def start_agent_run(
         updated_at=_now(),
     )
     session.add(run)
-    session.commit()
-    session.refresh(run)
+    session.flush()
     return run
 
 
@@ -47,7 +46,7 @@ def attach_subject(session: Session, run: AgentRun | None, subject_type: str, su
     run.subject_id = subject_id
     run.updated_at = _now()
     session.add(run)
-    session.commit()
+    session.flush()
 
 
 def start_step(session: Session, run: AgentRun | None, step_key: str, title: str, progress: str = "") -> AgentStep | None:
@@ -63,8 +62,7 @@ def start_step(session: Session, run: AgentRun | None, step_key: str, title: str
         started_at=_now(),
     )
     session.add(step)
-    session.commit()
-    session.refresh(step)
+    session.flush()
     return step
 
 
@@ -82,7 +80,7 @@ def complete_step(
     step.output_json = _json(output or {})
     step.completed_at = _now()
     session.add(step)
-    session.commit()
+    session.flush()
 
 
 def fail_step(session: Session, step: AgentStep | None, error: str, output: dict[str, object] | None = None) -> None:
@@ -93,7 +91,7 @@ def fail_step(session: Session, step: AgentStep | None, error: str, output: dict
     step.output_json = _json(output or {})
     step.completed_at = _now()
     session.add(step)
-    session.commit()
+    session.flush()
 
 
 def complete_run(session: Session, run: AgentRun | None, summary: str = "", status: str = "completed") -> None:
@@ -105,7 +103,7 @@ def complete_run(session: Session, run: AgentRun | None, summary: str = "", stat
     run.updated_at = _now()
     run.completed_at = _now()
     session.add(run)
-    session.commit()
+    session.flush()
 
 
 def fail_run(session: Session, run: AgentRun | None, error: str, summary: str = "") -> None:
@@ -118,7 +116,7 @@ def fail_run(session: Session, run: AgentRun | None, error: str, summary: str = 
     run.updated_at = _now()
     run.completed_at = _now()
     session.add(run)
-    session.commit()
+    session.flush()
 
 
 def latest_agent_run_for_subject(

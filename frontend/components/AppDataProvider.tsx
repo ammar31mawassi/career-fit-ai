@@ -27,11 +27,40 @@ type AppData = {
   refreshProfile: () => Promise<Profile>;
   refreshJobs: () => Promise<TrackedJobSummary[]>;
   refreshAll: () => Promise<void>;
+  reportDataError: (message: string) => void;
 };
 
 const AppDataContext = createContext<AppData | null>(null);
 const WORKSPACE_CACHE_PREFIX = "careerfit:workspace:v4:";
 const WORKSPACE_CACHE_TTL = 5 * 60 * 1000;
+const ONBOARDING_SYNC_KEY = "careerfit:onboarding-syncing";
+
+export function markOnboardingSyncing() {
+  try {
+    sessionStorage.setItem(ONBOARDING_SYNC_KEY, String(Date.now()));
+  } catch {
+    // Session storage is optional; the server remains the source of truth.
+  }
+}
+
+export function clearOnboardingSyncing() {
+  try {
+    sessionStorage.removeItem(ONBOARDING_SYNC_KEY);
+  } catch {
+    // Session storage is optional; the marker also expires automatically.
+  }
+}
+
+function onboardingSyncIsRecent() {
+  try {
+    const startedAt = Number(sessionStorage.getItem(ONBOARDING_SYNC_KEY) || 0);
+    if (startedAt && Date.now() - startedAt < 30_000) return true;
+    sessionStorage.removeItem(ONBOARDING_SYNC_KEY);
+  } catch {
+    // Fall through to the normal server refresh.
+  }
+  return false;
+}
 
 type WorkspaceCache = {
   savedAt: number;
@@ -177,7 +206,12 @@ export function AppDataProvider({ children }: { children: ReactNode }) {
       });
       setJobsLoading(false);
     } else if (pathname === "/") {
-      void refreshAll();
+      if (onboardingSyncIsRecent()) {
+        setProfileLoading(false);
+        setJobsLoading(false);
+      } else {
+        void refreshAll();
+      }
     }
   }, [pathname, refreshAll, refreshProfile, userId]);
 
@@ -213,7 +247,8 @@ export function AppDataProvider({ children }: { children: ReactNode }) {
       setJobs,
       refreshProfile,
       refreshJobs,
-      refreshAll
+      refreshAll,
+      reportDataError: setDataError
     }),
     [profile, jobs, profileLoading, jobsLoading, dataError, refreshProfile, refreshJobs, refreshAll]
   );

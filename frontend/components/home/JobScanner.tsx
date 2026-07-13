@@ -61,11 +61,11 @@ export function JobScanner({
           </label>
         </div>
       </details>
-      {submitting ? <ScanProgress startedAt={scanStartedAt} /> : null}
+      {submitting ? <ScanProgress hasSourceUrl={Boolean(form.source_url.trim())} startedAt={scanStartedAt} /> : null}
     </form>
   );
 }
-function ScanProgress({ startedAt }: { startedAt: number }) {
+function ScanProgress({ startedAt, hasSourceUrl }: { startedAt: number; hasSourceUrl: boolean }) {
   const [elapsed, setElapsed] = useState(0);
 
   useEffect(() => {
@@ -75,7 +75,7 @@ function ScanProgress({ startedAt }: { startedAt: number }) {
   }, [startedAt]);
 
   const stages = [
-    "Opening the source",
+    hasSourceUrl ? "Opening the source" : "Validating pasted description",
     "Extracting requirements",
     "Classifying must-haves",
     "Matching profile evidence",
@@ -89,7 +89,7 @@ function ScanProgress({ startedAt }: { startedAt: number }) {
       <div className="scan-progress-copy">
         <span className="scan-progress-label">Analysis in progress · {elapsed}s</span>
         <strong>{stages[activeStage]}</strong>
-        <small>Some career sites take longer when they limit automated reading. Keep this tab open.</small>
+        <small>{hasSourceUrl ? "Some career sites take longer when they limit automated reading." : "The evidence model is classifying requirements and recalculating your match."} Keep this tab open.</small>
         <ol className="scan-stage-list">
           {stages.map((stage, index) => <li className={index <= activeStage ? "active" : ""} key={stage}>{stage}</li>)}
         </ol>

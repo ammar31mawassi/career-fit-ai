@@ -73,6 +73,7 @@ def create_or_analyze_job(session: Session, user_id: UUID, payload: JobCreateIn)
             {"job_id": existing.id or 0, "reader_version": JOB_READER_VERSION},
         )
         complete_run(session, run, "Existing saved job reused.", status="reused")
+        session.commit()
         _catalog_for_discovery(session, user_id, existing)
         return job_output(session, user_id, existing.id or 0)
     complete_step(
@@ -95,6 +96,7 @@ def create_or_analyze_job(session: Session, user_id: UUID, payload: JobCreateIn)
         if existing and existing.status == "analyzed":
             attach_subject(session, run, "job", existing.id or 0)
             complete_run(session, run, "Extraction failed, existing analyzed job reused.", status="reused")
+            session.commit()
             return job_output(session, user_id, existing.id or 0)
         job = existing or Job(user_id=user_id, content_hash=content_hash, created_at=_now())
         job.source_url = payload.source_url.strip()
@@ -109,6 +111,7 @@ def create_or_analyze_job(session: Session, user_id: UUID, payload: JobCreateIn)
         session.refresh(job)
         attach_subject(session, run, "job", job.id or 0)
         fail_run(session, run, str(exc), "Job reader failed during extraction.")
+        session.commit()
         return job_output(session, user_id, job.id or 0)
     complete_step(
         session,
@@ -150,15 +153,15 @@ def create_or_analyze_job(session: Session, user_id: UUID, payload: JobCreateIn)
     job.error = ""
     job.updated_at = _now()
     session.add(job)
-    session.commit()
-    session.refresh(job)
+    session.flush()
     attach_subject(session, run, "job", job.id or 0)
     match_step = start_step(session, run, "match_profile_evidence", "Match profile evidence to requirements")
     try:
-        match = _save_match(session, user_id, profile, job)
+        match = _save_match(session, user_id, profile, job, commit=False)
     except Exception as exc:
         fail_step(session, match_step, str(exc), {"job_id": job.id or 0})
         fail_run(session, run, str(exc), "Job reader failed during evidence matching.")
+        session.commit()
         raise
     complete_step(
         session,
@@ -179,6 +182,7 @@ def create_or_analyze_job(session: Session, user_id: UUID, payload: JobCreateIn)
         {"match_id": match.id or 0},
     )
     complete_run(session, run, "Job analyzed, matched, and saved.")
+    session.commit()
     _catalog_for_discovery(session, user_id, job)
     return job_output(session, user_id, job.id or 0)
 
@@ -326,7 +330,14 @@ def update_job_status(session: Session, user_id: UUID, job_id: int, status: str)
     return job_output(session, user_id, job_id)
 
 
-def _save_match(session: Session, user_id: UUID, profile: Profile, job: Job) -> JobMatch:
+def _save_match(
+    session: Session,
+    user_id: UUID,
+    profile: Profile,
+    job: Job,
+    *,
+    commit: bool = True,
+) -> JobMatch:
     requirements = requirements_from_json(job.requirements_json)
     snapshot = candidate_snapshot(session, profile)
     result = get_match_scorer().score(
@@ -356,11 +367,10 @@ def _save_match(session: Session, user_id: UUID, profile: Profile, job: Job) -> 
     match.analyzed_at = _now()
     match.updated_at = _now()
     session.add(match)
-    session.commit()
-    session.refresh(match)
+    session.flush()
     if is_new:
         session.add(JobStatusEvent(user_id=user_id, match_id=match.id or 0, status=match.status, created_at=_now()))
-        session.commit()
+        session.flush()
 
     advice = session.exec(
         select(ResumeAdvice).where(ResumeAdvice.user_id == user_id, ResumeAdvice.match_id == match.id)
@@ -374,7 +384,10 @@ def _save_match(session: Session, user_id: UUID, profile: Profile, job: Job) -> 
     advice.evidence_json = json.dumps(result.about_evidence)
     advice.generated_at = _now()
     session.add(advice)
-    session.commit()
+    if commit:
+        session.commit()
+    else:
+        session.flush()
     return match
 
 

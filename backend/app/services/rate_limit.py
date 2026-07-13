@@ -103,11 +103,14 @@ def check_rate_limit(request: Request) -> JSONResponse | None:
     settings = get_settings()
     if settings.app_env == "production":
         try:
-            for policy in policies:
-                for key in rate_limit_keys(request, policy):
-                    result = _consume_distributed(key, policy.limit, policy.window_seconds)
-                    if not result["allowed"]:
-                        return _limited_response(policy, result["retry_after"], result["remaining"])
+            checks = [
+                (policy, key)
+                for policy in policies
+                for key in rate_limit_keys(request, policy)
+            ]
+            for (policy, _), result in zip(checks, _consume_distributed_batch(checks), strict=True):
+                if not result["allowed"]:
+                    return _limited_response(policy, result["retry_after"], result["remaining"])
         except Exception:
             return JSONResponse(
                 {"detail": "Request protection is temporarily unavailable. Try again shortly."},
@@ -152,6 +155,44 @@ def _consume_distributed(key: str, limit: int, window_seconds: int) -> dict[str,
         "remaining": int(row["remaining"]),
         "retry_after": int(row["retry_after"]),
     }
+
+
+def _consume_distributed_batch(
+    checks: list[tuple[RateLimitPolicy, str]],
+) -> list[dict[str, int | bool]]:
+    """Consume every applicable bucket in one database round trip.
+
+    Serverless runtimes use NullPool, so opening a new TLS/Postgres connection
+    for every user/IP/policy bucket made ordinary writes spend several seconds
+    in rate limiting alone.
+    """
+    if not checks:
+        return []
+    values: list[str] = []
+    parameters: dict[str, object] = {}
+    for index, (policy, key) in enumerate(checks):
+        values.append(f"(:key_{index}, :limit_{index}, :window_{index}, {index})")
+        parameters[f"key_{index}"] = key
+        parameters[f"limit_{index}"] = policy.limit
+        parameters[f"window_{index}"] = policy.window_seconds
+    statement = text(
+        "with checks(bucket_key, request_limit, window_seconds, ordinal) as (values "
+        + ",".join(values)
+        + ") select checks.ordinal, result.allowed, result.remaining, result.retry_after "
+        "from checks cross join lateral public.consume_rate_limit("
+        "checks.bucket_key, checks.request_limit, checks.window_seconds) result "
+        "order by checks.ordinal"
+    )
+    with engine.begin() as connection:
+        rows = connection.execute(statement, parameters).mappings().all()
+    return [
+        {
+            "allowed": bool(row["allowed"]),
+            "remaining": int(row["remaining"]),
+            "retry_after": int(row["retry_after"]),
+        }
+        for row in rows
+    ]
 
 
 def _limited_response(

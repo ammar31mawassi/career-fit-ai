@@ -31,6 +31,7 @@ export function ProfileClient() {
   const [cvFile, setCvFile] = useState<File | null>(null);
   const [linkedinFile, setLinkedinFile] = useState<File | null>(null);
   const [saving, setSaving] = useState(false);
+  const [interestsSyncing, setInterestsSyncing] = useState(false);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const [task, setTask] = useState<{ title: string; detail: string; progress: number; activeStep: number } | null>(null);
@@ -143,33 +144,94 @@ export function ProfileClient() {
   }
 
   async function reviewFact(fact: ProfileFact, value: string, status: ProfileFact["review_status"]) {
-    const updated = await updateProfileFact(fact.id, value, status);
-    setProfile(updated);
+    setError("");
+    setProfile((current) => current ? {
+      ...current,
+      facts: current.facts.map((item) => item.id === fact.id ? {
+        ...item,
+        value,
+        review_status: status,
+        user_approved: status === "approved"
+      } : item)
+    } : current);
+    try {
+      setProfile(await updateProfileFact(fact.id, value, status));
+    } catch (caught) {
+      setProfile((current) => current ? {
+        ...current,
+        facts: current.facts.map((item) => item.id === fact.id ? fact : item)
+      } : current);
+      setError(caught instanceof Error ? `Fact update was rolled back: ${caught.message}` : "Fact update was rolled back.");
+    }
   }
 
   async function answer(questionId: number, value: string) {
     if (!value.trim()) return;
-    const updated = await answerProfileQuestion(questionId, value);
-    setProfile(updated);
+    const originalQuestion = profile?.questions.find((question) => question.id === questionId);
+    setError("");
+    setProfile((current) => current ? {
+      ...current,
+      questions: current.questions.filter((question) => question.id !== questionId)
+    } : current);
+    try {
+      setProfile(await answerProfileQuestion(questionId, value));
+    } catch (caught) {
+      if (originalQuestion) {
+        setProfile((current) => current ? {
+          ...current,
+          questions: current.questions.some((question) => question.id === questionId)
+            ? current.questions
+            : [...current.questions, originalQuestion]
+        } : current);
+      }
+      setError(caught instanceof Error ? `Answer was restored: ${caught.message}` : "Answer was restored because it could not be saved.");
+    }
   }
 
   async function addFact(type: string, value: string) {
-    const updated = await addProfileFact(type, value);
-    setProfile(updated);
+    const temporaryId = -Date.now();
+    setError("");
+    setProfile((current) => current ? {
+      ...current,
+      facts: [...current.facts, {
+        id: temporaryId,
+        fact_type: type,
+        value,
+        evidence: "Added manually by you.",
+        confidence: 1,
+        user_approved: true,
+        review_status: "approved",
+        support_count: 1,
+        source_ids: [],
+        source_id: null
+      }]
+    } : current);
+    try {
+      setProfile(await addProfileFact(type, value));
+    } catch (caught) {
+      setProfile((current) => current ? {
+        ...current,
+        facts: current.facts.filter((item) => item.id !== temporaryId)
+      } : current);
+      setError(caught instanceof Error ? `New fact was removed: ${caught.message}` : "New fact was removed because it could not be saved.");
+    }
   }
 
   async function saveInterests() {
-    setSaving(true);
+    const previousInterests = profile?.career_interests ?? [];
+    setInterestsSyncing(true);
     setError("");
-    setMessage("");
+    setMessage("Career interests updated.");
+    setProfile((current) => current ? { ...current, career_interests: careerInterests } : current);
     try {
       const updated = await saveProfilePreferences(careerInterests);
       setProfile(updated);
-      setMessage("Career interests updated.");
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not save career interests.");
+      setProfile((current) => current ? { ...current, career_interests: previousInterests } : current);
+      setError(err instanceof Error ? `Interest changes were rolled back: ${err.message}` : "Interest changes were rolled back.");
+      setMessage("");
     } finally {
-      setSaving(false);
+      setInterestsSyncing(false);
     }
   }
 
@@ -283,7 +345,7 @@ export function ProfileClient() {
         </div>
         <CareerInterestPicker disabled={saving} onChange={setCareerInterests} selected={careerInterests} />
         <div className="form-actions">
-          <button className="button primary" disabled={saving} onClick={() => void saveInterests()} type="button"><Save size={16} /> Save interests</button>
+          <button className="button primary" disabled={interestsSyncing} onClick={() => void saveInterests()} type="button"><Save size={16} /> {interestsSyncing ? "Saved · syncing" : "Save interests"}</button>
         </div>
       </section>
 

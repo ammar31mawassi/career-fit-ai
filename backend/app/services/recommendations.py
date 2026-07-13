@@ -59,10 +59,10 @@ def catalog_and_enqueue_job(session: Session, source_user_id: UUID, job: Job) ->
     catalog.active = True
     catalog.updated_at = _now()
     session.add(catalog)
-    session.commit()
-    session.refresh(catalog)
+    session.flush()
     if should_enqueue:
         _enqueue_if_supported(session, catalog.id or 0, source_user_id)
+    session.commit()
     return catalog
 
 
@@ -200,7 +200,7 @@ def _enqueue_if_supported(session: Session, catalog_job_id: int, source_user_id:
             payload=payload,
         )
     )
-    session.commit()
+    session.flush()
 
 
 def _json_list(value: str) -> list[str]:

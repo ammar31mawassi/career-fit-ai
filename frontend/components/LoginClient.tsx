@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { Waypoints } from "lucide-react";
 import { clearWorkspaceCaches } from "@/components/AppDataProvider";
 import { createClient } from "@/lib/supabase/client";
+import { getProfile } from "@/lib/api";
 
 export function LoginClient() {
   const router = useRouter();
@@ -43,14 +44,13 @@ export function LoginClient() {
         const { error } = await supabase.auth.signInWithPassword({ email, password });
         if (error) throw error;
         router.replace("/onboarding");
-        router.refresh();
       } else {
         clearWorkspaceCaches();
         const supabase = createClient();
         const { error } = await supabase.auth.signInWithPassword({ email, password });
         if (error) throw error;
-        router.replace("/");
-        router.refresh();
+        const profile = await getProfile();
+        router.replace(profile.onboarding_completed ? "/" : "/onboarding");
       }
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Authentication failed.");

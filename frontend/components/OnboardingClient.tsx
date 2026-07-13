@@ -5,7 +5,11 @@ import { ArrowRight, FileCheck2, Github, Linkedin, Sparkles, Waypoints } from "l
 import { useRouter } from "next/navigation";
 import { CareerInterestPicker } from "@/components/CareerInterestPicker";
 import { LongTaskProgress } from "@/components/LongTaskProgress";
-import { useAppData } from "@/components/AppDataProvider";
+import {
+  clearOnboardingSyncing,
+  markOnboardingSyncing,
+  useAppData
+} from "@/components/AppDataProvider";
 import { recognizePdfInBrowser } from "@/lib/browserOcr";
 import {
   analyzeProfile,
@@ -19,7 +23,7 @@ import {
 
 export function OnboardingClient() {
   const router = useRouter();
-  const { profile, profileLoading, dataError, setProfile } = useAppData();
+  const { profile, profileLoading, dataError, setProfile, refreshAll, reportDataError } = useAppData();
   const [cvFile, setCvFile] = useState<File | null>(null);
   const [linkedinFile, setLinkedinFile] = useState<File | null>(null);
   const [githubUrl, setGithubUrl] = useState("");
@@ -33,12 +37,12 @@ export function OnboardingClient() {
   const [error, setError] = useState("");
 
   useEffect(() => {
-    if (!profile) return;
+    if (!profile || stage !== "form") return;
     setGithubUrl(profile.github_url);
     setLinkedinText(profile.linkedin_text);
     setManualInfo(profile.manual_info);
     setInterests(profile.career_interests);
-  }, [profile?.id]);
+  }, [profile?.id, stage]);
 
   const hasCv = Boolean(profile?.sources.some((source) => source.source_type === "cv"));
 
@@ -110,6 +114,7 @@ export function OnboardingClient() {
         setStage("form");
         return;
       }
+      setProgress("");
       setStage("review");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not build your profile.");
@@ -118,27 +123,30 @@ export function OnboardingClient() {
     }
   }
 
-  async function finish() {
+  function finish() {
     if (profile?.status !== "ready") {
       setError(profileAnalysisError(profile?.status ?? "needs_analysis"));
       setStage("form");
       return;
     }
-    setProgress("Opening your workspace…");
-    setActiveStep(3);
-    setProgressValue(96);
-    setStage("analyzing");
+    const previousProfile = profile;
+    markOnboardingSyncing();
+    setProfile({ ...profile, onboarding_completed: true });
     setError("");
-    try {
-      const completed = await completeOnboarding();
-      setProfile(completed);
-      router.replace("/");
-      router.refresh();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not finish onboarding.");
-      setProgress("");
-      setStage("review");
-    }
+    const completion = completeOnboarding();
+    router.replace("/");
+    void completion
+      .then((completed) => {
+        clearOnboardingSyncing();
+        setProfile(completed);
+        void refreshAll().catch(() => undefined);
+      })
+      .catch((err) => {
+        clearOnboardingSyncing();
+        setProfile(previousProfile);
+        reportDataError(err instanceof Error ? err.message : "Could not finish onboarding.");
+        router.replace("/onboarding");
+      });
   }
 
   if (stage === "analyzing") {
@@ -169,14 +177,13 @@ export function OnboardingClient() {
           <p>{profile?.summary}</p>
           <div className="onboarding-result-stats">
             <div><strong>{profile?.facts.length ?? 0}</strong><span>facts extracted</span></div>
-            <div><strong>{interests.length}</strong><span>career interests</span></div>
+            <div><strong>{profile?.career_interests.length ?? interests.length}</strong><span>career interests</span></div>
             <div><strong>{openQuestions}</strong><span>questions to refine later</span></div>
           </div>
           {error ? <div className="notice error">{error}</div> : null}
-          <button className="button primary onboarding-continue" disabled={false} onClick={() => void finish()} type="button">
+          <button className="button primary onboarding-continue" onClick={finish} type="button">
             Enter CareerFit <ArrowRight size={16} />
           </button>
-          {progress ? <small>{progress}</small> : null}
         </section>
       </main>
     );

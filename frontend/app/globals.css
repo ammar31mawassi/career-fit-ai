@@ -718,6 +718,8 @@ a { color: inherit; text-decoration: none; }
 .job-detail { padding: 18px 20px 22px; display: flex; flex-wrap: wrap; gap: 9px; border-top: 1px solid var(--line); background: rgba(9,13,11,.68); animation: details-in var(--motion) var(--ease-smooth) both; }
 .status-control { display: inline-flex; align-items: center; gap: 8px; min-height: 34px; color: var(--muted); font-size: 10px; }
 .status-control select { min-height: 33px; padding: 5px 28px 5px 9px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface-2); color: var(--text); }
+.status-control small { color: var(--primary); font-size: 9px; white-space: nowrap; }
+.compact-notice { margin: 10px 0 14px; padding: 9px 11px; font-size: 10px; }
 .detail-grid { width: 100%; margin-top: 9px; display: grid; grid-template-columns: repeat(5,1fr); gap: 8px; }
 .detail, .analysis-section, .fact-row, .question-row { border: 1px solid var(--line); border-radius: 12px; background: rgba(21,17,31,.82); }
 .detail { min-width: 0; padding: 11px; display: grid; gap: 4px; }
