@@ -65,3 +65,26 @@ Multiple independent sources support one canonical fact and raise confidence; th
 - A stopped scan retains inputs and can be retried without duplication.
 - Export downloads JSON; deletion requires the literal confirmation `DELETE`.
 - Database/API region and measured production timings are recorded in the release handoff.
+
+## Production validation — 2026-07-13
+
+Validated against the public Vercel frontend and API using disposable accounts that were deleted after testing.
+
+| Check | Production result |
+|---|---|
+| Region placement | Frontend requests entered through Frankfurt and the API executed in Singapore beside the Supabase database (`fra1::sin1` in the Vercel request path). |
+| Warm API health | Approximately 0.44–0.62 seconds across repeated observations. |
+| Complete onboarding | Approximately 4.6–6.1 seconds for CV upload, extraction, fact persistence, and entry to the workspace. |
+| Explicit profile re-analysis | Approximately 2.9 seconds. |
+| Bulk fact confirmation | Approximately 3.0 seconds for one transactional batch and one profile rebuild. |
+| Manual-description job scan | Approximately 4.0 seconds, including requirement parsing, scoring, advice, and persistence. |
+| Account deletion | Approximately 8.0–8.8 seconds, including private-file cleanup and Auth deletion. This remains the slowest ordinary account action. |
+| Extraction fixture | The production CV produced 23 facts, 13 skills, two complete projects, the stated two semesters remaining, and three clarification questions. |
+| Evidence reconciliation | Python, Docker, React, FastAPI, and REST API resolved to their strongest project or experience sentences instead of weaker Skills-list mentions. |
+| Match consistency | The saved Cloud Platform Intern fixture showed `82% Strong` in both the job card and detail inspector after re-analysis. |
+| Match explanation | REST API was shown as exact experience evidence; the previous false REST API gap disappeared and the primary signal reported no major detected gap. |
+| Resume advice | Project recommendations remained fact-constrained, skill order reflected the role, and the T15 About text contained no duplicated action verbs or repeated `using` construction. |
+| Account controls | Export returned readable JSON without private storage paths. Typed-confirmation deletion returned to login with zero browser console errors or warnings. |
+| Responsive UI | Desktop and 390 px mobile login/profile flows were checked for overlap, clipping, readable actions, and stable navigation. |
+
+These timings are browser-observed beta checks from Israel, not a statistically meaningful p95 benchmark. Cold signup latency varied more than the authenticated flows and must be instrumented before making a formal performance promise.
