@@ -114,6 +114,15 @@ def test_template_catalog_is_complete_and_never_leaks_tokens():
     assert "built built" not in result.text.lower()
     assert 30 <= len(result.text.split()) <= 90
 
+    cloud = build_about(
+        _candidate(["python", "docker", "fastapi"], "cloud"),
+        "Cloud Intern",
+        _requirements("cloud", ["python", "docker"]),
+    )
+    assert cloud.template_id == "T15"
+    assert "built built" not in cloud.text.lower()
+    assert "using fastapi" not in cloud.text.lower()
+
 
 def test_protected_text_cannot_change_score_because_it_is_not_a_feature():
     candidate = _candidate(["python", "postgresql"], "backend")

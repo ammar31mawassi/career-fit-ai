@@ -417,6 +417,36 @@ def test_project_usage_outranks_a_skill_listing_within_the_same_cv():
     assert evidence["docker"].strength >= 0.7
 
 
+def test_skill_alias_keeps_its_demonstrated_sentence_as_evidence():
+    engine = _engine()
+    SQLModel.metadata.create_all(engine)
+    with Session(engine) as session:
+        profile = Profile(user_id=USER_ID, status="needs_analysis")
+        session.add(profile)
+        session.commit()
+        session.refresh(profile)
+        session.add(
+            ProfileSource(
+                user_id=USER_ID,
+                profile_id=profile.id or 0,
+                source_type="cv",
+                title="cv.pdf",
+                content_text=(
+                    "B.Sc. Computer Science\nExperience\nSoftware Engineering Intern\n"
+                    "Implemented REST APIs and automated testing."
+                ),
+            )
+        )
+        session.commit()
+        analyze_profile(session, USER_ID)
+        session.refresh(profile)
+        evidence = candidate_snapshot(session, profile).skill_evidence["rest api"]
+
+    assert evidence.evidence == "Implemented REST APIs and automated testing."
+    assert evidence.evidence_type == "project"
+    assert evidence.strength >= 0.7
+
+
 def test_student_semesters_are_extracted_without_counting_projects_as_work_experience():
     engine = _engine()
     SQLModel.metadata.create_all(engine)

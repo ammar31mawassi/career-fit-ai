@@ -198,7 +198,12 @@ def _best_skill_evidence(
     declared_lines: set[str],
     skill: str,
 ) -> str:
-    candidates = [line for line in lines if re.search(_term_pattern(skill), line, re.IGNORECASE)]
+    # Match through the ontology as well as literal text so aliases such as
+    # "REST APIs" retain their real sentence instead of falling back to a
+    # context-free canonical token ("rest api").
+    candidates = [line for line in lines if skill in extract_skills(line)]
+    if not candidates:
+        candidates = [line for line in lines if re.search(_term_pattern(skill), line, re.IGNORECASE)]
     if not candidates:
         return skill
 

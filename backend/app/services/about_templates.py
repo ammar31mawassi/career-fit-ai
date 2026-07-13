@@ -113,9 +113,9 @@ TEMPLATES: tuple[TemplateSpec, ...] = (
     ),
     TemplateSpec(
         "T15",
-        "Cloud and automation-focused <CAREER_STAGE> engineer experienced with <SKILLS>. Built <PROJECT_HIGHLIGHT> using <TOOLS><PROJECT_IMPACT>, demonstrating <STRENGTHS> in deployment, observability, and repeatable operations. Seeking a <ROLE_TITLE> position improving delivery and reliability.",
+        "Cloud and automation-focused <CAREER_STAGE> engineer with evidence in <SKILLS>. Built <PROJECT_HIGHLIGHT><PROJECT_IMPACT>, with attention to <STRENGTHS>. Seeking a <ROLE_TITLE> position improving delivery and reliability.",
         roles=("cloud", "devops"),
-        required=("CAREER_STAGE", "SKILLS", "PROJECT_HIGHLIGHT", "TOOLS", "ROLE_TITLE"),
+        required=("CAREER_STAGE", "SKILLS", "PROJECT_HIGHLIGHT", "ROLE_TITLE"),
     ),
     TemplateSpec(
         "T16",
