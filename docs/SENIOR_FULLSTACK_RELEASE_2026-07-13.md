@@ -119,7 +119,14 @@ The app retains its non-generic aubergine, warm-ivory, mint, coral, violet, and 
 | PGMQ queue | `careerfit_job_scans` present |
 | Supabase new-table security advisor | Clean; only existing/project-level informational items remain |
 | Changed-file secret scan | No findings |
-| Production deployment | See deployment URLs in the release handoff |
+| Production frontend | READY: https://career-fit-ai-sigma.vercel.app (`dpl_7er64rn2w5ALHUQy4KvtjvN7SQAw`) |
+| Production API | READY: https://career-fit-ai-api.vercel.app (`dpl_779BMH9FdY1R6tp3N466D9bhFAeV`) |
+| Live authenticated smoke test | Passed: saved job, score, Profile, responsive layout, queue/dedupe round-trip, and account deletion |
+| Vercel runtime errors after release | None on frontend or backend |
+
+Release code commit: `43d0f85` (`Implement durable scans and product intelligence`).
+
+The isolated QA account, uploaded file, profile rows, jobs, scan rows, and two queue messages were removed after the production test; database verification returned zero remaining rows/objects/messages for that account.
 
 ## Operating notes
 
