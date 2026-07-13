@@ -75,6 +75,7 @@ class ExtractedJob:
     source_title: str
     source_confidence: float
     application_link: str
+    reader_strategy: str
     requirements: JobRequirements
 
 
@@ -161,6 +162,7 @@ def extract_job_from_input(
         source_title=title[:220],
         source_confidence=confidence,
         application_link=application_link,
+        reader_strategy=method,
         requirements=requirements,
     )
 

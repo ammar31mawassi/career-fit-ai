@@ -2,14 +2,17 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import asdict
+import time
+import base64
+from collections.abc import Callable
+from dataclasses import asdict, replace
 from datetime import datetime, timezone
 from uuid import UUID
 
-from sqlalchemy import or_
+from sqlalchemy import and_, or_
 from sqlmodel import Session, select
 
-from ..models import Job, JobMatch, JobStatusEvent, Profile, ResumeAdvice
+from ..models import Job, JobMatch, JobRequirementRevision, JobStatusEvent, Profile, ResumeAdvice
 from ..schemas import (
     JobCreateIn,
     JobMatchOut,
@@ -17,6 +20,8 @@ from ..schemas import (
     JobOut,
     JobStatusEventOut,
     JobSummaryOut,
+    JobSummaryPageOut,
+    JobRequirementsReviewIn,
     RequirementModel,
     ResumeAdviceOut,
 )
@@ -32,12 +37,23 @@ from .agent_workflows import (
     start_step,
 )
 from .job_research import JOB_READER_VERSION, extract_job_from_input, requirements_from_json
+from .matcher import MODEL_VERSION
 from .profile import candidate_snapshot, get_or_create_profile
 from .recommendations import catalog_and_enqueue_job
 from .scoring import get_match_scorer
+from .telemetry import record_evaluation_example, record_extraction_metric, safe_error_code
 
 
-def create_or_analyze_job(session: Session, user_id: UUID, payload: JobCreateIn) -> JobOut:
+ProgressCallback = Callable[[str, int], None]
+
+
+def create_or_analyze_job(
+    session: Session,
+    user_id: UUID,
+    payload: JobCreateIn,
+    progress_callback: ProgressCallback | None = None,
+) -> JobOut:
+    _report_progress(progress_callback, "validate_profile", 5)
     profile = get_or_create_profile(session, user_id)
     if profile.status == "needs_cv":
         raise ValueError("Upload at least one CV before matching jobs.")
@@ -61,6 +77,7 @@ def create_or_analyze_job(session: Session, user_id: UUID, payload: JobCreateIn)
     )
 
     dedupe_step = start_step(session, run, "dedupe_lookup", "Check saved-job cache")
+    _report_progress(progress_callback, "dedupe_lookup", 12)
     existing = session.exec(
         select(Job).where(Job.user_id == user_id, Job.content_hash == content_hash)
     ).first()
@@ -75,6 +92,7 @@ def create_or_analyze_job(session: Session, user_id: UUID, payload: JobCreateIn)
         complete_run(session, run, "Existing saved job reused.", status="reused")
         session.commit()
         _catalog_for_discovery(session, user_id, existing)
+        _report_progress(progress_callback, "ready", 100)
         return job_output(session, user_id, existing.id or 0)
     complete_step(
         session,
@@ -84,6 +102,8 @@ def create_or_analyze_job(session: Session, user_id: UUID, payload: JobCreateIn)
     )
 
     extraction_step = start_step(session, run, "extract_job", "Extract job content and source metadata")
+    extraction_started = time.perf_counter()
+    _report_progress(progress_callback, "extract_job", 26)
     try:
         extracted = extract_job_from_input(
             payload.source_url,
@@ -107,6 +127,19 @@ def create_or_analyze_job(session: Session, user_id: UUID, payload: JobCreateIn)
         job.error = str(exc)[:500]
         job.updated_at = _now()
         session.add(job)
+        session.flush()
+        record_extraction_metric(
+            session,
+            user_id,
+            workflow_type="job_extraction",
+            subject_type="job",
+            subject_id=job.id,
+            strategy="url" if payload.source_url.strip() else "pasted",
+            status="failed",
+            duration_ms=round((time.perf_counter() - extraction_started) * 1000),
+            input_length=len(payload.description_text),
+            error_code=safe_error_code("JOB_READ", exc),
+        )
         session.commit()
         session.refresh(job)
         attach_subject(session, run, "job", job.id or 0)
@@ -124,6 +157,7 @@ def create_or_analyze_job(session: Session, user_id: UUID, payload: JobCreateIn)
             "description_chars": len(extracted.description_text),
         },
     )
+    _report_progress(progress_callback, "classify_requirements", 55)
 
     classifier_step = start_step(session, run, "classify_requirements", "Classify requirements and constraints")
     complete_step(
@@ -154,10 +188,28 @@ def create_or_analyze_job(session: Session, user_id: UUID, payload: JobCreateIn)
     job.updated_at = _now()
     session.add(job)
     session.flush()
+    record_extraction_metric(
+        session,
+        user_id,
+        workflow_type="job_extraction",
+        subject_type="job",
+        subject_id=job.id,
+        strategy=extracted.reader_strategy,
+        duration_ms=round((time.perf_counter() - extraction_started) * 1000),
+        input_length=len(payload.description_text),
+        output_length=len(extracted.description_text),
+        counts={
+            "must_have": len(extracted.requirements.must_have_skills),
+            "preferred": len(extracted.requirements.preferred_skills),
+            "nice_to_have": len(extracted.requirements.nice_to_have_skills),
+            "responsibilities": len(extracted.requirements.responsibilities),
+        },
+    )
     attach_subject(session, run, "job", job.id or 0)
     match_step = start_step(session, run, "match_profile_evidence", "Match profile evidence to requirements")
+    _report_progress(progress_callback, "match_profile_evidence", 74)
     try:
-        match = _save_match(session, user_id, profile, job, commit=False)
+        match = save_match(session, user_id, profile, job, commit=False)
     except Exception as exc:
         fail_step(session, match_step, str(exc), {"job_id": job.id or 0})
         fail_run(session, run, str(exc), "Job reader failed during evidence matching.")
@@ -175,6 +227,7 @@ def create_or_analyze_job(session: Session, user_id: UUID, payload: JobCreateIn)
         },
     )
     advice_step = start_step(session, run, "validate_resume_advice", "Validate resume advice is fact-constrained")
+    _report_progress(progress_callback, "validate_resume_advice", 91)
     complete_step(
         session,
         advice_step,
@@ -184,6 +237,7 @@ def create_or_analyze_job(session: Session, user_id: UUID, payload: JobCreateIn)
     complete_run(session, run, "Job analyzed, matched, and saved.")
     session.commit()
     _catalog_for_discovery(session, user_id, job)
+    _report_progress(progress_callback, "ready", 100)
     return job_output(session, user_id, job.id or 0)
 
 
@@ -305,6 +359,73 @@ def list_job_summaries(session: Session, user_id: UUID, query: str = "", limit: 
     return [_summary_from_row(row, matches_by_job.get(int(row[0]))) for row in rows]
 
 
+def list_job_summary_page(
+    session: Session,
+    user_id: UUID,
+    *,
+    query: str = "",
+    limit: int = 30,
+    cursor: str = "",
+) -> JobSummaryPageOut:
+    filters = [Job.user_id == user_id]
+    if query.strip():
+        pattern = f"%{query.strip()}%"
+        filters.append(
+            or_(
+                Job.company.ilike(pattern),
+                Job.role.ilike(pattern),
+                Job.location.ilike(pattern),
+                Job.source_url.ilike(pattern),
+                Job.description_text.ilike(pattern),
+                Job.requirements_json.ilike(pattern),
+            )
+        )
+    decoded = _decode_cursor(cursor)
+    if decoded is not None:
+        cursor_time, cursor_id = decoded
+        filters.append(
+            or_(
+                Job.updated_at < cursor_time,
+                and_(Job.updated_at == cursor_time, Job.id < cursor_id),
+            )
+        )
+    statement = (
+        select(
+            Job.id,
+            Job.source_url,
+            Job.company,
+            Job.role,
+            Job.location,
+            Job.source_confidence,
+            Job.application_link,
+            Job.status,
+            Job.error,
+            Job.created_at,
+            Job.updated_at,
+            Job.requirements_json,
+        )
+        .where(*filters)
+        .order_by(Job.updated_at.desc(), Job.id.desc())
+        .limit(limit + 1)
+    )
+    rows = list(session.exec(statement).all())
+    has_more = len(rows) > limit
+    visible_rows = rows[:limit]
+    if not visible_rows:
+        return JobSummaryPageOut()
+    job_ids = [int(row[0]) for row in visible_rows if row[0] is not None]
+    matches = list(
+        session.exec(
+            select(JobMatch).where(JobMatch.user_id == user_id, JobMatch.job_id.in_(job_ids))
+        ).all()
+    )
+    matches_by_job = {match.job_id: match for match in matches}
+    items = [_summary_from_row(row, matches_by_job.get(int(row[0]))) for row in visible_rows]
+    last = visible_rows[-1]
+    next_cursor = _encode_cursor(last[10], int(last[0])) if has_more else None
+    return JobSummaryPageOut(items=items, next_cursor=next_cursor, watermark=visible_rows[0][10])
+
+
 def job_output(session: Session, user_id: UUID, job_id: int) -> JobOut:
     job = session.get(Job, job_id)
     if not job or job.user_id != user_id:
@@ -319,7 +440,7 @@ def update_job_status(session: Session, user_id: UUID, job_id: int, status: str)
     match = session.exec(select(JobMatch).where(JobMatch.user_id == user_id, JobMatch.job_id == job_id)).first()
     if not match:
         profile = get_or_create_profile(session, user_id)
-        match = _save_match(session, user_id, profile, job)
+        match = save_match(session, user_id, profile, job)
     previous_status = match.status
     match.status = status
     match.updated_at = _now()
@@ -330,7 +451,110 @@ def update_job_status(session: Session, user_id: UUID, job_id: int, status: str)
     return job_output(session, user_id, job_id)
 
 
-def _save_match(
+def rematch_job(session: Session, user_id: UUID, job_id: int) -> JobOut:
+    job = session.get(Job, job_id)
+    if not job or job.user_id != user_id:
+        raise ValueError("Job not found.")
+    profile = get_or_create_profile(session, user_id)
+    if profile.status != "ready":
+        raise ValueError("Analyze the profile before refreshing this match.")
+    save_match(session, user_id, profile, job)
+    return job_output(session, user_id, job_id)
+
+
+def review_job_requirements(
+    session: Session,
+    user_id: UUID,
+    job_id: int,
+    payload: JobRequirementsReviewIn,
+) -> JobOut:
+    job = session.get(Job, job_id)
+    if not job or job.user_id != user_id:
+        raise ValueError("Job not found.")
+    original = requirements_from_json(job.requirements_json)
+    corrected = replace(
+        original,
+        must_have_skills=payload.must_have_skills,
+        preferred_skills=payload.preferred_skills,
+        nice_to_have_skills=payload.nice_to_have_skills,
+        all_skills=_unique_limited(
+            [*payload.must_have_skills, *payload.preferred_skills, *payload.nice_to_have_skills],
+            100,
+        ),
+        min_years_experience=payload.min_years_experience,
+        experience_requirement_known=payload.experience_requirement_known,
+        seniority=payload.seniority.strip().lower() or "unspecified",
+        education=payload.education.strip(),
+        work_mode=payload.work_mode.strip(),
+        domain=payload.domain.strip(),
+        location_requirement=payload.location_requirement.strip(),
+        summary=_reviewed_requirement_summary(payload),
+        skill_groups=[],
+        reader_version=f"{original.reader_version}+user-reviewed",
+        extraction_completeness=1.0,
+    )
+    changed_fields = [
+        name
+        for name in (
+            "must_have_skills",
+            "preferred_skills",
+            "nice_to_have_skills",
+            "min_years_experience",
+            "experience_requirement_known",
+            "seniority",
+            "education",
+            "work_mode",
+            "domain",
+            "location_requirement",
+        )
+        if getattr(original, name) != getattr(corrected, name)
+    ]
+    if not changed_fields:
+        return job_output(session, user_id, job_id)
+    job.requirements_json = corrected.to_json()
+    job.updated_at = _now()
+    session.add(job)
+    revision = JobRequirementRevision(
+        user_id=user_id,
+        job_id=job_id,
+        original_requirements_json=original.to_json(),
+        corrected_requirements_json=corrected.to_json(),
+        changed_fields_json=json.dumps(changed_fields),
+        matcher_version=MODEL_VERSION,
+    )
+    session.add(revision)
+    session.flush()
+    record_evaluation_example(
+        session,
+        user_id,
+        example_type="job_requirement_review",
+        subject_id=revision.id,
+        label="corrected",
+        model_version=original.reader_version,
+        features={
+            "changed_fields": changed_fields,
+            "original_completeness": round(original.extraction_completeness, 3),
+            "source_confidence": round(job.source_confidence, 3),
+            "original_skill_counts": {
+                "must": len(original.must_have_skills),
+                "preferred": len(original.preferred_skills),
+                "nice": len(original.nice_to_have_skills),
+            },
+            "corrected_skill_counts": {
+                "must": len(corrected.must_have_skills),
+                "preferred": len(corrected.preferred_skills),
+                "nice": len(corrected.nice_to_have_skills),
+            },
+        },
+    )
+    profile = get_or_create_profile(session, user_id)
+    save_match(session, user_id, profile, job, commit=False)
+    session.commit()
+    _catalog_for_discovery(session, user_id, job)
+    return job_output(session, user_id, job_id)
+
+
+def save_match(
     session: Session,
     user_id: UUID,
     profile: Profile,
@@ -393,9 +617,6 @@ def _save_match(
 
 def _job_to_out(session: Session, user_id: UUID, job: Job) -> JobOut:
     match = session.exec(select(JobMatch).where(JobMatch.user_id == user_id, JobMatch.job_id == job.id)).first()
-    profile = session.exec(select(Profile).where(Profile.user_id == user_id)).first()
-    if match and profile and profile.status == "ready" and _is_after(profile.updated_at, match.analyzed_at):
-        match = _save_match(session, user_id, profile, job)
     return _job_to_out_from_loaded(job, match, {}, {}, session=session, user_id=user_id)
 
 
@@ -511,6 +732,43 @@ def _is_after(left: datetime, right: datetime) -> bool:
     if right.tzinfo is None:
         right = right.replace(tzinfo=timezone.utc)
     return left > right
+
+
+def _reviewed_requirement_summary(payload: JobRequirementsReviewIn) -> str:
+    parts: list[str] = []
+    if payload.must_have_skills:
+        parts.append(f"Must have: {', '.join(payload.must_have_skills[:5])}")
+    if payload.preferred_skills:
+        parts.append(f"Preferred: {', '.join(payload.preferred_skills[:4])}")
+    if payload.experience_requirement_known:
+        parts.append(f"Experience: {payload.min_years_experience:g}+ years")
+    if payload.seniority and payload.seniority != "unspecified":
+        parts.append(f"Seniority: {payload.seniority}")
+    return ". ".join(parts) or "Requirements reviewed by the user."
+
+
+def _report_progress(callback: ProgressCallback | None, step: str, progress: int) -> None:
+    if callback is not None:
+        callback(step, max(0, min(100, progress)))
+
+
+def _encode_cursor(updated_at: datetime, job_id: int) -> str:
+    raw = f"{updated_at.isoformat()}|{job_id}".encode("utf-8")
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def _decode_cursor(value: str) -> tuple[datetime, int] | None:
+    if not value:
+        return None
+    try:
+        padded = value + "=" * (-len(value) % 4)
+        timestamp, raw_id = base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8").rsplit("|", 1)
+        parsed = datetime.fromisoformat(timestamp)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed, int(raw_id)
+    except (ValueError, TypeError, UnicodeDecodeError):
+        raise ValueError("Invalid job page cursor.") from None
 
 
 def _match_out(session: Session, user_id: UUID, match: JobMatch) -> JobMatchOut:

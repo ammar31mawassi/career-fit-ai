@@ -96,9 +96,10 @@ export function ProfileFactsEditor({
         </div>
       ) : <div className="review-complete"><Check size={15} /> Every extracted fact has been reviewed.</div>}
       <div className="fact-groups">
-        {visibleTypes.map((type) => (
+        {visibleTypes.map((type, index) => (
           <FactGroup
             addable={ADDABLE_FACT_TYPES.includes(type)}
+            defaultExpanded={index === 0}
             facts={factsByType.get(type) ?? []}
             key={type}
             onAdd={onAdd}
@@ -117,25 +118,27 @@ export function ProfileFactsEditor({
   );
 }
 
-function FactGroup({ type, facts, addable, selected, onAdd, onReview, onSelectedChange }: {
+function FactGroup({ type, facts, addable, defaultExpanded, selected, onAdd, onReview, onSelectedChange }: {
   type: string;
   facts: ProfileFact[];
   addable: boolean;
+  defaultExpanded: boolean;
   selected: Set<number>;
   onAdd: (type: string, value: string) => Promise<void>;
   onReview: (fact: ProfileFact, value: string, status: ProfileFact["review_status"]) => Promise<void>;
   onSelectedChange: (factId: number, checked: boolean) => void;
 }) {
   const pendingCount = facts.filter((fact) => fact.review_status === "pending").length;
-  const [expanded, setExpanded] = useState(pendingCount > 0);
+  const [expanded, setExpanded] = useState(defaultExpanded && pendingCount > 0);
   const [adding, setAdding] = useState(false);
   const [value, setValue] = useState("");
   const [saving, setSaving] = useState(false);
   const label = type.replaceAll("_", " ");
 
   useEffect(() => {
-    setExpanded(pendingCount > 0);
-  }, [pendingCount]);
+    if (defaultExpanded && pendingCount) setExpanded(true);
+    else if (!pendingCount && !adding) setExpanded(false);
+  }, [adding, defaultExpanded, pendingCount]);
 
   async function save() {
     if (!value.trim()) return;

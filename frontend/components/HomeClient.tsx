@@ -7,13 +7,19 @@ import { JobLibrarySkeleton } from "@/components/home/JobLibrarySkeleton";
 import { JobScanner } from "@/components/home/JobScanner";
 import { JobSummaryCard } from "@/components/home/JobSummaryCard";
 import { OpportunityInspector } from "@/components/home/OpportunityInspector";
+import { RecommendedMatches } from "@/components/home/RecommendedMatches";
 import {
-  createJob,
+  cancelJobScan,
+  createJobScan,
   getJob,
+  getJobScan,
   getJobSummaries,
-  kickRecommendationWorker,
+  getRecommendations,
+  processJobScan,
   toJobSummary,
   type JobCreate,
+  type JobRecommendation,
+  type JobScan,
   type TrackedJob,
   type TrackedJobSummary
 } from "@/lib/api";
@@ -21,13 +27,14 @@ import {
 const emptyJob: JobCreate = { source_url: "", company: "", role: "", description_text: "" };
 
 export function HomeClient() {
-  const { profile, jobs, profileLoading, jobsLoading, dataError, setJobs, refreshAll } = useAppData();
+  const { profile, jobs, profileLoading, jobsLoading, jobsNextCursor, dataError, setJobs, refreshAll, loadMoreJobs } = useAppData();
   const [query, setQuery] = useState("");
   const [form, setForm] = useState(emptyJob);
   const [submitting, setSubmitting] = useState(false);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const [scanStartedAt, setScanStartedAt] = useState(0);
+  const [scan, setScan] = useState<JobScan | null>(null);
   const [failedScan, setFailedScan] = useState<JobCreate | null>(null);
   const [selectedJobId, setSelectedJobId] = useState<number | null>(null);
   const [jobDetailsById, setJobDetailsById] = useState<Record<number, TrackedJob>>({});
@@ -36,8 +43,10 @@ export function HomeClient() {
   const [searchResults, setSearchResults] = useState<TrackedJobSummary[] | null>(null);
   const [searchLoading, setSearchLoading] = useState(false);
   const [searchError, setSearchError] = useState("");
+  const [recommendations, setRecommendations] = useState<JobRecommendation[]>([]);
+  const [recommendationsLoading, setRecommendationsLoading] = useState(false);
   const pendingDetailIds = useRef(new Set<number>());
-  const scanAbort = useRef<AbortController | null>(null);
+  const activeScanId = useRef<number | null>(null);
 
   const profileReady = profile ? profile.status === "ready" : true;
   const profileConfirmedIncomplete = !profileLoading && profile !== null && profile.status !== "ready";
@@ -88,6 +97,20 @@ export function HomeClient() {
     return () => { cancelled = true; window.clearTimeout(timer); };
   }, [deferredQuery]);
 
+  useEffect(() => {
+    if (!profile?.recommendations_enabled) {
+      setRecommendations([]);
+      return;
+    }
+    let active = true;
+    setRecommendationsLoading(true);
+    void getRecommendations()
+      .then((items) => { if (active) setRecommendations(items); })
+      .catch(() => { if (active) setRecommendations([]); })
+      .finally(() => { if (active) setRecommendationsLoading(false); });
+    return () => { active = false; };
+  }, [profile?.recommendations_enabled]);
+
   const fetchJobDetail = useCallback(async (jobId: number, showLoading = false) => {
     if (jobDetailsById[jobId] || pendingDetailIds.current.has(jobId)) return;
     pendingDetailIds.current.add(jobId);
@@ -122,36 +145,66 @@ export function HomeClient() {
   }
 
   async function runScan(payload: JobCreate) {
-    const controller = new AbortController();
-    scanAbort.current?.abort();
-    scanAbort.current = controller;
     setSubmitting(true);
     setScanStartedAt(Date.now());
     setError("");
     setMessage("");
     setFailedScan(null);
     try {
-      const job = await createJob(payload, controller.signal);
+      const queued = await createJobScan(payload);
+      activeScanId.current = queued.id;
+      setScan(queued);
+      void processJobScan(queued.id).catch(() => undefined);
+      let current = queued;
+      for (let attempt = 0; attempt < 240 && activeScanId.current === queued.id; attempt += 1) {
+        if (["succeeded", "failed", "cancelled"].includes(current.status)) break;
+        await new Promise((resolve) => window.setTimeout(resolve, 750));
+        current = await getJobScan(queued.id);
+        setScan(current);
+      }
+      if (activeScanId.current !== queued.id) return;
+      if (current.status === "cancelled") {
+        setMessage("Scan cancelled. Its saved input can be submitted again when you are ready.");
+        return;
+      }
+      if (current.status !== "succeeded" || !current.result_job) {
+        if (["queued", "running", "cancel_requested"].includes(current.status)) {
+          setMessage("The scan is still saved and processing in the background. Refresh your workspace shortly.");
+          return;
+        }
+        throw new Error(current.error_message || `The durable scan failed${current.error_code ? ` (${current.error_code})` : ""}.`);
+      }
+      const job = current.result_job;
       const summary = toJobSummary(job);
       setMessage(job.status === "failed" ? job.error : `${job.company} — ${job.role} analyzed and saved.`);
       setJobs((current) => [summary, ...current.filter((item) => item.id !== job.id)]);
       setSearchResults((current) => current ? [summary, ...current.filter((item) => item.id !== job.id)] : current);
       setJobDetailsById((current) => ({ ...current, [job.id]: job }));
       setSelectedJobId(job.id);
-      if (job.status === "analyzed") void kickRecommendationWorker().catch(() => undefined);
       setForm(emptyJob);
       setQuery("");
     } catch (caught) {
-      if (controller.signal.aborted) {
-        setMessage("Stopped waiting. The server may still finish this scan; use Refresh in a moment before retrying.");
-      } else {
-        setFailedScan(payload);
-        setError(caught instanceof Error ? caught.message : "Could not analyze this job.");
-      }
+      setFailedScan(payload);
+      setError(caught instanceof Error ? caught.message : "Could not analyze this job.");
     } finally {
-      if (scanAbort.current === controller) scanAbort.current = null;
+      activeScanId.current = null;
       setSubmitting(false);
       setScanStartedAt(0);
+    }
+  }
+
+  async function cancelActiveScan() {
+    const scanId = activeScanId.current;
+    if (!scanId) return;
+    activeScanId.current = null;
+    try {
+      const cancelled = await cancelJobScan(scanId);
+      setScan(cancelled);
+      setMessage(cancelled.status === "cancelled" ? "Scan cancelled." : "Cancellation requested. The current safe step will finish first.");
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Could not cancel the scan.");
+    } finally {
+      setSubmitting(false);
     }
   }
 
@@ -172,7 +225,30 @@ export function HomeClient() {
       {message ? <div className="notice success">{message}</div> : null}
       {profileConfirmedIncomplete ? <section className="panel warning-panel"><FileText size={22} aria-hidden /><div><h2>Profile is not ready</h2><p>Upload one CV and run profile analysis before job matching. GitHub and LinkedIn are optional.</p></div><a className="button primary" href="/profile">Complete profile</a></section> : null}
 
-      <JobScanner form={form} onCancel={() => scanAbort.current?.abort()} onSubmit={submit} profileReady={profileReady} scanStartedAt={scanStartedAt} setForm={setForm} submitting={submitting} />
+      <JobScanner
+        form={form}
+        onCancel={() => void cancelActiveScan()}
+        onSubmit={submit}
+        profileReady={profileReady}
+        scanProgress={scan ? { status: scan.status, currentStep: scan.current_step, progress: scan.progress, traceId: scan.trace_id } : null}
+        scanStartedAt={scanStartedAt}
+        setForm={setForm}
+        submitting={submitting}
+      />
+
+      {profile?.recommendations_enabled ? (
+        <RecommendedMatches
+          items={recommendations}
+          loading={recommendationsLoading}
+          onItemsChange={setRecommendations}
+          onSaved={(job) => {
+            const summary = toJobSummary(job);
+            setJobs((current) => [summary, ...current.filter((item) => item.id !== summary.id)]);
+            setJobDetailsById((current) => ({ ...current, [job.id]: job }));
+            setSelectedJobId(job.id);
+          }}
+        />
+      ) : null}
 
       <section className="stats signal-stats" aria-label="Job search overview">
         <div><span>Opportunities mapped</span><strong>{stats.scanned}</strong><small>Cached summaries for quick switching</small></div>
@@ -189,8 +265,9 @@ export function HomeClient() {
           {jobsLoading && !jobs.length ? <JobLibrarySkeleton /> : visibleJobs.length ? (
             <div className="job-list compact-list">{visibleJobs.map((job) => <JobSummaryCard active={job.id === selectedJobId} job={job} key={job.id} onPreview={() => void fetchJobDetail(job.id)} onSelect={() => setSelectedJobId(job.id)} />)}</div>
           ) : <div className="empty">{jobs.length ? "No roles match that search." : "Your first opportunity will appear here."}</div>}
+          {jobsNextCursor && !query.trim() ? <div className="load-more-row"><button className="button quiet" disabled={jobsLoading} onClick={() => void loadMoreJobs()} type="button">{jobsLoading ? "Loading…" : "Load more roles"}</button></div> : null}
         </div>
-        <OpportunityInspector detailError={detailError} job={selectedJob} loading={detailsLoading} onStatusChanged={updateCachedJob} summary={selectedSummary} />
+        <OpportunityInspector detailError={detailError} job={selectedJob} loading={detailsLoading} onJobChanged={updateCachedJob} profileUpdatedAt={profile?.updated_at ?? null} summary={selectedSummary} />
       </section>
     </>
   );

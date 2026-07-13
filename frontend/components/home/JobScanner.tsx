@@ -9,6 +9,7 @@ export function JobScanner({
   setForm,
   submitting,
   scanStartedAt,
+  scanProgress,
   profileReady,
   onSubmit,
   onCancel
@@ -17,6 +18,7 @@ export function JobScanner({
   setForm: Dispatch<SetStateAction<JobCreate>>;
   submitting: boolean;
   scanStartedAt: number;
+  scanProgress: { status: string; currentStep: string; progress: number; traceId: string } | null;
   profileReady: boolean;
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
   onCancel: () => void;
@@ -63,11 +65,11 @@ export function JobScanner({
           </label>
         </div>
       </details>
-      {submitting ? <ScanProgress hasSourceUrl={Boolean(form.source_url.trim())} onCancel={onCancel} startedAt={scanStartedAt} /> : null}
+      {submitting ? <ScanProgress hasSourceUrl={Boolean(form.source_url.trim())} onCancel={onCancel} scanProgress={scanProgress} startedAt={scanStartedAt} /> : null}
     </form>
   );
 }
-function ScanProgress({ startedAt, hasSourceUrl, onCancel }: { startedAt: number; hasSourceUrl: boolean; onCancel: () => void }) {
+function ScanProgress({ startedAt, hasSourceUrl, onCancel, scanProgress }: { startedAt: number; hasSourceUrl: boolean; onCancel: () => void; scanProgress: { status: string; currentStep: string; progress: number; traceId: string } | null }) {
   const [elapsed, setElapsed] = useState(0);
 
   useEffect(() => {
@@ -77,25 +79,27 @@ function ScanProgress({ startedAt, hasSourceUrl, onCancel }: { startedAt: number
   }, [startedAt]);
 
   const stages = [
-    hasSourceUrl ? "Opening the source" : "Validating pasted description",
-    "Extracting requirements",
-    "Classifying must-haves",
-    "Matching profile evidence",
-    "Preparing resume advice"
+    { key: "queued", label: "Queued securely" },
+    { key: "extract_job", label: hasSourceUrl ? "Opening the source" : "Validating pasted description" },
+    { key: "classify_requirements", label: "Classifying requirements" },
+    { key: "match_profile_evidence", label: "Matching profile evidence" },
+    { key: "validate_resume_advice", label: "Preparing resume advice" }
   ];
-  const activeStage = Math.min(stages.length - 1, Math.floor(elapsed / 4));
+  const persistedIndex = stages.findIndex((stage) => stage.key === scanProgress?.currentStep);
+  const activeStage = persistedIndex >= 0 ? persistedIndex : Math.min(stages.length - 1, Math.floor((scanProgress?.progress ?? 0) / 22));
 
   return (
     <section className="scan-progress" role="status" aria-live="polite">
       <div className="scan-visual" aria-hidden><span /><i /><b /></div>
       <div className="scan-progress-copy">
-        <span className="scan-progress-label">Analysis in progress · {elapsed}s</span>
-        <strong>{stages[activeStage]}</strong>
-        <small>{hasSourceUrl ? "Some career sites take longer when they limit automated reading." : "The evidence model is classifying requirements and recalculating your match."} Keep this tab open.</small>
+        <span className="scan-progress-label">{scanProgress?.status === "queued" ? "Queued" : "Analysis in progress"} · {elapsed}s · {scanProgress?.progress ?? 0}%</span>
+        <strong>{stages[activeStage]?.label ?? "Preparing the scan"}</strong>
+        <small>{hasSourceUrl ? "Blocked career sites can take longer." : "The evidence model is classifying requirements and recalculating your match."} Progress is saved, so closing the tab will not lose the scan.</small>
         <ol className="scan-stage-list">
-          {stages.map((stage, index) => <li className={index <= activeStage ? "active" : ""} key={stage}>{stage}</li>)}
+          {stages.map((stage, index) => <li className={index <= activeStage ? "active" : ""} key={stage.key}>{stage.label}</li>)}
         </ol>
-        <button className="button compact quiet scan-cancel" onClick={onCancel} type="button"><X size={13} /> Stop waiting</button>
+        <button className="button compact quiet scan-cancel" onClick={onCancel} type="button"><X size={13} /> Cancel scan</button>
+        {scanProgress?.traceId ? <small className="scan-support-code">Support code {scanProgress.traceId.slice(0, 12)}</small> : null}
       </div>
       <div className="scan-progress-rail" aria-hidden><span /></div>
     </section>

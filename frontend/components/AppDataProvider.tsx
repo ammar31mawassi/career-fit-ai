@@ -13,7 +13,7 @@ import {
   type ReactNode,
   type SetStateAction
 } from "react";
-import { getJobSummaries, getProfile, getWorkspaceBootstrap, type Profile, type TrackedJobSummary } from "@/lib/api";
+import { getJobSummaryPage, getProfile, getWorkspaceBootstrap, type Profile, type TrackedJobSummary } from "@/lib/api";
 import { createClient } from "@/lib/supabase/client";
 
 type AppData = {
@@ -21,17 +21,19 @@ type AppData = {
   jobs: TrackedJobSummary[];
   profileLoading: boolean;
   jobsLoading: boolean;
+  jobsNextCursor: string | null;
   dataError: string;
   setProfile: Dispatch<SetStateAction<Profile | null>>;
   setJobs: Dispatch<SetStateAction<TrackedJobSummary[]>>;
   refreshProfile: () => Promise<Profile>;
   refreshJobs: () => Promise<TrackedJobSummary[]>;
+  loadMoreJobs: () => Promise<TrackedJobSummary[]>;
   refreshAll: () => Promise<void>;
   reportDataError: (message: string) => void;
 };
 
 const AppDataContext = createContext<AppData | null>(null);
-const WORKSPACE_CACHE_PREFIX = "careerfit:workspace:v4:";
+const WORKSPACE_CACHE_PREFIX = "careerfit:workspace:v5:";
 const WORKSPACE_CACHE_TTL = 5 * 60 * 1000;
 const ONBOARDING_SYNC_KEY = "careerfit:onboarding-syncing";
 
@@ -66,6 +68,7 @@ type WorkspaceCache = {
   savedAt: number;
   profile: Profile | null;
   jobs: TrackedJobSummary[];
+  jobsNextCursor: string | null;
 };
 
 function workspaceCacheKey(userId: string) {
@@ -108,6 +111,7 @@ export function AppDataProvider({ children }: { children: ReactNode }) {
   const [jobs, setJobs] = useState<TrackedJobSummary[]>([]);
   const [profileLoading, setProfileLoading] = useState(true);
   const [jobsLoading, setJobsLoading] = useState(true);
+  const [jobsNextCursor, setJobsNextCursor] = useState<string | null>(null);
   const [dataError, setDataError] = useState("");
 
   const refreshProfile = useCallback(async () => {
@@ -124,13 +128,27 @@ export function AppDataProvider({ children }: { children: ReactNode }) {
   const refreshJobs = useCallback(async () => {
     setJobsLoading(true);
     try {
-      const data = await getJobSummaries();
-      setJobs(data);
-      return data;
+      const page = await getJobSummaryPage();
+      setJobs(page.items);
+      setJobsNextCursor(page.next_cursor);
+      return page.items;
     } finally {
       setJobsLoading(false);
     }
   }, []);
+
+  const loadMoreJobs = useCallback(async () => {
+    if (!jobsNextCursor) return [];
+    setJobsLoading(true);
+    try {
+      const page = await getJobSummaryPage(jobsNextCursor);
+      setJobs((current) => [...current, ...page.items.filter((item) => !current.some((job) => job.id === item.id))]);
+      setJobsNextCursor(page.next_cursor);
+      return page.items;
+    } finally {
+      setJobsLoading(false);
+    }
+  }, [jobsNextCursor]);
 
   const refreshAll = useCallback(async () => {
     setDataError("");
@@ -140,6 +158,7 @@ export function AppDataProvider({ children }: { children: ReactNode }) {
       const data = await getWorkspaceBootstrap();
       setProfile(data.profile);
       setJobs(data.jobs);
+      setJobsNextCursor(data.jobs_next_cursor);
     } catch (error) {
       setDataError(error instanceof Error ? error.message : "Could not refresh your workspace.");
       throw error;
@@ -170,6 +189,7 @@ export function AppDataProvider({ children }: { children: ReactNode }) {
     cacheHydrated.current = false;
     setProfile(null);
     setJobs([]);
+    setJobsNextCursor(null);
     setDataError("");
     if (!userId) {
       clearWorkspaceCaches();
@@ -195,6 +215,7 @@ export function AppDataProvider({ children }: { children: ReactNode }) {
       if (cached) {
         setProfile(cached.profile);
         setJobs(cached.jobs);
+        setJobsNextCursor(cached.jobsNextCursor ?? null);
         setProfileLoading(false);
         setJobsLoading(false);
       }
@@ -229,12 +250,12 @@ export function AppDataProvider({ children }: { children: ReactNode }) {
     try {
       sessionStorage.setItem(
         workspaceCacheKey(userId),
-        JSON.stringify({ savedAt: Date.now(), profile, jobs } satisfies WorkspaceCache)
+        JSON.stringify({ savedAt: Date.now(), profile, jobs, jobsNextCursor } satisfies WorkspaceCache)
       );
     } catch {
       // A private in-memory session cache is an optimization, never a requirement.
     }
-  }, [jobs, jobsLoading, pathname, profile, profileLoading, userId]);
+  }, [jobs, jobsLoading, jobsNextCursor, pathname, profile, profileLoading, userId]);
 
   const value = useMemo(
     () => ({
@@ -242,15 +263,17 @@ export function AppDataProvider({ children }: { children: ReactNode }) {
       jobs,
       profileLoading,
       jobsLoading,
+      jobsNextCursor,
       dataError,
       setProfile,
       setJobs,
       refreshProfile,
       refreshJobs,
+      loadMoreJobs,
       refreshAll,
       reportDataError: setDataError
     }),
-    [profile, jobs, profileLoading, jobsLoading, dataError, refreshProfile, refreshJobs, refreshAll]
+    [profile, jobs, profileLoading, jobsLoading, jobsNextCursor, dataError, refreshProfile, refreshJobs, loadMoreJobs, refreshAll]
   );
 
   return <AppDataContext.Provider value={value}>{children}</AppDataContext.Provider>;

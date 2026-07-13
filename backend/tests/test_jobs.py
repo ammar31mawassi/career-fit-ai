@@ -258,7 +258,7 @@ def test_job_lists_never_recalculate_matches(monkeypatch):
         )
         monkeypatch.setattr(
             jobs_service,
-            "_save_match",
+            "save_match",
             lambda *_: pytest.fail("list endpoint attempted to mutate a match"),
         )
 

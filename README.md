@@ -26,12 +26,18 @@ The beta does not use OpenAI, ChatGPT, or another hosted generative model. Profi
 - Bulk profile fact confirmation/rejection with pending-first review.
 - Password recovery, private JSON export, account deletion, and a public privacy explanation.
 - Abortable job scans with retained input and idempotent retry.
+- Durable PGMQ-backed scan jobs with persisted progress, cancellation, stale-worker recovery, and bounded retries.
+- User-reviewed job requirements that immediately recalculate the match and create privacy-safe evaluation labels.
+- Opt-in community job recommendations using a cheap eligibility shortlist before full evidence scoring.
+- Cursor-paginated job summaries, ETags, explicit rematching, trace IDs, and privacy-safe extraction metrics.
+- A replaceable scorer boundary with an optional monotonic calibration artifact; deterministic blockers and caps remain authoritative.
 
 Out of scope for v1: Goozali scanning, Gmail, WhatsApp, automatic applications, multiple CVs, and LinkedIn scraping.
 
 ## Engineering records
 
 - [Senior QA remediation](docs/QA_REMEDIATION_2026-07-13.md)
+- [Senior full-stack product intelligence release](docs/SENIOR_FULLSTACK_RELEASE_2026-07-13.md)
 - [Future product and engineering proposals](docs/CEO_FUTURE_IMPROVEMENTS.md)
 - [UI, performance, and agent research plan](docs/CAREERFIT_UI_AI_RESEARCH_PLAN.md)
 
@@ -64,10 +70,15 @@ Open `http://localhost:3000`.
 3. Create a private Storage bucket named `profile-documents`.
 4. Keep email/password Auth enabled. The app signup route creates confirmed beta users and applies signup rate limits.
 5. Put the project URL, anon key, service role key, backend API key, and allowed origins in Vercel/local env.
+6. Set a sensitive `CRON_SECRET` on the backend deployment so Vercel Cron can recover abandoned queue work.
 
 For an existing database, apply the SQL files in `supabase/migrations/` in filename order instead of rerunning the base schema.
 
 Use the API project URL in the form `https://<project-ref>.supabase.co`, not the Supabase dashboard URL. Use a publishable key for browser/auth requests and a secret key only in backend/Vercel environment variables.
+
+The current Hobby deployment invokes recovery once per day because Hobby Cron does not support minute-level schedules. Normal scans start immediately from the authenticated client and continue in the persisted queue; move the same worker endpoint to a more frequent schedule when scan volume or the hosting plan increases.
+
+Optional model calibration is enabled by setting `SCORE_CALIBRATION_PATH` to a JSON file with a version and monotonic score knots. If the file is absent or invalid, CareerFit safely uses the deterministic scorer.
 
 ## Fit score meaning
 

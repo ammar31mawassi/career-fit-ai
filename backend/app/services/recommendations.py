@@ -15,6 +15,7 @@ from ..models import (
     RecommendationRun,
     SharedJobCatalog,
 )
+from ..schemas import JobOut, JobRecommendationOut
 from .job_research import requirements_from_json
 from .job_routing import route_job_fields
 from .profile import candidate_snapshot
@@ -86,6 +87,7 @@ def generate_shadow_recommendations(
             .where(
                 Profile.status == "ready",
                 Profile.onboarding_completed.is_(True),
+                Profile.recommendations_enabled.is_(True),
                 Profile.user_id != source_user_id,
                 ProfileInterest.interest.in_(fields or ["__none__"]),
             )
@@ -101,8 +103,11 @@ def generate_shadow_recommendations(
             ).first()
             if already_saved:
                 continue
+            snapshot = candidate_snapshot(session, profile)
+            if not _cheap_eligible(snapshot, requirements, catalog.location):
+                continue
             result = get_match_scorer().score(
-                candidate_snapshot(session, profile),
+                snapshot,
                 catalog.company,
                 catalog.role,
                 requirements,
@@ -144,7 +149,7 @@ def generate_shadow_recommendations(
                 },
                 sort_keys=True,
             )
-            recommendation.status = "shadow_eligible" if is_strong else "shadow_observation"
+            recommendation.status = "available" if is_strong else "shadow_observation"
             recommendation.updated_at = _now()
             session.add(recommendation)
             if is_strong:
@@ -190,6 +195,90 @@ def process_one_queued_recommendation(session: Session) -> RecommendationRun | N
     return run
 
 
+def list_recommendations(session: Session, user_id: UUID, limit: int = 12) -> list[JobRecommendationOut]:
+    profile = session.exec(select(Profile).where(Profile.user_id == user_id)).first()
+    if profile is None or not profile.recommendations_enabled:
+        return []
+    recommendations = list(
+        session.exec(
+            select(JobRecommendation)
+            .where(
+                JobRecommendation.user_id == user_id,
+                JobRecommendation.status.in_(["available", "shadow_eligible"]),
+            )
+            .order_by(JobRecommendation.score.desc(), JobRecommendation.updated_at.desc())
+            .limit(limit)
+        ).all()
+    )
+    if not recommendations:
+        return []
+    catalogs = {
+        item.id: item
+        for item in session.exec(
+            select(SharedJobCatalog).where(
+                SharedJobCatalog.id.in_([item.catalog_job_id for item in recommendations]),
+                SharedJobCatalog.active.is_(True),
+            )
+        ).all()
+    }
+    return [
+        _recommendation_out(item, catalogs[item.catalog_job_id])
+        for item in recommendations
+        if item.catalog_job_id in catalogs
+    ]
+
+
+def update_recommendation(
+    session: Session,
+    user_id: UUID,
+    recommendation_id: int,
+    status: str,
+) -> tuple[JobRecommendationOut, JobOut | None]:
+    # Imported lazily because jobs catalogues completed scans into this module.
+    from .jobs import job_output, save_match
+
+    recommendation = session.get(JobRecommendation, recommendation_id)
+    if recommendation is None or recommendation.user_id != user_id:
+        raise ValueError("Recommendation not found.")
+    catalog = session.get(SharedJobCatalog, recommendation.catalog_job_id)
+    if catalog is None or not catalog.active:
+        raise ValueError("Recommended job is no longer available.")
+    if status == "dismissed":
+        recommendation.status = "dismissed"
+        recommendation.updated_at = _now()
+        session.add(recommendation)
+        session.commit()
+        return _recommendation_out(recommendation, catalog), None
+    if status != "saved":
+        raise ValueError("Unsupported recommendation action.")
+    job = session.exec(
+        select(Job).where(Job.user_id == user_id, Job.content_hash == catalog.content_hash)
+    ).first()
+    if job is None:
+        job = Job(user_id=user_id, content_hash=catalog.content_hash)
+    job.source_url = catalog.source_url
+    job.application_link = catalog.application_link
+    job.company = catalog.company
+    job.role = catalog.role
+    job.location = catalog.location
+    job.description_text = catalog.description_text
+    job.source_title = catalog.role
+    job.source_confidence = catalog.source_confidence
+    job.requirements_json = catalog.requirements_json
+    job.status = "analyzed"
+    job.error = ""
+    job.updated_at = _now()
+    session.add(job)
+    session.flush()
+    profile = session.exec(select(Profile).where(Profile.user_id == user_id)).one()
+    save_match(session, user_id, profile, job, commit=False)
+    recommendation.status = "saved"
+    recommendation.updated_at = _now()
+    session.add(recommendation)
+    session.commit()
+    return _recommendation_out(recommendation, catalog), job_output(session, user_id, job.id or 0)
+
+
 def _enqueue_if_supported(session: Session, catalog_job_id: int, source_user_id: UUID) -> None:
     if session.get_bind().dialect.name != "postgresql":
         return
@@ -209,6 +298,59 @@ def _json_list(value: str) -> list[str]:
     except (TypeError, json.JSONDecodeError):
         return []
     return [str(item) for item in parsed] if isinstance(parsed, list) else []
+
+
+def _json_dict(value: str) -> dict[str, object]:
+    try:
+        parsed = json.loads(value)
+    except (TypeError, json.JSONDecodeError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _recommendation_out(
+    recommendation: JobRecommendation,
+    catalog: SharedJobCatalog,
+) -> JobRecommendationOut:
+    return JobRecommendationOut(
+        id=recommendation.id or 0,
+        catalog_job_id=catalog.id or 0,
+        source_url=catalog.source_url,
+        application_link=catalog.application_link,
+        company=catalog.company,
+        role=catalog.role,
+        location=catalog.location,
+        score=recommendation.score,
+        fit_level=recommendation.fit_level,  # type: ignore[arg-type]
+        confidence=recommendation.confidence,
+        career_fields=_json_list(recommendation.career_fields_json),
+        reasons=_json_list(recommendation.reasons_json),
+        status=recommendation.status,
+        created_at=recommendation.created_at,
+    )
+
+
+def _cheap_eligible(snapshot, requirements, job_location: str) -> bool:
+    if requirements.seniority == "senior" and snapshot.years_experience < 3:
+        return False
+    if requirements.min_years_experience >= 3 and snapshot.years_experience == 0:
+        return False
+    if "part-time" in snapshot.availability.lower() and "full-time" in requirements.availability.lower():
+        return False
+    if "remote" in requirements.work_mode.lower() or "remote" in job_location.lower():
+        return True
+    candidate_tokens = _location_tokens(snapshot.location)
+    job_tokens = _location_tokens(requirements.location_requirement or job_location)
+    return not candidate_tokens or not job_tokens or bool(candidate_tokens & job_tokens)
+
+
+def _location_tokens(value: str) -> set[str]:
+    ignored = {"israel", "hybrid", "onsite", "on-site", "remote", "office"}
+    return {
+        token
+        for token in "".join(character if character.isalnum() else " " for character in value.lower()).split()
+        if len(token) > 2 and token not in ignored
+    }
 
 
 def _now() -> datetime:

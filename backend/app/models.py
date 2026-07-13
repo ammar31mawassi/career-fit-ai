@@ -25,6 +25,7 @@ class Profile(SQLModel, table=True):
     manual_info: str = ""
     years_experience: float = 0.0
     onboarding_completed: bool = Field(default=False, index=True)
+    recommendations_enabled: bool = Field(default=False, index=True)
     last_analyzed_at: Optional[datetime] = None
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
@@ -176,6 +177,75 @@ class JobStatusEvent(SQLModel, table=True):
     user_id: UUID = Field(index=True)
     match_id: int = Field(foreign_key="job_matches.id", index=True)
     status: str = Field(index=True)
+    created_at: datetime = Field(default_factory=utc_now)
+
+
+class JobRequirementRevision(SQLModel, table=True):
+    __tablename__ = "job_requirement_revisions"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    user_id: UUID = Field(index=True)
+    job_id: int = Field(foreign_key="jobs.id", index=True)
+    original_requirements_json: str = "{}"
+    corrected_requirements_json: str = "{}"
+    changed_fields_json: str = "[]"
+    matcher_version: str = ""
+    created_at: datetime = Field(default_factory=utc_now)
+
+
+class JobScan(SQLModel, table=True):
+    __tablename__ = "job_scans"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    user_id: UUID = Field(index=True)
+    input_hash: str = Field(default="", index=True)
+    payload_json: str = "{}"
+    status: str = Field(default="queued", index=True)
+    current_step: str = "queued"
+    progress: int = 0
+    result_job_id: Optional[int] = Field(default=None, foreign_key="jobs.id", index=True)
+    trace_id: str = Field(default="", index=True)
+    attempts: int = 0
+    error_code: str = ""
+    error_message: str = ""
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
+    started_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+
+
+class ExtractionMetric(SQLModel, table=True):
+    __tablename__ = "extraction_metrics"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    user_id: UUID = Field(index=True)
+    workflow_type: str = Field(index=True)
+    subject_type: str = Field(default="", index=True)
+    subject_id: Optional[int] = Field(default=None, index=True)
+    strategy: str = ""
+    status: str = Field(default="succeeded", index=True)
+    duration_ms: int = 0
+    input_length: int = 0
+    output_length: int = 0
+    fallback_reason: str = ""
+    counts_json: str = "{}"
+    error_code: str = ""
+    trace_id: str = Field(default="", index=True)
+    created_at: datetime = Field(default_factory=utc_now)
+
+
+class EvaluationExample(SQLModel, table=True):
+    __tablename__ = "evaluation_examples"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    user_id: UUID = Field(index=True)
+    example_type: str = Field(index=True)
+    subject_id: Optional[int] = Field(default=None, index=True)
+    split: str = Field(default="train", index=True)
+    label: str = Field(index=True)
+    features_json: str = "{}"
+    model_version: str = Field(default="", index=True)
+    trace_id: str = Field(default="", index=True)
     created_at: datetime = Field(default_factory=utc_now)
 
 

@@ -29,6 +29,8 @@ class Settings:
     ocr_service_url: str | None
     ocr_service_token: str | None
     github_token: str | None
+    cron_secret: str | None
+    score_calibration_path: Path | None
 
 
 def _csv_values(value: str) -> tuple[str, ...]:
@@ -64,4 +66,10 @@ def get_settings() -> Settings:
         ocr_service_url=os.getenv("OCR_SERVICE_URL") or None,
         ocr_service_token=os.getenv("OCR_SERVICE_TOKEN") or None,
         github_token=os.getenv("GITHUB_TOKEN") or None,
+        cron_secret=os.getenv("CRON_SECRET") or None,
+        score_calibration_path=(
+            _path_value(os.environ["SCORE_CALIBRATION_PATH"])
+            if os.getenv("SCORE_CALIBRATION_PATH")
+            else None
+        ),
     )

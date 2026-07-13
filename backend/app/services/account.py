@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
@@ -8,10 +9,11 @@ from uuid import UUID
 from sqlmodel import Session, select
 
 from ..config import get_settings
-from ..models import Profile, ProfileFactFeedback, ProfileSource
+from ..models import JobRequirementRevision, Profile, ProfileFactFeedback, ProfileSource
 from ..schemas import (
     AccountExportOut,
     AccountFeedbackExportOut,
+    AccountRequirementFeedbackOut,
     AccountSourceExportOut,
 )
 from .jobs import list_jobs
@@ -33,6 +35,13 @@ def export_account(session: Session, user_id: UUID) -> AccountExportOut:
             select(ProfileFactFeedback)
             .where(ProfileFactFeedback.profile_id == profile.id)
             .order_by(ProfileFactFeedback.created_at)
+        ).all()
+    )
+    requirement_feedback = list(
+        session.exec(
+            select(JobRequirementRevision)
+            .where(JobRequirementRevision.user_id == user_id)
+            .order_by(JobRequirementRevision.created_at)
         ).all()
     )
     return AccountExportOut(
@@ -57,8 +66,34 @@ def export_account(session: Session, user_id: UUID) -> AccountExportOut:
             )
             for item in feedback
         ],
+        requirement_feedback=[
+            AccountRequirementFeedbackOut(
+                job_id=item.job_id,
+                original_requirements=_json_dict(item.original_requirements_json),
+                corrected_requirements=_json_dict(item.corrected_requirements_json),
+                changed_fields=_json_list(item.changed_fields_json),
+                created_at=item.created_at,
+            )
+            for item in requirement_feedback
+        ],
         jobs=list_jobs(session, user_id, limit=10_000),
     )
+
+
+def _json_dict(value: str) -> dict[str, object]:
+    try:
+        parsed = json.loads(value)
+    except (TypeError, json.JSONDecodeError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _json_list(value: str) -> list[str]:
+    try:
+        parsed = json.loads(value)
+    except (TypeError, json.JSONDecodeError):
+        return []
+    return [str(item) for item in parsed] if isinstance(parsed, list) else []
 
 
 def delete_account(session: Session, user_id: UUID) -> None:

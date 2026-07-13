@@ -1,6 +1,12 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile
+import secrets
+import hashlib
+import time
+
+from fastapi import APIRouter, Depends, File, Header, HTTPException, Query, Response, UploadFile
+from fastapi.encoders import jsonable_encoder
+from starlette.responses import JSONResponse
 from sqlmodel import Session
 from uuid import UUID
 
@@ -13,6 +19,12 @@ from ..schemas import (
     ClarificationAnswerIn,
     JobCreateIn,
     JobOut,
+    JobRecommendationActionOut,
+    JobRecommendationOut,
+    JobRecommendationPatchIn,
+    JobSummaryPageOut,
+    JobRequirementsReviewIn,
+    JobScanOut,
     JobStatusPatchIn,
     JobSummaryOut,
     ProfileAnalyzeResult,
@@ -26,7 +38,23 @@ from ..schemas import (
 )
 from ..services.account import delete_account, export_account
 from ..services.auth import current_user_id
-from ..services.jobs import create_or_analyze_job, job_output, list_job_summaries, list_jobs, update_job_status
+from ..services.job_scans import (
+    cancel_job_scan,
+    create_job_scan,
+    process_one_queued_scan,
+    process_user_scan,
+    scan_output,
+)
+from ..services.jobs import (
+    create_or_analyze_job,
+    job_output,
+    list_job_summaries,
+    list_job_summary_page,
+    list_jobs,
+    rematch_job,
+    review_job_requirements,
+    update_job_status,
+)
 from ..services.profile import (
     apply_browser_ocr,
     analyze_profile,
@@ -41,7 +69,11 @@ from ..services.profile import (
     upload_cv_source,
     upload_linkedin_pdf_source,
 )
-from ..services.recommendations import process_one_queued_recommendation
+from ..services.recommendations import (
+    list_recommendations,
+    process_one_queued_recommendation,
+    update_recommendation,
+)
 
 
 router = APIRouter(prefix="/api")
@@ -80,10 +112,13 @@ def workspace_bootstrap(
     user_id: UUID = Depends(current_user_id),
     session: Session = Depends(get_session),
 ) -> WorkspaceBootstrapOut:
+    page = list_job_summary_page(session, user_id, limit=limit)
     return WorkspaceBootstrapOut(
         user_id=str(user_id),
         profile=profile_output(session, user_id),
-        jobs=list_job_summaries(session, user_id, limit=limit),
+        jobs=page.items,
+        jobs_next_cursor=page.next_cursor,
+        jobs_watermark=page.watermark,
     )
 
 
@@ -233,13 +268,77 @@ def create_job(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
-@router.post("/recommendations/process-pending")
-def process_pending_recommendation(
+@router.post("/job-scans", response_model=JobScanOut, status_code=202)
+def queue_job_scan(
+    payload: JobCreateIn,
     user_id: UUID = Depends(current_user_id),
     session: Session = Depends(get_session),
-) -> dict[str, bool]:
-    del user_id
-    return {"processed": process_one_queued_recommendation(session) is not None}
+) -> JobScanOut:
+    try:
+        return create_job_scan(session, user_id, payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/job-scans/{scan_id}", response_model=JobScanOut)
+def job_scan_status(
+    scan_id: int,
+    user_id: UUID = Depends(current_user_id),
+    session: Session = Depends(get_session),
+) -> JobScanOut:
+    try:
+        return scan_output(session, user_id, scan_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/job-scans/{scan_id}/process", response_model=JobScanOut)
+def process_job_scan(
+    scan_id: int,
+    user_id: UUID = Depends(current_user_id),
+    session: Session = Depends(get_session),
+) -> JobScanOut:
+    try:
+        return process_user_scan(session, user_id, scan_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.delete("/job-scans/{scan_id}", response_model=JobScanOut)
+def cancel_scan(
+    scan_id: int,
+    user_id: UUID = Depends(current_user_id),
+    session: Session = Depends(get_session),
+) -> JobScanOut:
+    try:
+        return cancel_job_scan(session, user_id, scan_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get("/recommendations", response_model=list[JobRecommendationOut])
+def recommendations(
+    limit: int = Query(default=12, ge=1, le=30),
+    user_id: UUID = Depends(current_user_id),
+    session: Session = Depends(get_session),
+) -> list[JobRecommendationOut]:
+    return list_recommendations(session, user_id, limit)
+
+
+@router.patch("/recommendations/{recommendation_id}", response_model=JobRecommendationActionOut)
+def patch_recommendation(
+    recommendation_id: int,
+    payload: JobRecommendationPatchIn,
+    user_id: UUID = Depends(current_user_id),
+    session: Session = Depends(get_session),
+) -> JobRecommendationActionOut:
+    try:
+        recommendation, job = update_recommendation(
+            session, user_id, recommendation_id, payload.status
+        )
+        return JobRecommendationActionOut(recommendation=recommendation, job=job)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @router.get("/jobs", response_model=list[JobOut])
@@ -260,6 +359,28 @@ def job_summaries(
     session: Session = Depends(get_session),
 ) -> list[JobSummaryOut]:
     return list_job_summaries(session, user_id, query=query, limit=limit)
+
+
+@router.get("/jobs/summary-page", response_model=None)
+def job_summary_page(
+    query: str = Query(default="", max_length=200),
+    limit: int = Query(default=30, ge=1, le=100),
+    cursor: str = Query(default="", max_length=500),
+    if_none_match: str = Header(default="", alias="If-None-Match"),
+    user_id: UUID = Depends(current_user_id),
+    session: Session = Depends(get_session),
+):
+    try:
+        page = list_job_summary_page(session, user_id, query=query, limit=limit, cursor=cursor)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    signature = "|".join(
+        [str(user_id), query.strip().lower(), cursor, page.watermark.isoformat() if page.watermark else "empty"]
+    )
+    etag = f'"{hashlib.sha256(signature.encode("utf-8")).hexdigest()[:24]}"'
+    if if_none_match == etag:
+        return Response(status_code=304, headers={"ETag": etag})
+    return JSONResponse(content=jsonable_encoder(page), headers={"ETag": etag})
 
 
 @router.get("/jobs/{job_id}", response_model=JobOut)
@@ -285,3 +406,57 @@ def patch_job_status(
         return update_job_status(session, user_id, job_id, payload.status)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/jobs/{job_id}/rematch", response_model=JobOut)
+def refresh_job_match(
+    job_id: int,
+    user_id: UUID = Depends(current_user_id),
+    session: Session = Depends(get_session),
+) -> JobOut:
+    try:
+        return rematch_job(session, user_id, job_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.patch("/jobs/{job_id}/requirements", response_model=JobOut)
+def update_job_requirements(
+    job_id: int,
+    payload: JobRequirementsReviewIn,
+    user_id: UUID = Depends(current_user_id),
+    session: Session = Depends(get_session),
+) -> JobOut:
+    try:
+        return review_job_requirements(session, user_id, job_id, payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.api_route("/workers/process", methods=["GET", "POST"])
+def process_background_work(
+    authorization: str = Header(default=""),
+    session: Session = Depends(get_session),
+) -> dict[str, int]:
+    settings = get_settings()
+    expected = settings.cron_secret or settings.backend_api_key
+    supplied = authorization.removeprefix("Bearer ").strip()
+    if not expected or not secrets.compare_digest(supplied, expected):
+        raise HTTPException(status_code=401, detail="Worker authorization required.")
+    deadline = time.monotonic() + 50
+    scans_processed = 0
+    for _ in range(5):
+        if time.monotonic() >= deadline:
+            break
+        scan = process_one_queued_scan(session)
+        if scan is not None and scan.status in {"succeeded", "failed", "cancelled"}:
+            scans_processed += 1
+    recommendation = (
+        process_one_queued_recommendation(session)
+        if time.monotonic() < deadline
+        else None
+    )
+    return {
+        "scans_processed": scans_processed,
+        "recommendations_processed": int(recommendation is not None),
+    }

@@ -41,6 +41,7 @@ from .profile_extraction import (
     fact_key,
 )
 from .storage import load_private_file, save_private_file
+from .telemetry import record_evaluation_example, record_extraction_metric
 from .text import safe_filename
 
 
@@ -237,6 +238,8 @@ def update_profile_preferences(
                 interest=interest,
             )
         )
+    if payload.recommendations_enabled is not None:
+        profile.recommendations_enabled = payload.recommendations_enabled
     profile.updated_at = _now()
     session.add(profile)
     session.commit()
@@ -271,6 +274,7 @@ def complete_onboarding(session: Session, user_id: UUID) -> ProfileOut:
 
 
 def analyze_profile(session: Session, user_id: UUID) -> ProfileAnalyzeResult:
+    started = time.perf_counter()
     profile = get_or_create_profile(session, user_id)
     sources = _sources(session, profile)
     cv_sources = [source for source in sources if source.source_type == "cv"]
@@ -278,6 +282,16 @@ def analyze_profile(session: Session, user_id: UUID) -> ProfileAnalyzeResult:
         profile.status = "needs_cv"
         profile.updated_at = _now()
         session.add(profile)
+        record_extraction_metric(
+            session,
+            user_id,
+            workflow_type="profile_extraction",
+            subject_type="profile",
+            subject_id=profile.id,
+            status="failed",
+            duration_ms=round((time.perf_counter() - started) * 1000),
+            error_code="NO_CV",
+        )
         session.commit()
         output = profile_output(session, user_id)
         return ProfileAnalyzeResult(profile=output, generated_facts=0, open_questions=len(output.questions))
@@ -288,6 +302,17 @@ def analyze_profile(session: Session, user_id: UUID) -> ProfileAnalyzeResult:
         profile.status = "cv_unreadable"
         profile.updated_at = _now()
         session.add(profile)
+        record_extraction_metric(
+            session,
+            user_id,
+            workflow_type="profile_extraction",
+            subject_type="profile",
+            subject_id=profile.id,
+            strategy=_profile_reader_strategy(sources),
+            status="failed",
+            duration_ms=round((time.perf_counter() - started) * 1000),
+            error_code="CV_UNREADABLE",
+        )
         session.commit()
         output = profile_output(session, user_id)
         return ProfileAnalyzeResult(profile=output, generated_facts=0, open_questions=len(output.questions))
@@ -332,6 +357,25 @@ def analyze_profile(session: Session, user_id: UUID) -> ProfileAnalyzeResult:
     profile.updated_at = _now()
     session.add(profile)
     _create_questions(session, profile, snapshot)
+    record_extraction_metric(
+        session,
+        user_id,
+        workflow_type="profile_extraction",
+        subject_type="profile",
+        subject_id=profile.id,
+        strategy=_profile_reader_strategy(sources),
+        duration_ms=round((time.perf_counter() - started) * 1000),
+        input_length=len(all_text),
+        output_length=sum(len(fact.value) for fact in session.exec(
+            select(ProfileFact).where(ProfileFact.profile_id == profile.id)
+        ).all()),
+        counts={
+            "facts": len(grouped),
+            "skills": len(snapshot.skills),
+            "projects": len(snapshot.projects),
+            "sources": len(sources),
+        },
+    )
     session.commit()
     output = profile_output(session, user_id)
     return ProfileAnalyzeResult(
@@ -370,8 +414,10 @@ def profile_output(session: Session, user_id: UUID) -> ProfileOut:
         manual_info=profile.manual_info,
         years_experience=profile.years_experience,
         onboarding_completed=profile.onboarding_completed,
+        recommendations_enabled=profile.recommendations_enabled,
         career_interests=[interest.interest for interest in interests],
         last_analyzed_at=profile.last_analyzed_at,
+        updated_at=profile.updated_at,
         sources=[_profile_source_output(source) for source in sources],
         facts=[
             ProfileFactOut(
@@ -425,6 +471,43 @@ def _profile_source_output(source: ProfileSource) -> ProfileSourceOut:
     )
 
 
+def _profile_reader_strategy(sources: list[ProfileSource]) -> str:
+    methods = {
+        str(_json_dict(source.metadata_json).get("read_method") or source.source_type)
+        for source in sources
+        if source.content_text.strip()
+    }
+    return "+".join(sorted(methods))[:160]
+
+
+def _record_fact_feedback_example(
+    session: Session,
+    user_id: UUID,
+    fact: ProfileFact,
+    label: str,
+    *,
+    value_changed: bool = False,
+) -> None:
+    metadata = _json_dict(fact.metadata_json)
+    record_evaluation_example(
+        session,
+        user_id,
+        example_type="profile_fact_review",
+        subject_id=fact.id,
+        label=label,
+        model_version=str(metadata.get("extractor_version") or EXTRACTOR_VERSION),
+        features={
+            "fact_type": fact.fact_type,
+            "confidence": round(fact.confidence, 3),
+            "support_count": fact.support_count,
+            "source_count": len(_json_int_list(fact.source_ids_json)),
+            "evidence_type": str(metadata.get("evidence_type") or "unknown"),
+            "value_changed": value_changed,
+            "value_length_bucket": min(10, len(fact.value) // 40),
+        },
+    )
+
+
 def patch_fact(session: Session, user_id: UUID, fact_id: int, value: str, review_status: str) -> ProfileOut:
     fact = session.get(ProfileFact, fact_id)
     if not fact or fact.user_id != user_id:
@@ -454,6 +537,13 @@ def patch_fact(session: Session, user_id: UUID, fact_id: int, value: str, review
             source_ids_json=fact.source_ids_json,
             extractor_version=EXTRACTOR_VERSION,
         )
+    )
+    _record_fact_feedback_example(
+        session,
+        user_id,
+        fact,
+        "edited_and_approved" if original_value != fact.value and review_status == "approved" else review_status,
+        value_changed=original_value != fact.value,
     )
     session.flush()
     profile = session.get(Profile, fact.profile_id)
@@ -502,6 +592,7 @@ def patch_facts_bulk(
                 extractor_version=EXTRACTOR_VERSION,
             )
         )
+        _record_fact_feedback_example(session, user_id, fact, review_status)
     session.flush()
     profile = session.get(Profile, facts[0].profile_id)
     if profile:
@@ -563,6 +654,7 @@ def add_fact(session: Session, user_id: UUID, fact_type: str, value: str) -> Pro
             extractor_version=EXTRACTOR_VERSION,
         )
     )
+    _record_fact_feedback_example(session, user_id, fact, "manually_added", value_changed=True)
     session.flush()
     _rebuild_profile_state(session, profile)
     session.commit()

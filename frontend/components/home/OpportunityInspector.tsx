@@ -1,9 +1,11 @@
 "use client";
 
-import { useState, type CSSProperties, type ReactNode } from "react";
-import { CheckCircle2, CircleAlert, CircleDot, ExternalLink, Gauge, Loader2, Radar, Target, Zap } from "lucide-react";
+import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
+import { CheckCircle2, CircleAlert, CircleDot, ExternalLink, Gauge, Loader2, Radar, RefreshCw, Target, Zap } from "lucide-react";
+import { RequirementReviewPanel } from "@/components/home/RequirementReviewPanel";
 import {
   formatDate,
+  rematchJob,
   updateJobStatus,
   type AgentRun,
   type JobStatus,
@@ -16,17 +18,21 @@ export function OpportunityInspector({
   job,
   loading,
   detailError,
-  onStatusChanged
+  onJobChanged,
+  profileUpdatedAt
 }: {
   summary: TrackedJobSummary | null;
   job: TrackedJob | null;
   loading: boolean;
   detailError: string;
-  onStatusChanged: (job: TrackedJob) => void;
+  onJobChanged: (job: TrackedJob) => void;
+  profileUpdatedAt: string | null;
 }) {
   const [saving, setSaving] = useState(false);
+  const [rematching, setRematching] = useState(false);
   const [statusError, setStatusError] = useState("");
   const match = job?.match ?? null;
+  const matchStale = Boolean(match && profileUpdatedAt && new Date(profileUpdatedAt).getTime() > new Date(match.analyzed_at).getTime());
 
   async function setStatus(status: JobStatus) {
     if (!job?.match || job.match.status === status) return;
@@ -42,16 +48,29 @@ export function OpportunityInspector({
         ]
       }
     };
-    onStatusChanged(optimistic);
+    onJobChanged(optimistic);
     setStatusError("");
     setSaving(true);
     try {
-      onStatusChanged(await updateJobStatus(job.id, status));
+      onJobChanged(await updateJobStatus(job.id, status));
     } catch (caught) {
-      onStatusChanged(previous);
+      onJobChanged(previous);
       setStatusError(caught instanceof Error ? `Stage change was rolled back: ${caught.message}` : "Stage change was rolled back.");
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function refreshMatch() {
+    if (!job) return;
+    setRematching(true);
+    setStatusError("");
+    try {
+      onJobChanged(await rematchJob(job.id));
+    } catch (caught) {
+      setStatusError(caught instanceof Error ? caught.message : "Could not refresh this match.");
+    } finally {
+      setRematching(false);
     }
   }
 
@@ -86,7 +105,9 @@ export function OpportunityInspector({
             {saving ? <small>Saved · syncing</small> : null}
           </label>
         ) : null}
+        {matchStale ? <button className="button compact quiet" disabled={rematching} onClick={() => void refreshMatch()} type="button"><RefreshCw className={rematching ? "spin" : ""} size={14} /> {rematching ? "Refreshing…" : "Refresh match"}</button> : null}
       </div>
+      {matchStale ? <div className="stale-match-note"><CircleAlert size={14} /><span>Your profile changed after this score. Refresh explicitly when you want to recalculate it.</span></div> : null}
       {statusError ? <div className="notice error compact-notice" role="alert">{statusError}</div> : null}
 
       <div className="detail-grid inspector-metrics">
@@ -95,6 +116,8 @@ export function OpportunityInspector({
         <Detail icon={<Target size={14} />} label="Requirements captured" value={`${Math.round(job.requirements.extraction_completeness * 100)}%`} />
         <Detail icon={<Zap size={14} />} label="Experience required" value={job.requirements.min_years_experience ? `${job.requirements.min_years_experience}+ years` : "Not stated"} />
       </div>
+
+      <RequirementReviewPanel job={job} onSaved={onJobChanged} />
 
       <AgentWorkflowTrace run={job.agent_run} />
       {match ? (
@@ -150,7 +173,18 @@ function AgentWorkflowTrace({ run }: { run: AgentRun | null }) {
 
 function ScoreOrb({ score, fit }: { score: number; fit: "Strong" | "Medium" | "Weak" }) {
   const rounded = Math.round(score);
-  return <div className={`score-orb ${fit.toLowerCase()}`} style={{ "--score": `${Math.max(0, Math.min(100, rounded))}%` } as CSSProperties}><strong>{rounded}%</strong><span>{fit}</span></div>;
+  const ref = useRef<HTMLDivElement>(null);
+  const [visible, setVisible] = useState(false);
+  useEffect(() => {
+    const node = ref.current;
+    if (!node || typeof IntersectionObserver === "undefined") { setVisible(true); return; }
+    const observer = new IntersectionObserver(([entry]) => {
+      if (entry.isIntersecting) { setVisible(true); observer.disconnect(); }
+    }, { threshold: .45 });
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, []);
+  return <div ref={ref} className={`score-orb ${fit.toLowerCase()}`} style={{ "--score": visible ? `${Math.max(0, Math.min(100, rounded))}%` : "0%" } as CSSProperties}><strong>{rounded}%</strong><span>{fit}</span></div>;
 }
 
 function Detail({ label, value, icon }: { label: string; value: string; icon?: ReactNode }) {

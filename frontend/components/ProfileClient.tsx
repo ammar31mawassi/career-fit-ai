@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState, type FormEvent } from "react";
-import { FileCheck2, FileText, Github, Linkedin, RefreshCw, Save, ScanText, Sparkles, UploadCloud } from "lucide-react";
+import { FileCheck2, FileText, Github, Linkedin, RadioTower, RefreshCw, Save, ScanText, Sparkles, UploadCloud } from "lucide-react";
 import { useAppData } from "@/components/AppDataProvider";
 import { CareerInterestPicker } from "@/components/CareerInterestPicker";
 import { LongTaskProgress } from "@/components/LongTaskProgress";
@@ -30,6 +30,7 @@ export function ProfileClient() {
   const [linkedinText, setLinkedinText] = useState("");
   const [manualInfo, setManualInfo] = useState("");
   const [careerInterests, setCareerInterests] = useState<string[]>([]);
+  const [recommendationsEnabled, setRecommendationsEnabled] = useState(false);
   const [cvFile, setCvFile] = useState<File | null>(null);
   const [linkedinFile, setLinkedinFile] = useState<File | null>(null);
   const [saving, setSaving] = useState(false);
@@ -48,7 +49,8 @@ export function ProfileClient() {
     setLinkedinText(profile.linkedin_text);
     setManualInfo(profile.manual_info);
     setCareerInterests(profile.career_interests);
-  }, [profile?.id, profile?.github_url, profile?.linkedin_text, profile?.manual_info, profile?.career_interests]);
+    setRecommendationsEnabled(profile.recommendations_enabled);
+  }, [profile?.id, profile?.github_url, profile?.linkedin_text, profile?.manual_info, profile?.career_interests, profile?.recommendations_enabled]);
 
   const openQuestions = useMemo(
     () => (profile?.questions ?? []).filter((question) => question.status === "open"),
@@ -246,15 +248,16 @@ export function ProfileClient() {
 
   async function saveInterests() {
     const previousInterests = profile?.career_interests ?? [];
+    const previousRecommendationSetting = profile?.recommendations_enabled ?? false;
     setInterestsSyncing(true);
     setError("");
     setMessage("Career interests updated.");
-    setProfile((current) => current ? { ...current, career_interests: careerInterests } : current);
+    setProfile((current) => current ? { ...current, career_interests: careerInterests, recommendations_enabled: recommendationsEnabled } : current);
     try {
-      const updated = await saveProfilePreferences(careerInterests);
+      const updated = await saveProfilePreferences(careerInterests, recommendationsEnabled);
       setProfile(updated);
     } catch (err) {
-      setProfile((current) => current ? { ...current, career_interests: previousInterests } : current);
+      setProfile((current) => current ? { ...current, career_interests: previousInterests, recommendations_enabled: previousRecommendationSetting } : current);
       setError(err instanceof Error ? `Interest changes were rolled back: ${err.message}` : "Interest changes were rolled back.");
       setMessage("");
     } finally {
@@ -376,8 +379,13 @@ export function ProfileClient() {
           <span className="review-count">{careerInterests.length} selected</span>
         </div>
         <CareerInterestPicker disabled={saving} onChange={setCareerInterests} selected={careerInterests} />
+        <label className={`discovery-consent ${recommendationsEnabled ? "enabled" : ""}`}>
+          <input checked={recommendationsEnabled} onChange={(event) => setRecommendationsEnabled(event.target.checked)} type="checkbox" />
+          <span className="discovery-consent-icon"><RadioTower size={18} /></span>
+          <span><strong>Recommend strong community-scanned roles</strong><small>CareerFit may score relevant shared job descriptions against your private profile. Other users never see your profile, evidence, or score. You can opt out at any time.</small></span>
+        </label>
         <div className="form-actions">
-          <button className="button primary" disabled={interestsSyncing} onClick={() => void saveInterests()} type="button"><Save size={16} /> {interestsSyncing ? "Saved · syncing" : "Save interests"}</button>
+          <button className="button primary" disabled={interestsSyncing} onClick={() => void saveInterests()} type="button"><Save size={16} /> {interestsSyncing ? "Saved · syncing" : "Save direction & discovery"}</button>
         </div>
       </section>
 

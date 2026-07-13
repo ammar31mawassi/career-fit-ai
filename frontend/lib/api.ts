@@ -41,8 +41,10 @@ export type Profile = {
   manual_info: string;
   years_experience: number;
   onboarding_completed: boolean;
+  recommendations_enabled: boolean;
   career_interests: string[];
   last_analyzed_at: string | null;
+  updated_at: string | null;
   sources: ProfileSource[];
   facts: ProfileFact[];
   questions: ClarificationQuestion[];
@@ -197,17 +199,71 @@ export type WorkspaceBootstrap = {
   user_id: string;
   profile: Profile;
   jobs: TrackedJobSummary[];
+  jobs_next_cursor: string | null;
+  jobs_watermark: string | null;
 };
+
+export type JobScan = {
+  id: number;
+  status: "queued" | "running" | "succeeded" | "failed" | "cancel_requested" | "cancelled";
+  current_step: string;
+  progress: number;
+  result_job_id: number | null;
+  trace_id: string;
+  error_code: string;
+  error_message: string;
+  created_at: string;
+  updated_at: string;
+  completed_at: string | null;
+  result_job: TrackedJob | null;
+};
+
+export type JobSummaryPage = {
+  items: TrackedJobSummary[];
+  next_cursor: string | null;
+  watermark: string | null;
+};
+
+export type JobRecommendation = {
+  id: number;
+  catalog_job_id: number;
+  source_url: string;
+  application_link: string;
+  company: string;
+  role: string;
+  location: string;
+  score: number;
+  fit_level: "Strong" | "Medium" | "Weak";
+  confidence: number;
+  career_fields: string[];
+  reasons: string[];
+  status: string;
+  created_at: string;
+};
+
+export type JobRequirementsReview = Pick<JobRequirements,
+  "must_have_skills" | "preferred_skills" | "nice_to_have_skills" |
+  "min_years_experience" | "experience_requirement_known" | "seniority" |
+  "education" | "work_mode" | "domain" | "location_requirement"
+>;
 
 export type AccountExport = {
   exported_at: string;
   profile: Profile;
   sources: Array<{ source_type: string; title: string; content_text: string; updated_at: string }>;
   fact_feedback: Array<{ fact_type: string; action: string; original_value: string; corrected_value: string; created_at: string }>;
+  requirement_feedback: Array<{ job_id: number; original_requirements: Record<string, unknown>; corrected_requirements: Record<string, unknown>; changed_fields: string[]; created_at: string }>;
   jobs: TrackedJob[];
 };
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "/backend";
+
+export class ApiError extends Error {
+  constructor(message: string, public status: number, public code = "", public traceId = "") {
+    super(message);
+    this.name = "ApiError";
+  }
+}
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const response = await fetch(`${API_BASE}${path}`, {
@@ -220,13 +276,18 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
   });
   if (!response.ok) {
     let message = `Request failed with ${response.status}`;
+    let code = "";
+    let traceId = response.headers.get("x-trace-id") ?? "";
     try {
-      const body = await response.json();
-      message = body.detail ?? message;
+      const body = await response.json() as { detail?: string | { message?: string }; code?: string; trace_id?: string };
+      message = typeof body.detail === "string" ? body.detail : body.detail?.message ?? message;
+      code = body.code ?? "";
+      traceId = body.trace_id ?? traceId;
     } catch {
       // Keep generic error.
     }
-    throw new Error(message);
+    if (traceId && response.status >= 500) message = `${message} Support code: ${traceId.slice(0, 12)}.`;
+    throw new ApiError(message, response.status, code, traceId);
   }
   return response.json() as Promise<T>;
 }
@@ -296,10 +357,13 @@ export function saveProfileSources(payload: { github_url: string; linkedin_text:
   });
 }
 
-export function saveProfilePreferences(careerInterests: string[]) {
+export function saveProfilePreferences(careerInterests: string[], recommendationsEnabled?: boolean) {
   return request<Profile>("/api/profile/preferences", {
     method: "PUT",
-    body: JSON.stringify({ career_interests: careerInterests })
+    body: JSON.stringify({
+      career_interests: careerInterests,
+      ...(recommendationsEnabled === undefined ? {} : { recommendations_enabled: recommendationsEnabled })
+    })
   });
 }
 
@@ -349,22 +413,44 @@ export function getJobSummaries(query = "") {
   return request<TrackedJobSummary[]>(`/api/jobs/summary${suffix}`);
 }
 
+export function getJobSummaryPage(cursor = "", limit = 30) {
+  const parameters = new URLSearchParams({ limit: String(limit) });
+  if (cursor) parameters.set("cursor", cursor);
+  return request<JobSummaryPage>(`/api/jobs/summary-page?${parameters.toString()}`);
+}
+
 export function getJob(jobId: number) {
   return request<TrackedJob>(`/api/jobs/${jobId}`);
 }
 
-export function createJob(payload: JobCreate, signal?: AbortSignal) {
-  return request<TrackedJob>("/api/jobs", {
+export function createJobScan(payload: JobCreate, signal?: AbortSignal) {
+  return request<JobScan>("/api/job-scans", {
     method: "POST",
     body: JSON.stringify(payload),
     signal
   });
 }
 
-export function kickRecommendationWorker() {
-  return request<{ processed: boolean }>("/api/recommendations/process-pending", {
-    method: "POST",
-    keepalive: true
+export function processJobScan(scanId: number, signal?: AbortSignal) {
+  return request<JobScan>(`/api/job-scans/${scanId}/process`, { method: "POST", signal });
+}
+
+export function getJobScan(scanId: number) {
+  return request<JobScan>(`/api/job-scans/${scanId}`);
+}
+
+export function cancelJobScan(scanId: number) {
+  return request<JobScan>(`/api/job-scans/${scanId}`, { method: "DELETE" });
+}
+
+export function getRecommendations() {
+  return request<JobRecommendation[]>("/api/recommendations");
+}
+
+export function updateRecommendation(recommendationId: number, status: "dismissed" | "saved") {
+  return request<{ recommendation: JobRecommendation; job: TrackedJob | null }>(`/api/recommendations/${recommendationId}`, {
+    method: "PATCH",
+    body: JSON.stringify({ status })
   });
 }
 
@@ -372,6 +458,17 @@ export function updateJobStatus(jobId: number, status: JobStatus) {
   return request<TrackedJob>(`/api/jobs/${jobId}/status`, {
     method: "PATCH",
     body: JSON.stringify({ status })
+  });
+}
+
+export function rematchJob(jobId: number) {
+  return request<TrackedJob>(`/api/jobs/${jobId}/rematch`, { method: "POST" });
+}
+
+export function reviewJobRequirements(jobId: number, payload: JobRequirementsReview) {
+  return request<TrackedJob>(`/api/jobs/${jobId}/requirements`, {
+    method: "PATCH",
+    body: JSON.stringify(payload)
   });
 }
 

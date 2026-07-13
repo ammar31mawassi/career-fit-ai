@@ -34,7 +34,7 @@ POLICIES: tuple[RateLimitPolicy, ...] = (
         limit=10,
         window_seconds=60 * 60,
         methods=frozenset({"POST"}),
-        paths=frozenset({"/api/jobs"}),
+        paths=frozenset({"/api/jobs", "/api/job-scans"}),
     ),
     RateLimitPolicy(
         key="profile-analyze",
@@ -42,13 +42,6 @@ POLICIES: tuple[RateLimitPolicy, ...] = (
         window_seconds=60 * 60,
         methods=frozenset({"POST"}),
         paths=frozenset({"/api/profile/analyze"}),
-    ),
-    RateLimitPolicy(
-        key="recommendation-worker",
-        limit=15,
-        window_seconds=60 * 60,
-        methods=frozenset({"POST"}),
-        paths=frozenset({"/api/recommendations/process-pending"}),
     ),
     RateLimitPolicy(
         key="file-upload",

@@ -1,58 +1,93 @@
-# CareerFit future product and engineering proposals
+# CareerFit CEO roadmap
 
-Date: 2026-07-13
+Updated: 2026-07-13
 
-These are deliberately not hidden inside the current QA patch. Each proposal has a product trigger so the company does not add infrastructure before it earns its complexity.
+The CEO approved the original next-step, model, and recommendation strategy. The first block is now implemented. The remaining roadmap is ordered by evidence and product trigger so CareerFit does not add infrastructure or model complexity before it is useful.
 
-## Next: highest leverage
+## Implemented in the July 13 product intelligence release
 
-| Proposal | Why it matters | Start when | Suggested implementation |
-|---|---|---|---|
-| Durable background job scans | Closing a tab or exceeding a serverless timeout should not lose a job scan. It also enables truthful progress and cancellation. | Scan p95 exceeds 12 seconds or scan volume exceeds roughly 100/day. | Persist a scan job with queued/running/succeeded/failed/cancel-requested states. Process it through Supabase Queues or a small worker. Poll initially; add server-sent events only if polling feels insufficient. |
-| Extraction observability | Parser regressions are currently found by people rather than dashboards. | Before expanding the beta. | Record reader strategy, duration, text length, fallback reasons, fact counts, requirement counts, and structured error codes. Alert on abrupt zero-project/zero-skill rates without logging raw CV text. |
-| Correction-driven evaluation set | User confirm/reject actions are the most valuable proprietary dataset. | Immediately collect; model only after enough labels. | Export anonymized feature/label snapshots, keep train/test splits by user, and run offline extraction and calibration reports on every model version. |
-| Job requirement correction UI | A wrong “2+ years” interpretation can dominate the entire score. | After profile review metrics are stable. | Show extracted must-haves, years, seniority, and work mode in a compact review drawer. Let users correct them and store the original plus reviewed value. |
-| Pagination and conditional fetching | Large job libraries will make bootstrap and exports increasingly expensive. | A typical user approaches 50–100 saved jobs. | Cursor-paginate job summaries; use ETags or `updated_at` watermarks; load details only when a card opens. |
-| Error monitoring and trace IDs | Public users need supportable failures. | Before public traffic is actively promoted. | Add privacy-safe exception monitoring, request/trace IDs, endpoint latency histograms, and a support-friendly error code shown in UI. Never send CV contents to telemetry. |
-
-## Later: differentiated product value
-
-| Proposal | Why it matters | Trigger / constraint |
+| Approved proposal | Status | Delivered capability |
 |---|---|---|
-| Candidate-to-job recommendations | Reuse a scanned job across relevant candidates, reducing discovery work and increasing network value. | Categorize each job into role families and locations, shortlist candidates by interests/domain/logistics, then score only the shortlist asynchronously. Require opt-in and never expose another candidate’s data. Start with daily batches, not all-pairs matching. |
-| Opt-in matching notifications | Strong recommendations are only useful if users see them. | Add only after recommendation precision is measured. Email at a low frequency with unsubscribe controls and a minimum calibrated threshold. |
-| Browser extension fallback | Some career sites block server-side readers but render correctly in the user’s browser. | Build after reader telemetry identifies a meaningful blocked-site share. Capture user-authorized page text and URL, show the exact payload before upload, and request the narrowest browser permissions. |
-| Semantic fact reconciliation | Rule-based normalization cannot merge every paraphrase safely. | Use only when a reviewed duplicate dataset exists. A small embedding model can propose merges; confidence gates and user approval protect against false merges. |
-| OCR quality routing | One OCR engine will not dominate every scanned CV. | Benchmark against anonymized scanned fixtures. Route by document quality/language and keep browser OCR as the private, free fallback. |
-| Outcome-aware score calibration | “Match” should become better calibrated using real application results while remaining explainable. | Do not train until there are enough consented outcomes across role families. Use a small monotonic model over existing features, evaluate fairness and calibration, and retain deterministic hard blockers. |
-| Resume draft workspace | Current advice tells users what to add but does not produce an editable, verified draft. | Add after advice quality is trusted. Generate only from approved facts, cite source facts internally, and never invent achievements. |
+| Durable background job scans | Implemented | Persisted scan rows, Supabase PGMQ, real checkpoints, polling, cancellation, stale-lease recovery, three-attempt limit, and a secured recovery worker. |
+| Extraction observability | Implemented | Privacy-safe strategy, latency, length, fallback, count, version, trace, and error metrics without raw document or job text. |
+| Correction-driven evaluation set | Implemented | Fact and requirement-review labels, stable person-grouped train/validation/test splits, and a redacted JSONL exporter. |
+| Job requirement correction UI | Implemented | User-editable priority skills, experience, seniority, education, work mode, location, and domain with original/corrected history and immediate rematch. |
+| Pagination and conditional fetching | Implemented | Cursor-paginated job summaries, first-page bootstrap cursor/watermark, ETags, lazy details, and Load more. |
+| Error monitoring and trace IDs | Implemented foundation | Trace IDs, support codes, Server-Timing, privacy-safe structured logs, stable error codes, and extraction metrics. A hosted dashboard/alert sink is intentionally still pending. |
+| Two-stage candidate-to-job recommendations | Implemented beta | Explicit consent, career-field shortlist, cheap experience/seniority/logistics checks, full scorer only for eligible candidates, and save/dismiss UI. |
+| Replaceable calibrated model boundary | Implemented foundation | Deterministic scorer plus optional monotonic calibration artifact, safe fallback, offline Brier/ECE report, and blocker/cap protection. No learned artifact is enabled yet. |
+
+Full technical record: `docs/SENIOR_FULLSTACK_RELEASE_2026-07-13.md`.
+
+## Next: measure and harden
+
+| Proposal | Why it is next | Start/ship gate | Suggested implementation |
+|---|---|---|---|
+| Extraction quality dashboard and alerts | Metrics now exist but regressions still need a visible operating surface. | Start now; keep beta-scale and low-cost. | Daily aggregates by reader strategy/version and role family. Alert on failure rate and abrupt zero-skill/zero-project changes. Never copy raw text into analytics. |
+| Label coverage report | A model should not be trained on whichever users happen to review first. | Start after review data accumulates. | Report counts by split, role family, career stage, source type, label type, and outcome. Block training when validation/test or important segments are sparse. |
+| Increase queue recovery cadence | Daily Hobby recovery is safe but not a strong SLA for an abandoned scan. | When abandoned scans occur or volume exceeds roughly 100 scans/day. | Upgrade the cron cadence or invoke the same secured worker from dedicated compute. Do not redesign the queue contract. |
+| Recommendation precision evaluation | Visible recommendations should earn user trust before notifications amplify mistakes. | At least 100 opt-in recommendation impressions across relevant role families. | Track privacy-safe save, dismiss, open-site, and later application outcomes. Tune threshold by validation data, not anecdote. |
+| Security operations runbook | Public beta now has queues, consent, and internal evaluation rows. | Before a larger public launch. | Document key rotation, incident response, deletion verification, backup/recovery, contact channel, and periodic Supabase/Vercel advisor review. Enable Supabase leaked-password protection. |
+| Automated retention cleanup | Failed scans, expired shared jobs, and old telemetry should not remain forever. | Define product/legal retention periods first. | Scheduled deletion for terminal scans, inactive catalog entries, abandoned uploads, and metrics beyond the agreed window. Keep user export/delete behavior consistent. |
 
 ## Model strategy
 
-Fine-tuning a large language model is not the next step. CareerFit first needs trustworthy labels and reproducible evaluation. The replaceable scorer boundary should remain, but the likely first learned component is a small calibrated classifier or ranking model over structured features such as requirement priority, evidence tier, transfer strength, experience gap, education, logistics, and domain alignment.
+Fine-tuning a large language model is still not the next step. CareerFit now collects trustworthy labels and has a replaceable scorer boundary. The first learned production component should be a small calibrated model over structured features such as:
 
-LLMs or small local language models can later assist with:
+- requirement priority and evidence tier;
+- transfer strength and direct project evidence;
+- experience gap and career stage;
+- education and semester constraints;
+- work-mode, location, availability, and authorization compatibility;
+- domain/responsibility alignment;
+- extraction and evidence confidence.
 
-- proposing canonical fact merges;
-- classifying ambiguous requirement sentences;
-- producing resume wording constrained to approved facts;
-- drafting opt-in notifications.
+### Training gate
 
-They should not directly invent the percentage. Eligibility caps, evidence citations, model versioning, and a deterministic fallback remain essential.
+Do not enable a learned artifact until all of these are true:
 
-## Recommendation engine design
+1. User-grouped validation and test sets have adequate coverage.
+2. Calibration improves out-of-sample Brier score and expected calibration error.
+3. Important role-family and career-stage slices do not regress materially.
+4. The artifact is monotonic where product logic expects it.
+5. Deterministic eligibility caps and missing blockers remain authoritative.
+6. The deterministic scorer remains a tested runtime fallback.
 
-Do not run every new job against every candidate. Use a two-stage pipeline:
+LLMs or small local language models may later propose canonical fact merges, classify ambiguous requirement sentences, or draft resume wording constrained to approved facts. They should not directly invent the match percentage.
 
-1. **Cheap eligibility shortlist:** role family/interests, location/work mode, availability, career stage, and a coarse skill-domain index.
-2. **Full evidence score:** run the existing matcher for only the eligible shortlist and save recommendations above a calibrated threshold.
+## Recommendation strategy
 
-This keeps cost close to the number of relevant candidates rather than total candidates. Add per-user recommendation consent, suppress already rejected/applied jobs, expire old postings, and expose why a job was recommended.
+The implemented pipeline deliberately avoids all-pairs scoring:
 
-## Security and privacy maturity
+1. Shared jobs are categorized into career fields and logistics.
+2. Only opted-in profiles in relevant interests are shortlisted.
+3. Cheap seniority, experience, availability, and location checks remove obvious mismatches.
+4. The full evidence scorer runs only on the remaining candidates.
+5. Only strong, blocker-free matches become visible; weaker rows remain evaluation observations.
 
-- Publish a formal retention schedule and automate cleanup of abandoned uploads and expired job snapshots.
-- Add service-key rotation and recovery procedures.
-- Add a security response address and incident runbook.
-- Consider a regional data strategy if the user base expands beyond the current geography.
-- Perform a dependency and authorization audit before adding third-party email, analytics, or browser-extension services.
+Next improvements after precision is measured:
+
+- suppress expired, rejected, dismissed, already-saved, or already-applied postings;
+- rank by calibrated relevance, freshness, and user direction;
+- diversify near-duplicate roles from the same company;
+- add low-frequency opt-in email notifications with unsubscribe controls;
+- explain each recommendation using the same evidence contract as a normal match.
+
+## Later differentiated value
+
+| Proposal | Product value | Trigger/constraint |
+|---|---|---|
+| Semantic fact reconciliation | Propose safe merges for paraphrased duplicate facts. | Use a reviewed duplicate/non-duplicate dataset. A small embedding model proposes; confidence gates and user approval decide. |
+| OCR quality routing | Improve scanned CV recovery across languages and document quality. | Benchmark multiple engines on anonymized fixtures; retain browser OCR as the free, private fallback. |
+| Browser extension fallback | Capture text from career pages that block server readers. | Build only after telemetry shows a meaningful blocked-site share. Use narrow permissions and show the exact payload before upload. |
+| Outcome-aware calibration | Align score meaning with consented application results. | Sufficient outcomes across role families; fairness/calibration review; deterministic caps retained. |
+| Resume draft workspace | Convert trusted advice into an editable, role-specific CV draft. | Advice quality is trusted. Generate only from approved facts and preserve internal citations. |
+| Opt-in matching notifications | Bring strong fresh matches back to the user. | Recommendation precision and unsubscribe behavior are measured first. |
+
+## CEO decisions needed later
+
+- Retention periods for failed scans, extracted metrics, evaluation examples, and inactive shared jobs.
+- The traffic/latency threshold that justifies more frequent worker compute.
+- The minimum data coverage and calibration improvement required to enable the first learned artifact.
+- Whether recommendation notifications remain email-only or later include mobile/push channels.
+- Whether the first resume workspace exports DOCX, PDF, or both.

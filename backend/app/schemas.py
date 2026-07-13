@@ -68,8 +68,10 @@ class ProfileOut(BaseModel):
     manual_info: str = ""
     years_experience: float = 0.0
     onboarding_completed: bool = False
+    recommendations_enabled: bool = False
     career_interests: list[str] = Field(default_factory=list)
     last_analyzed_at: datetime | None = None
+    updated_at: datetime | None = None
     sources: list[ProfileSourceOut] = Field(default_factory=list)
     facts: list[ProfileFactOut] = Field(default_factory=list)
     questions: list[ClarificationQuestionOut] = Field(default_factory=list)
@@ -83,6 +85,7 @@ class ProfileSourcesIn(BaseModel):
 
 class ProfilePreferencesIn(BaseModel):
     career_interests: list[str] = Field(default_factory=list, max_length=25)
+    recommendations_enabled: bool | None = None
 
     @field_validator("career_interests")
     @classmethod
@@ -271,6 +274,8 @@ class WorkspaceBootstrapOut(BaseModel):
     user_id: str
     profile: ProfileOut
     jobs: list[JobSummaryOut] = Field(default_factory=list)
+    jobs_next_cursor: str | None = None
+    jobs_watermark: datetime | None = None
 
 
 class AccountSourceExportOut(BaseModel):
@@ -288,11 +293,20 @@ class AccountFeedbackExportOut(BaseModel):
     created_at: datetime
 
 
+class AccountRequirementFeedbackOut(BaseModel):
+    job_id: int
+    original_requirements: dict[str, object] = Field(default_factory=dict)
+    corrected_requirements: dict[str, object] = Field(default_factory=dict)
+    changed_fields: list[str] = Field(default_factory=list)
+    created_at: datetime
+
+
 class AccountExportOut(BaseModel):
     exported_at: datetime
     profile: ProfileOut
     sources: list[AccountSourceExportOut] = Field(default_factory=list)
     fact_feedback: list[AccountFeedbackExportOut] = Field(default_factory=list)
+    requirement_feedback: list[AccountRequirementFeedbackOut] = Field(default_factory=list)
     jobs: list[JobOut] = Field(default_factory=list)
 
 
@@ -315,6 +329,71 @@ class JobCreateIn(BaseModel):
 
 class JobStatusPatchIn(BaseModel):
     status: JobStatus
+
+
+class JobRequirementsReviewIn(BaseModel):
+    must_have_skills: list[str] = Field(default_factory=list, max_length=50)
+    preferred_skills: list[str] = Field(default_factory=list, max_length=50)
+    nice_to_have_skills: list[str] = Field(default_factory=list, max_length=50)
+    min_years_experience: float = Field(default=0, ge=0, le=50)
+    experience_requirement_known: bool = False
+    seniority: str = Field(default="unspecified", max_length=80)
+    education: str = Field(default="", max_length=500)
+    work_mode: str = Field(default="", max_length=120)
+    domain: str = Field(default="", max_length=160)
+    location_requirement: str = Field(default="", max_length=500)
+
+    @field_validator("must_have_skills", "preferred_skills", "nice_to_have_skills")
+    @classmethod
+    def clean_requirement_skills(cls, values: list[str]) -> list[str]:
+        return list(dict.fromkeys(value.strip().lower() for value in values if value.strip()))
+
+
+class JobScanOut(BaseModel):
+    id: int
+    status: Literal["queued", "running", "succeeded", "failed", "cancel_requested", "cancelled"]
+    current_step: str
+    progress: int
+    result_job_id: int | None = None
+    trace_id: str
+    error_code: str = ""
+    error_message: str = ""
+    created_at: datetime
+    updated_at: datetime
+    completed_at: datetime | None = None
+    result_job: JobOut | None = None
+
+
+class JobSummaryPageOut(BaseModel):
+    items: list[JobSummaryOut] = Field(default_factory=list)
+    next_cursor: str | None = None
+    watermark: datetime | None = None
+
+
+class JobRecommendationOut(BaseModel):
+    id: int
+    catalog_job_id: int
+    source_url: str
+    application_link: str
+    company: str
+    role: str
+    location: str
+    score: float
+    fit_level: FitLevel
+    confidence: float
+    career_fields: list[str] = Field(default_factory=list)
+    reasons: list[str] = Field(default_factory=list)
+    status: str
+    created_at: datetime
+
+
+class JobRecommendationPatchIn(BaseModel):
+    status: Literal["dismissed", "saved"]
+
+
+class JobRecommendationActionOut(BaseModel):
+    recommendation: JobRecommendationOut
+    job: JobOut | None = None
 
 
 class ProfileAnalyzeResult(BaseModel):
