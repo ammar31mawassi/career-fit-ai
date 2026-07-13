@@ -337,7 +337,8 @@ def test_action_only_project_bullets_are_preserved_from_pdf_layout_text():
                     "B.Sc. Computer Science student, 2 semesters remaining.\n"
                     "Skills\nPython, FastAPI, PostgreSQL, React, TypeScript, Git, Docker, Linux, SQL\n"
                     "Projects\n"
-                    "Built an evidence-based job matching platform using Python, FastAPI, React, PostgreSQL and Docker.\n"
+                    "Built an evidence-based job matching platform using Python, FastAPI, React, PostgreSQL and\n"
+                    "Docker.\n"
                     "Developed a concurrent C++ robotics simulator with unit tests and CI.\n"
                     "Experience\nSoftware Engineering Intern, 6 months. Implemented REST APIs and automated testing."
                 ),
@@ -349,7 +350,7 @@ def test_action_only_project_bullets_are_preserved_from_pdf_layout_text():
 
     projects = [fact.value for fact in result.profile.facts if fact.fact_type == "project"]
     assert len(projects) == 2
-    assert any("job matching platform" in project.lower() for project in projects)
+    assert any("job matching platform" in project.lower() and project.endswith("Docker.") for project in projects)
     assert any("robotics simulator" in project.lower() for project in projects)
 
 

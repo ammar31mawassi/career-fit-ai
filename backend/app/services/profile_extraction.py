@@ -227,12 +227,13 @@ def _projects(source_type: str, lines: list[str]) -> list[tuple[str, str]]:
         lower = line.lower()
         has_action = any(re.search(rf"\b{word}\b", lower) for word in ACTION_WORDS)
         if in_projects and has_action:
-            if output and line in output[-1][1]:
+            project_line = _join_project_continuation(lines, index, line)
+            if output and project_line in output[-1][1]:
                 # The preceding title/look-ahead pair already captured this
                 # bullet; do not create a second action-only project.
                 continue
-            evidence = " ".join(part for part in (project_title, line) if part)[:320]
-            value = f"{project_title}: {line}" if project_title else line
+            evidence = " ".join(part for part in (project_title, project_line) if part)[:320]
+            value = f"{project_title}: {project_line}" if project_title else project_line
             output.append((value[:300], evidence))
             # Keep a real title for consecutive bullets so they reconcile to
             # one project key. Action-only entries remain independent.
@@ -268,6 +269,20 @@ def _projects(source_type: str, lines: list[str]) -> list[tuple[str, str]]:
         value = f"{title}: {action}" if title else action
         output.append((value[:300], " ".join([part for part in (title, action) if part])[:320]))
     return _dedupe_pairs(output)[:12]
+
+
+def _join_project_continuation(lines: list[str], index: int, line: str) -> str:
+    """Join PDF hard-wraps only when the current project line is visibly incomplete."""
+    value = line
+    for continuation in lines[index + 1 : index + 3]:
+        if not re.search(r"(?:[,;:]|\b(?:and|or|with|using|including|for|to))$", value, re.IGNORECASE):
+            break
+        if _section(continuation) or _is_heading(continuation):
+            break
+        if any(re.search(rf"\b{word}\b", continuation.lower()) for word in ACTION_WORDS):
+            break
+        value = f"{value} {continuation}".strip()
+    return value
 
 
 def _project_title_candidate(line: str) -> bool:

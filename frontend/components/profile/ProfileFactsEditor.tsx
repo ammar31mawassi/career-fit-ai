@@ -127,14 +127,14 @@ function FactGroup({ type, facts, addable, selected, onAdd, onReview, onSelected
   onSelectedChange: (factId: number, checked: boolean) => void;
 }) {
   const pendingCount = facts.filter((fact) => fact.review_status === "pending").length;
-  const [expanded, setExpanded] = useState(pendingCount > 0 || facts.length <= 2);
+  const [expanded, setExpanded] = useState(pendingCount > 0);
   const [adding, setAdding] = useState(false);
   const [value, setValue] = useState("");
   const [saving, setSaving] = useState(false);
   const label = type.replaceAll("_", " ");
 
   useEffect(() => {
-    if (pendingCount > 0) setExpanded(true);
+    setExpanded(pendingCount > 0);
   }, [pendingCount]);
 
   async function save() {

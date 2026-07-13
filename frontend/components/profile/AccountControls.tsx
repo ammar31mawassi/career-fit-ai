@@ -5,7 +5,6 @@ import { useState } from "react";
 import { Download, ShieldCheck, Trash2 } from "lucide-react";
 import { clearWorkspaceCaches } from "@/components/AppDataProvider";
 import { deleteCareerFitAccount, getAccountExport } from "@/lib/api";
-import { createClient } from "@/lib/supabase/client";
 
 export function AccountControls() {
   const [exporting, setExporting] = useState(false);
@@ -41,8 +40,9 @@ export function AccountControls() {
     try {
       await deleteCareerFitAccount();
       clearWorkspaceCaches();
-      await createClient().auth.signOut().catch(() => undefined);
-      window.location.replace("/login?deleted=1");
+      // The Auth identity no longer exists, so a remote Supabase sign-out
+      // would only return 403. Clear the local SSR cookies and redirect.
+      window.location.replace("/auth/deleted");
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Could not delete your account.");
       setDeleting(false);
