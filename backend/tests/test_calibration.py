@@ -101,7 +101,7 @@ for domain, role, skills in ROLE_CASES:
 def test_reviewed_calibration_ranges(case_id, candidate, requirements, minimum, maximum):
     result = score_match(candidate, "Ignored Company", case_id, requirements, 1.0)
     assert minimum <= result.score <= maximum
-    assert result.model_version == "fit-v2.2.0"
+    assert result.model_version == "fit-v2.3.0"
     assert result.feature_snapshot["component_scores"]
 
 
@@ -111,6 +111,7 @@ def test_template_catalog_is_complete_and_never_leaks_tokens():
     result = build_about(candidate, "Embedded Developer", _requirements("embedded/systems", ["c++", "firmware"]))
     assert result.template_id == "T11"
     assert "<" not in result.text and ">" not in result.text
+    assert "built built" not in result.text.lower()
     assert 30 <= len(result.text.split()) <= 90
 
 

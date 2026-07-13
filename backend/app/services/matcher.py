@@ -8,7 +8,7 @@ from .ontology import ONTOLOGY_VERSION, extract_skills, skill_match_strength
 from .profile import CandidateSnapshot, SkillEvidence
 
 
-MODEL_VERSION = "fit-v2.2.0"
+MODEL_VERSION = "fit-v2.3.0"
 
 
 @dataclass(frozen=True)

@@ -123,6 +123,38 @@ def test_experience_mismatch_heavily_lowers_score():
     assert senior.match.missing_blockers
 
 
+def test_aligned_internship_uses_project_evidence_instead_of_weak_skill_listings():
+    engine = _engine()
+    SQLModel.metadata.create_all(engine)
+    with Session(engine) as session:
+        _ready_profile(
+            session,
+            text=(
+                "B.Sc. Computer Science student, 2 semesters remaining.\n"
+                "Skills\nPython, Docker, React, FastAPI\nProjects\n"
+                "Built an evidence-based matching platform using Python, FastAPI, React and\nDocker."
+            ),
+        )
+        job = create_or_analyze_job(
+            session,
+            USER_ID,
+            JobCreateIn(
+                company="Calibration Co",
+                role="Cloud Platform Intern",
+                description_text=(
+                    "Student internship. Requirements: currently pursuing a B.Sc. in Computer Science "
+                    "with at least 2 semesters remaining. Required skills: Python and Docker. "
+                    "Preferred skills: React and FastAPI. No professional experience required."
+                ),
+            ),
+        )
+
+    assert job.match is not None
+    assert job.match.score >= 70
+    assert not any("python" in gap.lower() or "docker" in gap.lower() for gap in job.match.gaps)
+    assert "built built" not in job.match.resume_advice.about_text.lower()
+
+
 def test_missing_must_have_hurts_more_than_missing_preferred():
     engine = _engine()
     SQLModel.metadata.create_all(engine)
@@ -176,7 +208,7 @@ def test_resume_advice_and_status_are_saved():
     assert updated.match.resume_advice.skill_order
     assert updated.match.resume_advice.template_id
     assert "<" not in updated.match.resume_advice.about_text
-    assert updated.match.model_version == "fit-v2.2.0"
+    assert updated.match.model_version == "fit-v2.3.0"
     assert [event.status for event in updated.match.status_history] == ["Lead", "Applied"]
     assert [job.id for job in searched] == [job.id]
 

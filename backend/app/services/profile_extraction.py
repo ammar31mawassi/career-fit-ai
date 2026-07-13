@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from .ontology import extract_skills, infer_domain, skill_domain
 
 
-EXTRACTOR_VERSION = "profile-rules-v1.2.0"
+EXTRACTOR_VERSION = "profile-rules-v1.3.0"
 
 SECTION_WORDS = {
     "profile",
@@ -79,9 +79,15 @@ def extract_profile_facts(source_type: str, text: str) -> list[ExtractedFact]:
         return []
     facts: list[ExtractedFact] = []
     declared_skill_evidence = _declared_skill_lines(lines)
+    skill_evidence_lines = _skill_evidence_lines(lines)
 
     for skill in extract_skills(text):
-        evidence = evidence_for_term(lines, skill)
+        evidence = _best_skill_evidence(
+            source_type,
+            skill_evidence_lines,
+            declared_skill_evidence,
+            skill,
+        )
         evidence_type = _skill_evidence_type(
             source_type,
             evidence,
@@ -184,6 +190,45 @@ def evidence_for_term(lines: list[str], term: str) -> str:
         return term
     # Prefer concise, local evidence rather than the first flattened page line.
     return min(candidates, key=lambda line: (len(line) > 280, len(line)))[:320]
+
+
+def _best_skill_evidence(
+    source_type: str,
+    lines: list[str],
+    declared_lines: set[str],
+    skill: str,
+) -> str:
+    candidates = [line for line in lines if re.search(_term_pattern(skill), line, re.IGNORECASE)]
+    if not candidates:
+        return skill
+
+    def rank(line: str) -> tuple[float, int, int]:
+        evidence_type = _skill_evidence_type(source_type, line, line in declared_lines)
+        return (
+            _skill_confidence(source_type, evidence_type),
+            0 if len(line) > 280 else 1,
+            -len(line),
+        )
+
+    return max(candidates, key=rank)[:320]
+
+
+def _skill_evidence_lines(lines: list[str]) -> list[str]:
+    """Add reconstructed project bullets so skills on a wrapped line keep their context."""
+    output = list(lines)
+    in_projects = False
+    for index, line in enumerate(lines):
+        section = _section(line)
+        if section:
+            in_projects = section in {"projects", "selected projects", "selected engineering projects", "hackathons"}
+            continue
+        if not in_projects:
+            continue
+        if any(re.search(rf"\b{word}\b", line.lower()) for word in ACTION_WORDS):
+            joined = _join_project_continuation(lines, index, line)
+            if joined != line:
+                output.append(joined)
+    return output
 
 
 def _lines(text: str) -> list[str]:

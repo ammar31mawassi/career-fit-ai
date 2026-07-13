@@ -385,6 +385,38 @@ def test_declared_and_confirmed_skills_have_distinct_useful_strengths():
     assert after > before
 
 
+def test_project_usage_outranks_a_skill_listing_within_the_same_cv():
+    engine = _engine()
+    SQLModel.metadata.create_all(engine)
+    with Session(engine) as session:
+        profile = Profile(user_id=USER_ID, status="needs_analysis")
+        session.add(profile)
+        session.commit()
+        session.refresh(profile)
+        session.add(
+            ProfileSource(
+                user_id=USER_ID,
+                profile_id=profile.id or 0,
+                source_type="cv",
+                title="cv.pdf",
+                content_text=(
+                    "B.Sc. Computer Science\nSkills\nPython, Docker, Git\nProjects\n"
+                    "Built a matching platform using Python and\nDocker."
+                ),
+            )
+        )
+        session.commit()
+        analyze_profile(session, USER_ID)
+        session.refresh(profile)
+        evidence = candidate_snapshot(session, profile).skill_evidence
+
+    assert evidence["python"].evidence_type == "project"
+    assert evidence["docker"].evidence_type == "project"
+    assert "Built a matching platform" in evidence["python"].evidence
+    assert evidence["python"].strength >= 0.7
+    assert evidence["docker"].strength >= 0.7
+
+
 def test_student_semesters_are_extracted_without_counting_projects_as_work_experience():
     engine = _engine()
     SQLModel.metadata.create_all(engine)

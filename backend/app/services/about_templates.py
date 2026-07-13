@@ -222,7 +222,7 @@ def _values(
         "YEARS_EXPERIENCE": (
             f"{candidate.years_experience:g}+ years" if candidate.years_experience > 0 else ""
         ),
-        "PROJECT_HIGHLIGHT": _clean(project),
+        "PROJECT_HIGHLIGHT": _project_highlight(project),
         "PROJECT_IMPACT": "",
         "STRENGTHS": _strengths(candidate, requirements),
         "OPEN_SOURCE_HIGHLIGHT": _clean(project) if "github" in candidate.project_evidence.get(project, "").lower() else "",
@@ -318,6 +318,20 @@ def _join(values: list[str]) -> str:
 
 def _clean(value: str) -> str:
     return re.sub(r"[\x00-\x1f<>]+|\s+", " ", value or "").strip(" .,:;-")
+
+
+def _project_highlight(value: str) -> str:
+    cleaned = _clean(value)
+    if ":" in cleaned:
+        title, _ = cleaned.split(":", 1)
+        if 2 <= len(title.strip()) <= 80:
+            return title.strip()
+    return re.sub(
+        r"^(?:built|developed|implemented|created|designed|engineered|delivered)\s+",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
 
 
 def _dedupe(values: list[str]) -> list[str]:
