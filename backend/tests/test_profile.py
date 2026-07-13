@@ -412,7 +412,7 @@ def test_project_usage_outranks_a_skill_listing_within_the_same_cv():
 
     assert evidence["python"].evidence_type == "project"
     assert evidence["docker"].evidence_type == "project"
-    assert "Built a matching platform" in evidence["python"].evidence
+    assert evidence["python"].evidence.endswith("Docker.")
     assert evidence["python"].strength >= 0.7
     assert evidence["docker"].strength >= 0.7
 

@@ -202,10 +202,11 @@ def _best_skill_evidence(
     if not candidates:
         return skill
 
-    def rank(line: str) -> tuple[float, int, int]:
+    def rank(line: str) -> tuple[float, int, int, int]:
         evidence_type = _skill_evidence_type(source_type, line, line in declared_lines)
         return (
             _skill_confidence(source_type, evidence_type),
+            0 if re.search(r"(?:[,;:]|\b(?:and|or|with|using|including|for|to))$", line, re.IGNORECASE) else 1,
             0 if len(line) > 280 else 1,
             -len(line),
         )

@@ -94,7 +94,10 @@ export function HomeClient() {
     if (showLoading) { setDetailsLoading(true); setDetailError(""); }
     try {
       const job = await getJob(jobId);
+      const summary = toJobSummary(job);
       setJobDetailsById((current) => ({ ...current, [job.id]: job }));
+      setJobs((current) => current.map((item) => item.id === job.id ? summary : item));
+      setSearchResults((current) => current?.map((item) => item.id === job.id ? summary : item) ?? current);
     } catch (caught) {
       if (showLoading) setDetailError(caught instanceof Error ? caught.message : "Could not load job details.");
     } finally {
