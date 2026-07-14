@@ -15,6 +15,7 @@ from app.services.job_scans import (
     process_user_scan,
 )
 from app.services.jobs import create_or_analyze_job, list_job_summary_page, review_job_requirements
+from app.services.label_coverage import build_label_coverage
 from app.services.telemetry import evaluation_split
 
 
@@ -192,3 +193,57 @@ def test_job_summary_cursor_has_no_duplicates_and_stable_user_split():
     assert len(second.items) == 15
     assert {item.id for item in first.items}.isdisjoint({item.id for item in second.items})
     assert evaluation_split(USER_ID) == evaluation_split(USER_ID)
+
+
+def test_label_coverage_reports_sparse_splits_and_safe_segments():
+    rows = [
+        EvaluationExample(
+            user_id=USER_ID,
+            example_type="profile_fact_review",
+            split="train",
+            label="approved",
+            model_version="extractor-v1",
+            features_json='{"fact_type":"skill","evidence_type":"project"}',
+        ),
+        EvaluationExample(
+            user_id=USER_ID,
+            example_type="job_requirement_review",
+            split="validation",
+            label="corrected",
+            model_version="reader-v1",
+            features_json='{"changed_fields":["seniority","must_have_skills"]}',
+        ),
+    ]
+
+    report = build_label_coverage(rows, {"train": 2, "validation": 1, "test": 1})
+
+    assert report["training_gate_passed"] is False
+    assert report["by_split"] == {"train": 1, "validation": 1}
+    assert report["segments"] == {
+        "fact_type": {"skill": 1},
+        "evidence_type": {"project": 1},
+        "corrected_requirement_field": {"must_have_skills": 1, "seniority": 1},
+    }
+    assert all("user" not in warning.lower() for warning in report["warnings"])
+
+
+def test_label_coverage_gate_passes_with_broad_minimums_met():
+    rows = [
+        EvaluationExample(
+            user_id=USER_ID,
+            example_type=example_type,
+            split=split,
+            label="approved",
+            features_json="{}",
+        )
+        for split, example_type in [
+            ("train", "profile_fact_review"),
+            ("validation", "job_requirement_review"),
+            ("test", "profile_fact_review"),
+        ]
+    ]
+
+    report = build_label_coverage(rows, {"train": 1, "validation": 1, "test": 1})
+
+    assert report["training_gate_passed"] is True
+    assert report["warnings"] == []

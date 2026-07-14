@@ -70,13 +70,19 @@ def catalog_and_enqueue_job(session: Session, source_user_id: UUID, job: Job) ->
 def generate_shadow_recommendations(
     session: Session,
     catalog_job_id: int,
-    source_user_id: UUID,
+    source_user_id: UUID | None,
 ) -> RecommendationRun:
     catalog = session.get(SharedJobCatalog, catalog_job_id)
     if catalog is None or not catalog.active:
         raise ValueError("Catalog job not found.")
     fields = _json_list(catalog.career_fields_json)
-    run = RecommendationRun(catalog_job_id=catalog_job_id, source_user_id=source_user_id)
+    # Queue messages may outlive the account that originally scanned a shared job.
+    # Do not let that stale audit reference block recommendations for other users.
+    source_profile = session.exec(
+        select(Profile.id).where(Profile.user_id == source_user_id)
+    ).first() if source_user_id is not None else None
+    active_source_user_id = source_user_id if source_profile is not None else None
+    run = RecommendationRun(catalog_job_id=catalog_job_id, source_user_id=active_source_user_id)
     session.add(run)
     session.commit()
     session.refresh(run)
@@ -88,12 +94,13 @@ def generate_shadow_recommendations(
                 Profile.status == "ready",
                 Profile.onboarding_completed.is_(True),
                 Profile.recommendations_enabled.is_(True),
-                Profile.user_id != source_user_id,
                 ProfileInterest.interest.in_(fields or ["__none__"]),
             )
             .distinct()
             .limit(MAX_CANDIDATES_PER_JOB)
         )
+        if active_source_user_id is not None:
+            statement = statement.where(Profile.user_id != active_source_user_id)
         profiles = list(session.exec(statement).all())
         run.candidate_count = len(profiles)
         requirements = requirements_from_json(catalog.requirements_json)

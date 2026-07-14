@@ -6,7 +6,7 @@ from uuid import UUID
 from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel, create_engine, select
 
-from app.models import Job, JobRecommendation, Profile, ProfileInterest
+from app.models import Job, JobRecommendation, Profile, ProfileInterest, RecommendationRun
 from app.services.job_research import classify_requirements
 from app.services.job_routing import route_job_fields
 from app.services.recommendations import catalog_and_enqueue_job, generate_shadow_recommendations
@@ -188,3 +188,31 @@ def test_candidate_without_discovery_consent_is_never_shortlisted(monkeypatch):
 
     assert run.candidate_count == 0
     assert run.scored_count == 0
+
+
+def test_deleted_source_account_does_not_break_recommendation_run(monkeypatch):
+    engine = _engine()
+    SQLModel.metadata.create_all(engine)
+    monkeypatch.setattr("app.services.recommendations.get_match_scorer", lambda: _StrongScorer())
+
+    with Session(engine) as session:
+        _profile(session, RELEVANT, "Software Engineering")
+        requirements = classify_requirements("Requirements: Python and SQL.", "Backend Developer")
+        catalog_job = Job(
+            user_id=SCANNER,
+            content_hash="deleted-source-job",
+            role="Backend Developer",
+            requirements_json=requirements.to_json(),
+            status="analyzed",
+        )
+        session.add(catalog_job)
+        session.commit()
+        catalog = catalog_and_enqueue_job(session, SCANNER, catalog_job)
+        assert catalog is not None and catalog.id is not None
+
+        run = generate_shadow_recommendations(session, catalog.id, SCANNER)
+        persisted = session.exec(select(RecommendationRun)).one()
+
+    assert run.status == "completed"
+    assert persisted.source_user_id is None
+    assert run.candidate_count == 1

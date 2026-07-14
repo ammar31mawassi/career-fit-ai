@@ -80,6 +80,8 @@ The current Hobby deployment invokes recovery once per day because Hobby Cron do
 
 Optional model calibration is enabled by setting `SCORE_CALIBRATION_PATH` to a JSON file with a version and monotonic score knots. If the file is absent or invalid, CareerFit safely uses the deterministic scorer.
 
+Before training or enabling a calibration artifact, run `python scripts/label_coverage_report.py` from `backend/`. The privacy-safe report blocks the training gate when train, validation, or test labels are sparse and shows coverage by label type, fact/evidence segment, corrected requirement field, and model version.
+
 ## Fit score meaning
 
 The match percentage measures evidence alignment with a saved job posting. It is not a prediction that the user will receive an interview or offer. Confidence is reported separately and missing information creates clarification questions.
