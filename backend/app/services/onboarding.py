@@ -23,6 +23,7 @@ from .profile import (
     update_profile_sources,
 )
 from .storage import delete_private_file
+from .telemetry import record_onboarding_event
 
 
 ABANDONED_ONBOARDING_RETENTION = timedelta(hours=24)
@@ -59,13 +60,30 @@ def analyze_onboarding_profile(
     )
     profile = get_or_create_profile(session, user_id)
     if profile.status != "ready":
-        return analyze_profile(session, user_id)
-    output = profile_output(session, user_id)
-    return ProfileAnalyzeResult(
-        profile=output,
-        generated_facts=0,
-        open_questions=len([question for question in output.questions if question.status == "open"]),
+        result = analyze_profile(session, user_id)
+        reused_preview = 0
+    else:
+        output = profile_output(session, user_id)
+        result = ProfileAnalyzeResult(
+            profile=output,
+            generated_facts=0,
+            open_questions=len([question for question in output.questions if question.status == "open"]),
+        )
+        reused_preview = 1
+    record_onboarding_event(
+        session,
+        user_id,
+        profile.id,
+        "review_presented",
+        counts={
+            "reused_preview": reused_preview,
+            "facts": len(result.profile.facts),
+            "open_questions": result.open_questions,
+            "career_interests": len(result.profile.career_interests),
+        },
     )
+    session.commit()
+    return result
 
 
 def cleanup_abandoned_onboarding(

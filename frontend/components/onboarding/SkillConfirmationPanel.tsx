@@ -23,8 +23,8 @@ export function SkillConfirmationPanel({
       <div className="skill-confirmation-heading">
         <span aria-hidden><Sparkles size={15} /></span>
         <div>
-          <strong id="skill-confirmation-title">A quick check while we finish</strong>
-          <small>Select skills that accurately describe you. This is optional.</small>
+          <strong id="skill-confirmation-title">Preselect your strongest skills</strong>
+          <small>This prepares the final evidence review. Nothing is approved yet.</small>
         </div>
       </div>
       <div className="skill-confirmation-chips">
@@ -39,7 +39,7 @@ export function SkillConfirmationPanel({
       </div>
       <div className="skill-confirmation-actions">
         <button className="button compact secondary" disabled={skipped} onClick={onConfirmAll} type="button"><Check size={13} /> Looks right</button>
-        <button className="skill-skip" onClick={onSkip} type="button"><FastForward size={13} /> {skipped ? "Skipped" : "Skip for now"}</button>
+        <button className="skill-skip" onClick={onSkip} type="button"><FastForward size={13} /> {skipped ? "Reviewing later" : "Review later"}</button>
       </div>
     </section>
   );

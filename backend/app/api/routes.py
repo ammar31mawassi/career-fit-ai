@@ -28,6 +28,7 @@ from ..schemas import (
     JobStatusPatchIn,
     JobSummaryOut,
     OnboardingAnalyzeIn,
+    OnboardingCompleteIn,
     ProfileAnalyzeResult,
     ProfileFactBulkReviewIn,
     ProfileFactCreateIn,
@@ -194,11 +195,12 @@ def save_preferences(
 
 @router.post("/profile/onboarding/complete", response_model=ProfileOut)
 def finish_onboarding(
+    payload: OnboardingCompleteIn,
     user_id: UUID = Depends(current_user_id),
     session: Session = Depends(get_session),
 ) -> ProfileOut:
     try:
-        return complete_onboarding(session, user_id)
+        return complete_onboarding(session, user_id, payload)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 

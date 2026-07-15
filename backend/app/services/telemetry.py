@@ -71,6 +71,26 @@ def record_extraction_metric(
     return metric
 
 
+def record_onboarding_event(
+    session: Session,
+    user_id: UUID,
+    profile_id: int | None,
+    event: str,
+    *,
+    counts: dict[str, int | float | str] | None = None,
+) -> ExtractionMetric:
+    """Record a bounded onboarding stage without CV text, answers, or fact values."""
+    return record_extraction_metric(
+        session,
+        user_id,
+        workflow_type="onboarding_funnel",
+        subject_type="profile",
+        subject_id=profile_id,
+        strategy=event,
+        counts=counts,
+    )
+
+
 def record_evaluation_example(
     session: Session,
     user_id: UUID,

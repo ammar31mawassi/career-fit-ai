@@ -110,6 +110,40 @@ class OnboardingAnalyzeIn(ProfileSourcesIn):
         return cleaned
 
 
+class OnboardingCompleteIn(BaseModel):
+    facts_decision: Literal["confirmed", "skipped"]
+    approved_fact_ids: list[int] = Field(default_factory=list, max_length=250)
+    rejected_fact_ids: list[int] = Field(default_factory=list, max_length=250)
+    question_decision: Literal["answered", "skipped", "no_question"]
+    question_id: int | None = Field(default=None, ge=1)
+    question_answer: str = Field(default="", max_length=2000)
+
+    @field_validator("approved_fact_ids", "rejected_fact_ids")
+    @classmethod
+    def unique_review_ids(cls, values: list[int]) -> list[int]:
+        return list(dict.fromkeys(values))
+
+    @model_validator(mode="after")
+    def validate_review_decisions(self):
+        approved = set(self.approved_fact_ids)
+        rejected = set(self.rejected_fact_ids)
+        if approved & rejected:
+            raise ValueError("A profile fact cannot be both confirmed and rejected.")
+        if self.facts_decision == "skipped" and (approved or rejected):
+            raise ValueError("Skipped fact reviews cannot include fact decisions.")
+        if self.question_decision == "answered":
+            if self.question_id is None or not self.question_answer.strip():
+                raise ValueError("Answer the selected clarification question before continuing.")
+        elif self.question_decision == "skipped":
+            if self.question_id is None:
+                raise ValueError("Choose the clarification question to skip.")
+            if self.question_answer.strip():
+                raise ValueError("A skipped clarification question cannot include an answer.")
+        elif self.question_id is not None or self.question_answer.strip():
+            raise ValueError("No-question reviews cannot include a question or answer.")
+        return self
+
+
 class ProfileFactPatchIn(BaseModel):
     value: str = Field(min_length=1, max_length=1000)
     review_status: Literal["pending", "approved", "rejected"] = "approved"

@@ -9,7 +9,7 @@ The CEO approved the original next-step, model, and recommendation strategy. The
 | Approved proposal | Status | Delivered capability |
 |---|---|---|
 | Durable background job scans | Implemented | Persisted scan rows, Supabase PGMQ, real checkpoints, polling, cancellation, stale-lease recovery, three-attempt limit, and a secured recovery worker. |
-| Extraction observability | Implemented | Privacy-safe strategy, latency, length, fallback, count, version, trace, and error metrics without raw document or job text. |
+| Extraction observability | Implemented | Privacy-safe strategy, latency, length, fallback, count, version, trace, error, and onboarding-funnel metrics without raw document/job text, answers, fact values, or evidence excerpts. |
 | Correction-driven evaluation set | Implemented | Fact and requirement-review labels, stable person-grouped train/validation/test splits, and a redacted JSONL exporter. |
 | Job requirement correction UI | Implemented | User-editable priority skills, experience, seniority, education, work mode, location, and domain with original/corrected history and immediate rematch. |
 | Pagination and conditional fetching | Implemented | Cursor-paginated job summaries, first-page bootstrap cursor/watermark, ETags, lazy details, and Load more. |

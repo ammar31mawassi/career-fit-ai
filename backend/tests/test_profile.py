@@ -7,15 +7,17 @@ from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel, create_engine, select
 from uuid import UUID
 
-from app.models import ClarificationQuestion, Profile, ProfileFact, ProfileFactFeedback, ProfileSource
+from app.models import ClarificationQuestion, ExtractionMetric, Profile, ProfileFact, ProfileFactFeedback, ProfileSource
 from app.schemas import (
     BrowserOcrIn,
     BrowserOcrPageIn,
     OnboardingAnalyzeIn,
+    OnboardingCompleteIn,
     ProfilePreferencesIn,
     ProfileSourcesIn,
 )
 from app.services.onboarding import analyze_onboarding_profile, cleanup_abandoned_onboarding
+from app.services.onboarding_funnel import build_onboarding_funnel
 from app.services.profile import (
     _cached_github_text,
     _github_text,
@@ -41,6 +43,20 @@ RECENT_ID = UUID("00000000-0000-0000-0000-000000000204")
 
 def _engine():
     return create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+
+
+def _skip_review_payload(session: Session, user_id: UUID) -> OnboardingCompleteIn:
+    question = session.exec(
+        select(ClarificationQuestion).where(
+            ClarificationQuestion.user_id == user_id,
+            ClarificationQuestion.status == "open",
+        )
+    ).first()
+    return OnboardingCompleteIn(
+        facts_decision="skipped",
+        question_decision="skipped" if question else "no_question",
+        question_id=question.id if question else None,
+    )
 
 
 def test_cv_is_required_before_profile_is_ready():
@@ -82,7 +98,7 @@ def test_onboarding_requires_cv_and_supported_career_interest():
             ProfilePreferencesIn(career_interests=["Software Engineering"]),
         )
         with pytest.raises(ValueError, match="Upload a CV"):
-            complete_onboarding(session, USER_ID)
+            complete_onboarding(session, USER_ID, _skip_review_payload(session, USER_ID))
 
     with pytest.raises(ValueError, match="Unsupported career interest"):
         ProfilePreferencesIn(career_interests=["Professional Wizard"])
@@ -126,7 +142,7 @@ def test_analyzed_profile_can_complete_onboarding_with_interests():
                 career_interests=["Software Engineering", "AI, Data Science, ML & Algorithms"]
             ),
         )
-        completed = complete_onboarding(session, USER_ID)
+        completed = complete_onboarding(session, USER_ID, _skip_review_payload(session, USER_ID))
 
     assert completed.onboarding_completed is True
     assert completed.career_interests == [
@@ -135,7 +151,180 @@ def test_analyzed_profile_can_complete_onboarding_with_interests():
     ]
 
 
-def test_completion_recovers_a_stale_profile_after_cv_upload():
+def test_onboarding_completion_persists_fact_and_question_review_choices():
+    engine = _engine()
+    SQLModel.metadata.create_all(engine)
+    with Session(engine) as session:
+        profile = Profile(user_id=USER_ID, status="needs_analysis")
+        session.add(profile)
+        session.commit()
+        session.refresh(profile)
+        session.add(
+            ProfileSource(
+                user_id=USER_ID,
+                profile_id=profile.id or 0,
+                source_type="cv",
+                title="cv.pdf",
+                content_text="Computer Science student. Skills: Python, SQL, React. Built a FastAPI project.",
+            )
+        )
+        session.commit()
+        analyzed = analyze_profile(session, USER_ID)
+        update_profile_preferences(
+            session,
+            USER_ID,
+            ProfilePreferencesIn(career_interests=["Software Engineering"]),
+        )
+        pending_ids = [fact.id for fact in analyzed.profile.facts if fact.review_status == "pending"]
+        question = next(question for question in analyzed.profile.questions if question.status == "open")
+        rejected_ids = pending_ids[:1]
+        approved_ids = pending_ids[1:]
+
+        completed = complete_onboarding(
+            session,
+            USER_ID,
+            OnboardingCompleteIn(
+                facts_decision="confirmed",
+                approved_fact_ids=approved_ids,
+                rejected_fact_ids=rejected_ids,
+                question_decision="skipped",
+                question_id=question.id,
+            ),
+        )
+        events = list(
+            session.exec(
+                select(ExtractionMetric).where(ExtractionMetric.workflow_type == "onboarding_funnel")
+            ).all()
+        )
+
+    statuses = {fact.id: fact.review_status for fact in completed.facts}
+    assert completed.onboarding_completed is True
+    assert all(statuses[fact_id] == "approved" for fact_id in approved_ids)
+    assert all(statuses[fact_id] == "rejected" for fact_id in rejected_ids)
+    assert any(item.status == "skipped" and item.field_key == question.field_key for item in completed.questions)
+    assert {event.strategy for event in events} >= {
+        "facts_confirmed",
+        "question_skipped",
+        "onboarding_completed",
+    }
+
+
+def test_onboarding_completion_requires_every_pending_fact_or_an_explicit_skip():
+    engine = _engine()
+    SQLModel.metadata.create_all(engine)
+    with Session(engine) as session:
+        profile = Profile(user_id=USER_ID, status="needs_analysis")
+        session.add(profile)
+        session.commit()
+        session.refresh(profile)
+        session.add(
+            ProfileSource(
+                user_id=USER_ID,
+                profile_id=profile.id or 0,
+                source_type="cv",
+                title="cv.pdf",
+                content_text="Computer Science student. Skills: Python, SQL, React.",
+            )
+        )
+        session.commit()
+        analyzed = analyze_profile(session, USER_ID)
+        update_profile_preferences(
+            session,
+            USER_ID,
+            ProfilePreferencesIn(career_interests=["Software Engineering"]),
+        )
+        pending_ids = [fact.id for fact in analyzed.profile.facts if fact.review_status == "pending"]
+        question = next(question for question in analyzed.profile.questions if question.status == "open")
+
+        with pytest.raises(ValueError, match="every pending profile fact"):
+            complete_onboarding(
+                session,
+                USER_ID,
+                OnboardingCompleteIn(
+                    facts_decision="confirmed",
+                    approved_fact_ids=pending_ids[:1],
+                    question_decision="skipped",
+                    question_id=question.id,
+                ),
+            )
+
+
+def test_onboarding_priority_question_can_be_answered_during_completion():
+    engine = _engine()
+    SQLModel.metadata.create_all(engine)
+    with Session(engine) as session:
+        profile = Profile(user_id=USER_ID, status="needs_analysis")
+        session.add(profile)
+        session.commit()
+        session.refresh(profile)
+        session.add(
+            ProfileSource(
+                user_id=USER_ID,
+                profile_id=profile.id or 0,
+                source_type="cv",
+                title="cv.pdf",
+                content_text="Computer Science student. Skills: Python, SQL, React.",
+            )
+        )
+        session.commit()
+        analyzed = analyze_profile(session, USER_ID)
+        update_profile_preferences(
+            session,
+            USER_ID,
+            ProfilePreferencesIn(career_interests=["Software Engineering"]),
+        )
+        question = next(question for question in analyzed.profile.questions if question.field_key == "years_experience")
+
+        completed = complete_onboarding(
+            session,
+            USER_ID,
+            OnboardingCompleteIn(
+                facts_decision="skipped",
+                question_decision="answered",
+                question_id=question.id,
+                question_answer="One year of professional software experience.",
+            ),
+        )
+
+    assert completed.onboarding_completed is True
+    assert any(
+        fact.fact_type == "years_experience"
+        and fact.review_status == "approved"
+        and fact.evidence.startswith("User clarification:")
+        for fact in completed.facts
+    )
+    assert not any(item.status == "open" and item.field_key == "years_experience" for item in completed.questions)
+
+
+def test_onboarding_funnel_report_is_aggregate_and_deduplicated():
+    rows = [
+        ExtractionMetric(user_id=USER_ID, workflow_type="onboarding_funnel", subject_id=1, strategy="cv_uploaded"),
+        ExtractionMetric(user_id=USER_ID, workflow_type="onboarding_funnel", subject_id=1, strategy="cv_uploaded"),
+        ExtractionMetric(user_id=USER_ID, workflow_type="onboarding_funnel", subject_id=1, strategy="review_presented"),
+        ExtractionMetric(user_id=USER_ID, workflow_type="onboarding_funnel", subject_id=1, strategy="facts_confirmed"),
+        ExtractionMetric(user_id=USER_ID, workflow_type="onboarding_funnel", subject_id=1, strategy="question_answered"),
+        ExtractionMetric(user_id=USER_ID, workflow_type="onboarding_funnel", subject_id=1, strategy="onboarding_completed"),
+        ExtractionMetric(user_id=STUDENT_ID, workflow_type="onboarding_funnel", subject_id=2, strategy="cv_uploaded"),
+        ExtractionMetric(user_id=STUDENT_ID, workflow_type="onboarding_funnel", subject_id=2, strategy="review_presented"),
+        ExtractionMetric(user_id=OLDER_ID, workflow_type="profile_extraction", subject_id=3, strategy="ignored"),
+    ]
+
+    report = build_onboarding_funnel(rows)
+
+    assert report["profiles"] == {"cv_uploaded": 2, "review_presented": 2, "onboarding_completed": 1}
+    assert report["conversion_percent"] == {
+        "upload_to_review": 100.0,
+        "review_to_completion": 50.0,
+        "upload_to_completion": 50.0,
+    }
+    assert report["dropoff_profiles"] == {
+        "after_upload_before_review": 0,
+        "after_review_before_completion": 1,
+    }
+    assert "user_id" not in str(report)
+
+
+def test_completion_cannot_bypass_analysis_and_review():
     engine = _engine()
     SQLModel.metadata.create_all(engine)
     with Session(engine) as session:
@@ -159,11 +348,11 @@ def test_completion_recovers_a_stale_profile_after_cv_upload():
             ProfilePreferencesIn(career_interests=["Software Engineering"]),
         )
 
-        completed = complete_onboarding(session, USER_ID)
+        with pytest.raises(ValueError, match="Analyze your profile"):
+            complete_onboarding(session, USER_ID, _skip_review_payload(session, USER_ID))
 
-    assert completed.status == "ready"
-    assert completed.last_analyzed_at is not None
-    assert completed.onboarding_completed is True
+    assert profile.status == "needs_analysis"
+    assert profile.onboarding_completed is False
 
 
 def test_onboarding_analysis_reuses_unchanged_cv_preview():
@@ -329,7 +518,7 @@ def test_unreadable_cv_is_reported_instead_of_showing_ready():
 
         analyzed = analyze_profile(session, USER_ID)
         with pytest.raises(ValueError, match="couldn't read text"):
-            complete_onboarding(session, USER_ID)
+            complete_onboarding(session, USER_ID, _skip_review_payload(session, USER_ID))
 
     assert analyzed.profile.status == "cv_unreadable"
     assert analyzed.profile.onboarding_completed is False

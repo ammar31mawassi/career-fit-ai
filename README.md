@@ -24,14 +24,15 @@ The beta does not use OpenAI, ChatGPT, or another hosted generative model. Profi
 - Scanned-PDF detection with an optional private OCR fallback configured through `OCR_SERVICE_URL`.
 - Browser-side OCR fallback when direct PDF text extraction is insufficient.
 - Bulk profile fact confirmation/rejection with pending-first review.
-- Immediate CV preview extraction during onboarding, smooth progress, and optional top-skill confirmation while remaining sources are processed.
+- Immediate CV preview extraction, smooth progress, and early top-skill preselection while remaining sources are processed.
+- A required confirm-or-skip review before onboarding completion, with evidence/confidence details for every pending fact, one priority clarification, and a career-direction preview.
 - Twenty-four-hour cleanup of private sources and extracted preview data when onboarding is abandoned.
 - Password recovery, private JSON export, account deletion, and a public privacy explanation.
 - Abortable job scans with retained input and idempotent retry.
 - Durable PGMQ-backed scan jobs with persisted progress, cancellation, stale-worker recovery, and bounded retries.
 - User-reviewed job requirements that immediately recalculate the match and create privacy-safe evaluation labels.
 - Opt-in community job recommendations using a cheap eligibility shortlist before full evidence scoring.
-- Cursor-paginated job summaries, ETags, explicit rematching, trace IDs, and privacy-safe extraction metrics.
+- Cursor-paginated job summaries, ETags, explicit rematching, trace IDs, and privacy-safe extraction/onboarding-funnel metrics with no CV text, answers, or fact values.
 - A replaceable scorer boundary with an optional monotonic calibration artifact; deterministic blockers and caps remain authoritative.
 
 Out of scope for v1: Goozali scanning, Gmail, WhatsApp, automatic applications, multiple CVs, and LinkedIn scraping.
@@ -85,6 +86,8 @@ The same secured worker removes unfinished onboarding preview data after 24 hour
 Optional model calibration is enabled by setting `SCORE_CALIBRATION_PATH` to a JSON file with a version and monotonic score knots. If the file is absent or invalid, CareerFit safely uses the deterministic scorer.
 
 Before training or enabling a calibration artifact, run `python scripts/label_coverage_report.py` from `backend/`. The privacy-safe report blocks the training gate when train, validation, or test labels are sparse and shows coverage by label type, fact/evidence segment, corrected requirement field, and model version.
+
+To inspect onboarding drop-off without exporting user IDs or CV-derived content, run `python scripts/onboarding_funnel_report.py --days 30` from `backend/`. The report deduplicates stages by profile and returns aggregate conversion, choice, and drop-off counts only.
 
 ## Fit score meaning
 

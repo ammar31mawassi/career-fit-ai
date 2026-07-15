@@ -1,12 +1,18 @@
 "use client";
 
 import { useEffect, useRef, useState, type FormEvent } from "react";
-import { ArrowRight, FileCheck2, Github, Linkedin, Sparkles, Waypoints } from "lucide-react";
+import { FileCheck2, Github, Linkedin, Sparkles, Waypoints } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { CareerInterestPicker } from "@/components/CareerInterestPicker";
 import { LongTaskProgress } from "@/components/LongTaskProgress";
 import { CvDiscoveryPanel } from "@/components/onboarding/CvDiscoveryPanel";
 import { SkillConfirmationPanel } from "@/components/onboarding/SkillConfirmationPanel";
+import {
+  highestImpactQuestion,
+  OnboardingReview,
+  type FactReviewDecision,
+  type QuestionReviewDecision
+} from "@/components/onboarding/OnboardingReview";
 import { useCvPreview } from "@/components/onboarding/useCvPreview";
 import {
   clearOnboardingSyncing,
@@ -15,7 +21,6 @@ import {
 } from "@/components/AppDataProvider";
 import {
   analyzeOnboardingProfile,
-  bulkUpdateProfileFacts,
   completeOnboarding,
   uploadLinkedInPdf
 } from "@/lib/api";
@@ -35,6 +40,11 @@ export function OnboardingClient() {
   const [error, setError] = useState("");
   const [selectedSkills, setSelectedSkills] = useState<string[]>([]);
   const [skillReviewSkipped, setSkillReviewSkipped] = useState(false);
+  const [selectedFactIds, setSelectedFactIds] = useState<Set<number>>(new Set());
+  const [factReviewDecision, setFactReviewDecision] = useState<FactReviewDecision>("pending");
+  const [questionReviewDecision, setQuestionReviewDecision] = useState<QuestionReviewDecision>("pending");
+  const [questionAnswer, setQuestionAnswer] = useState("");
+  const [finishing, setFinishing] = useState(false);
   const selectedSkillsRef = useRef<string[]>([]);
   const skillReviewSkippedRef = useRef(false);
   const cvPreview = useCvPreview(setProfile);
@@ -129,16 +139,7 @@ export function OnboardingClient() {
         manual_info: manualInfo,
         career_interests: interests
       });
-      let completedProfile = result.profile;
-      const confirmedValues = skillReviewSkippedRef.current ? [] : selectedSkillsRef.current;
-      const confirmedIds = completedProfile.facts
-        .filter((fact) => fact.fact_type === "skill" && confirmedValues.includes(fact.value))
-        .map((fact) => fact.id);
-      if (confirmedIds.length) {
-        setProgressValue(94);
-        setProgress("Saving the skills you confirmed");
-        completedProfile = await bulkUpdateProfileFacts(confirmedIds, "approved");
-      }
+      const completedProfile = result.profile;
       setProfile(completedProfile);
       cvPreview.clearFile();
       setProgressValue(100);
@@ -148,6 +149,21 @@ export function OnboardingClient() {
         setStage("form");
         return;
       }
+      const pendingFacts = completedProfile.facts.filter((fact) => fact.review_status === "pending");
+      const earlySkillChoices = new Set(selectedSkillsRef.current);
+      const selectedIds = pendingFacts
+        .filter((fact) => (
+          fact.fact_type !== "skill"
+          || skillReviewSkippedRef.current
+          || earlySkillChoices.size === 0
+          || !cvPreview.skills.includes(fact.value)
+          || earlySkillChoices.has(fact.value)
+        ))
+        .map((fact) => fact.id);
+      setSelectedFactIds(new Set(selectedIds));
+      setFactReviewDecision("pending");
+      setQuestionAnswer("");
+      setQuestionReviewDecision(highestImpactQuestion(completedProfile.questions) ? "pending" : "no_question");
       setProgress("");
       setStage("review");
     } catch (err) {
@@ -157,30 +173,62 @@ export function OnboardingClient() {
     }
   }
 
-  function finish() {
+  function toggleFact(factId: number) {
+    setFactReviewDecision("pending");
+    setSelectedFactIds((current) => {
+      const next = new Set(current);
+      if (next.has(factId)) next.delete(factId); else next.add(factId);
+      return next;
+    });
+  }
+
+  function changeQuestionAnswer(value: string) {
+    setQuestionAnswer(value);
+    if (questionReviewDecision !== "pending") setQuestionReviewDecision("pending");
+  }
+
+  async function finish() {
     if (profile?.status !== "ready") {
       setError(profileAnalysisError(profile?.status ?? "needs_analysis"));
       setStage("form");
       return;
     }
-    const previousProfile = profile;
+    const question = highestImpactQuestion(profile.questions);
+    if (factReviewDecision === "pending" || questionReviewDecision === "pending") {
+      setError("Confirm or skip both review sections before continuing.");
+      return;
+    }
+    const pendingFacts = profile.facts.filter((fact) => fact.review_status === "pending");
+    const approvedFactIds = factReviewDecision === "confirmed"
+      ? pendingFacts.filter((fact) => selectedFactIds.has(fact.id)).map((fact) => fact.id)
+      : [];
+    const rejectedFactIds = factReviewDecision === "confirmed"
+      ? pendingFacts.filter((fact) => !selectedFactIds.has(fact.id)).map((fact) => fact.id)
+      : [];
+    setFinishing(true);
     markOnboardingSyncing();
-    setProfile({ ...profile, onboarding_completed: true });
     setError("");
-    const completion = completeOnboarding();
-    router.replace("/");
-    void completion
-      .then((completed) => {
-        clearOnboardingSyncing();
-        setProfile(completed);
-        void refreshAll().catch(() => undefined);
-      })
-      .catch((err) => {
-        clearOnboardingSyncing();
-        setProfile(previousProfile);
-        reportDataError(err instanceof Error ? err.message : "Could not finish onboarding.");
-        router.replace("/onboarding");
+    try {
+      const completed = await completeOnboarding({
+        facts_decision: factReviewDecision,
+        approved_fact_ids: approvedFactIds,
+        rejected_fact_ids: rejectedFactIds,
+        question_decision: questionReviewDecision,
+        question_id: questionReviewDecision === "no_question" ? null : question?.id ?? null,
+        question_answer: questionReviewDecision === "answered" ? questionAnswer.trim() : ""
       });
+      clearOnboardingSyncing();
+      setProfile(completed);
+      router.replace("/");
+      void refreshAll().catch(() => undefined);
+    } catch (err) {
+      clearOnboardingSyncing();
+      const message = err instanceof Error ? err.message : "Could not finish onboarding.";
+      setError(message);
+      reportDataError(message);
+    } finally {
+      setFinishing(false);
+    }
   }
 
   if (stage === "analyzing") {
@@ -211,25 +259,23 @@ export function OnboardingClient() {
   }
 
   if (stage === "review") {
-    const openQuestions = profile?.questions.filter((question) => question.status === "open").length ?? 0;
-    return (
-      <main className="onboarding-shell">
-        <section className="onboarding-complete">
-          <span className="onboarding-logo"><FileCheck2 size={26} /></span>
-          <h1>Your profile is ready.</h1>
-          <p>{profile?.summary}</p>
-          <div className="onboarding-result-stats">
-            <div><strong>{profile?.facts.length ?? 0}</strong><span>facts extracted</span></div>
-            <div><strong>{profile?.career_interests.length ?? interests.length}</strong><span>career interests</span></div>
-            <div><strong>{openQuestions}</strong><span>questions to refine later</span></div>
-          </div>
-          {error ? <div className="notice error">{error}</div> : null}
-          <button className="button primary onboarding-continue" onClick={finish} type="button">
-            Enter CareerFit <ArrowRight size={16} />
-          </button>
-        </section>
-      </main>
-    );
+    if (!profile) return null;
+    return <OnboardingReview
+      error={error}
+      factDecision={factReviewDecision}
+      onAnswerQuestion={() => setQuestionReviewDecision("answered")}
+      onConfirmFacts={() => setFactReviewDecision("confirmed")}
+      onFinish={() => void finish()}
+      onQuestionAnswer={changeQuestionAnswer}
+      onSkipFacts={() => setFactReviewDecision("skipped")}
+      onSkipQuestion={() => { setQuestionAnswer(""); setQuestionReviewDecision("skipped"); }}
+      onToggleFact={toggleFact}
+      profile={profile}
+      questionAnswer={questionAnswer}
+      questionDecision={questionReviewDecision}
+      saving={finishing}
+      selectedFactIds={selectedFactIds}
+    />;
   }
 
   return (

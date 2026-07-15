@@ -23,6 +23,7 @@ from ..models import (
 from ..schemas import (
     BrowserOcrIn,
     ClarificationQuestionOut,
+    OnboardingCompleteIn,
     ProfileAnalyzeResult,
     ProfileFactOut,
     ProfileOut,
@@ -41,7 +42,7 @@ from .profile_extraction import (
     fact_key,
 )
 from .storage import load_private_file, save_private_file
-from .telemetry import record_evaluation_example, record_extraction_metric
+from .telemetry import record_evaluation_example, record_extraction_metric, record_onboarding_event
 from .text import safe_filename
 
 
@@ -128,6 +129,17 @@ def upload_cv_source(session: Session, user_id: UUID, filename: str, data: bytes
     profile.updated_at = _now()
     session.add(source)
     session.add(profile)
+    if not profile.onboarding_completed:
+        record_onboarding_event(
+            session,
+            user_id,
+            profile.id,
+            "cv_uploaded",
+            counts={
+                "readable": int(bool(read_result.text.strip())),
+                "scanned_pdf": int(bool(read_result.metadata().get("scanned_pdf_detected"))),
+            },
+        )
     session.commit()
     return profile_output(session, user_id)
 
@@ -254,7 +266,11 @@ def update_profile_preferences(
     return profile_output(session, user_id)
 
 
-def complete_onboarding(session: Session, user_id: UUID) -> ProfileOut:
+def complete_onboarding(
+    session: Session,
+    user_id: UUID,
+    payload: OnboardingCompleteIn,
+) -> ProfileOut:
     profile = get_or_create_profile(session, user_id)
     if not _has_cv(session, profile):
         raise ValueError("Upload a CV before completing onboarding.")
@@ -263,20 +279,81 @@ def complete_onboarding(session: Session, user_id: UUID) -> ProfileOut:
     )
     if not interests:
         raise ValueError("Choose at least one career interest.")
+    if profile.status == "cv_unreadable":
+        raise ValueError(
+            "We couldn't read text from your CV. Upload a text-based PDF (not a scan) and analyze again."
+        )
     if profile.status != "ready":
-        # Completion is idempotent: if a write left the profile marked stale,
-        # rebuild it once instead of trapping the user after the review screen.
-        analyzed = analyze_profile(session, user_id)
-        profile = get_or_create_profile(session, user_id)
-        if analyzed.profile.status == "cv_unreadable":
-            raise ValueError(
-                "We couldn't read text from your CV. Upload a text-based PDF (not a scan) and analyze again."
+        raise ValueError("Analyze your profile before reviewing and completing onboarding.")
+
+    pending_facts = list(
+        session.exec(
+            select(ProfileFact).where(
+                ProfileFact.profile_id == profile.id,
+                ProfileFact.review_status == "pending",
             )
-        if analyzed.profile.status != "ready":
-            raise ValueError("Profile analysis did not finish. Review your CV and analyze again.")
+        ).all()
+    )
+    pending_by_id = {fact.id or 0: fact for fact in pending_facts}
+    approved_ids = set(payload.approved_fact_ids)
+    rejected_ids = set(payload.rejected_fact_ids)
+    if payload.facts_decision == "confirmed":
+        reviewed_ids = approved_ids | rejected_ids
+        if reviewed_ids != set(pending_by_id):
+            raise ValueError("Confirm or reject every pending profile fact, or explicitly skip fact review.")
+        _review_fact_records(session, user_id, [pending_by_id[fact_id] for fact_id in approved_ids], "approved")
+        _review_fact_records(session, user_id, [pending_by_id[fact_id] for fact_id in rejected_ids], "rejected")
+
+    open_questions = list(
+        session.exec(
+            select(ClarificationQuestion).where(
+                ClarificationQuestion.profile_id == profile.id,
+                ClarificationQuestion.status == "open",
+            )
+        ).all()
+    )
+    if payload.question_decision == "no_question":
+        if open_questions:
+            raise ValueError("Answer or skip the clarification question before completing onboarding.")
+    else:
+        question = next((item for item in open_questions if item.id == payload.question_id), None)
+        if question is None:
+            raise ValueError("The clarification question is no longer available. Review the latest profile.")
+        if payload.question_decision == "answered":
+            _apply_question_answer(session, user_id, question, payload.question_answer)
+            session.delete(question)
+        else:
+            question.status = "skipped"
+            question.answer = ""
+            question.updated_at = _now()
+            session.add(question)
+
+    session.flush()
+    _rebuild_profile_state(session, profile)
     profile.onboarding_completed = True
     profile.updated_at = _now()
     session.add(profile)
+    record_onboarding_event(
+        session,
+        user_id,
+        profile.id,
+        f"facts_{payload.facts_decision}",
+        counts={"approved": len(approved_ids), "rejected": len(rejected_ids), "pending": len(pending_facts)},
+    )
+    record_onboarding_event(
+        session,
+        user_id,
+        profile.id,
+        f"question_{payload.question_decision}",
+        counts={"open_questions_presented": len(open_questions)},
+    )
+    record_onboarding_event(
+        session,
+        user_id,
+        profile.id,
+        "onboarding_completed",
+        counts={"career_interests": len(interests)},
+    )
     session.commit()
     return profile_output(session, user_id)
 
@@ -578,6 +655,21 @@ def patch_facts_bulk(
     )
     if len(facts) != len(ids):
         raise ValueError("One or more profile facts were not found.")
+    _review_fact_records(session, user_id, facts, review_status)
+    session.flush()
+    profile = session.get(Profile, facts[0].profile_id)
+    if profile:
+        _rebuild_profile_state(session, profile)
+    session.commit()
+    return profile_output(session, user_id)
+
+
+def _review_fact_records(
+    session: Session,
+    user_id: UUID,
+    facts: list[ProfileFact],
+    review_status: str,
+) -> None:
     now = _now()
     for fact in facts:
         fact.review_status = review_status
@@ -601,12 +693,6 @@ def patch_facts_bulk(
             )
         )
         _record_fact_feedback_example(session, user_id, fact, review_status)
-    session.flush()
-    profile = session.get(Profile, facts[0].profile_id)
-    if profile:
-        _rebuild_profile_state(session, profile)
-    session.commit()
-    return profile_output(session, user_id)
 
 
 def add_fact(session: Session, user_id: UUID, fact_type: str, value: str) -> ProfileOut:
@@ -673,30 +759,7 @@ def answer_question(session: Session, user_id: UUID, question_id: int, answer: s
     question = session.get(ClarificationQuestion, question_id)
     if not question or question.user_id != user_id:
         raise ValueError("Profile fact question not found.")
-    profile = session.get(Profile, question.profile_id)
-    if profile:
-        cleaned_answer = answer.strip()
-        values = extract_skills(cleaned_answer) if question.field_key == "skill" else [cleaned_answer]
-        if not values:
-            values = [cleaned_answer]
-        for value in values:
-            session.add(
-                ProfileFact(
-                    user_id=user_id,
-                    profile_id=profile.id or 0,
-                    fact_type=question.field_key,
-                    value=value,
-                    evidence=f"User clarification: {question.question}",
-                    confidence=1.0,
-                    user_approved=True,
-                    review_status="approved",
-                    reviewed_at=_now(),
-                    extraction_key=fact_key(question.field_key, value),
-                    metadata_json=json.dumps({"evidence_type": "user_approved", "extractor_version": EXTRACTOR_VERSION}),
-                )
-            )
-        if question.field_key == "years_experience":
-            profile.years_experience = _number_from_answer(cleaned_answer)
+    profile = _apply_question_answer(session, user_id, question, answer)
     session.delete(question)
     session.flush()
     if profile:
@@ -705,10 +768,48 @@ def answer_question(session: Session, user_id: UUID, question_id: int, answer: s
     return profile_output(session, user_id)
 
 
+def _apply_question_answer(
+    session: Session,
+    user_id: UUID,
+    question: ClarificationQuestion,
+    answer: str,
+) -> Profile | None:
+    profile = session.get(Profile, question.profile_id)
+    if not profile:
+        return None
+    cleaned_answer = answer.strip()
+    values = extract_skills(cleaned_answer) if question.field_key == "skill" else [cleaned_answer]
+    if not values:
+        values = [cleaned_answer]
+    for value in values:
+        session.add(
+            ProfileFact(
+                user_id=user_id,
+                profile_id=profile.id or 0,
+                fact_type=question.field_key,
+                value=value,
+                evidence=f"User clarification: {question.question}",
+                confidence=1.0,
+                user_approved=True,
+                review_status="approved",
+                reviewed_at=_now(),
+                extraction_key=fact_key(question.field_key, value),
+                metadata_json=json.dumps(
+                    {"evidence_type": "user_approved", "extractor_version": EXTRACTOR_VERSION}
+                ),
+            )
+        )
+    if question.field_key == "years_experience":
+        profile.years_experience = _number_from_answer(cleaned_answer)
+    return profile
+
+
 def _rebuild_profile_state(session: Session, profile: Profile) -> None:
-    for question in session.exec(
+    existing_questions = list(session.exec(
         select(ClarificationQuestion).where(ClarificationQuestion.profile_id == profile.id)
-    ).all():
+    ).all())
+    skipped_fields = {question.field_key for question in existing_questions if question.status == "skipped"}
+    for question in existing_questions:
         session.delete(question)
     session.flush()
     snapshot = candidate_snapshot(session, profile)
@@ -717,6 +818,16 @@ def _rebuild_profile_state(session: Session, profile: Profile) -> None:
     profile.updated_at = _now()
     session.add(profile)
     _create_questions(session, profile, snapshot)
+    session.flush()
+    if skipped_fields:
+        regenerated = session.exec(
+            select(ClarificationQuestion).where(ClarificationQuestion.profile_id == profile.id)
+        ).all()
+        for question in regenerated:
+            if question.field_key in skipped_fields:
+                question.status = "skipped"
+                question.updated_at = _now()
+                session.add(question)
 
 
 def candidate_snapshot(session: Session, profile: Profile) -> CandidateSnapshot:

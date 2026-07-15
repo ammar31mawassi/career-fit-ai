@@ -367,8 +367,18 @@ export function saveProfilePreferences(careerInterests: string[], recommendation
   });
 }
 
-export function completeOnboarding() {
-  return request<Profile>("/api/profile/onboarding/complete", { method: "POST" });
+export function completeOnboarding(payload: {
+  facts_decision: "confirmed" | "skipped";
+  approved_fact_ids: number[];
+  rejected_fact_ids: number[];
+  question_decision: "answered" | "skipped" | "no_question";
+  question_id: number | null;
+  question_answer: string;
+}) {
+  return request<Profile>("/api/profile/onboarding/complete", {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
 }
 
 export function analyzeOnboardingProfile(payload: {
