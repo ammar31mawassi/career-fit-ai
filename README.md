@@ -24,6 +24,8 @@ The beta does not use OpenAI, ChatGPT, or another hosted generative model. Profi
 - Scanned-PDF detection with an optional private OCR fallback configured through `OCR_SERVICE_URL`.
 - Browser-side OCR fallback when direct PDF text extraction is insufficient.
 - Bulk profile fact confirmation/rejection with pending-first review.
+- Immediate CV preview extraction during onboarding, smooth progress, and optional top-skill confirmation while remaining sources are processed.
+- Twenty-four-hour cleanup of private sources and extracted preview data when onboarding is abandoned.
 - Password recovery, private JSON export, account deletion, and a public privacy explanation.
 - Abortable job scans with retained input and idempotent retry.
 - Durable PGMQ-backed scan jobs with persisted progress, cancellation, stale-worker recovery, and bounded retries.
@@ -77,6 +79,8 @@ For an existing database, apply the SQL files in `supabase/migrations/` in filen
 Use the API project URL in the form `https://<project-ref>.supabase.co`, not the Supabase dashboard URL. Use a publishable key for browser/auth requests and a secret key only in backend/Vercel environment variables.
 
 The current Hobby deployment invokes recovery once per day because Hobby Cron does not support minute-level schedules. Normal scans start immediately from the authenticated client and continue in the persisted queue; move the same worker endpoint to a more frequent schedule when scan volume or the hosting plan increases.
+
+The same secured worker removes unfinished onboarding preview data after 24 hours, in batches of five per invocation. Completed profiles are never included in this cleanup.
 
 Optional model calibration is enabled by setting `SCORE_CALIBRATION_PATH` to a JSON file with a version and monotonic score knots. If the file is absent or invalid, CareerFit safely uses the deterministic scorer.
 

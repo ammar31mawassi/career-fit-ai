@@ -224,6 +224,14 @@ def update_profile_preferences(
     existing = list(
         session.exec(select(ProfileInterest).where(ProfileInterest.profile_id == profile.id)).all()
     )
+    existing_values = {interest.interest for interest in existing}
+    requested_values = set(payload.career_interests)
+    recommendation_unchanged = (
+        payload.recommendations_enabled is None
+        or profile.recommendations_enabled == payload.recommendations_enabled
+    )
+    if existing_values == requested_values and recommendation_unchanged:
+        return profile_output(session, user_id)
     for interest in existing:
         session.delete(interest)
     # Execute deletions before inserting replacements. Without this flush,

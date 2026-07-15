@@ -27,6 +27,7 @@ from ..schemas import (
     JobScanOut,
     JobStatusPatchIn,
     JobSummaryOut,
+    OnboardingAnalyzeIn,
     ProfileAnalyzeResult,
     ProfileFactBulkReviewIn,
     ProfileFactCreateIn,
@@ -55,6 +56,7 @@ from ..services.jobs import (
     review_job_requirements,
     update_job_status,
 )
+from ..services.onboarding import analyze_onboarding_profile, cleanup_abandoned_onboarding
 from ..services.profile import (
     apply_browser_ocr,
     analyze_profile,
@@ -199,6 +201,15 @@ def finish_onboarding(
         return complete_onboarding(session, user_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/profile/onboarding/analyze", response_model=ProfileAnalyzeResult)
+def analyze_onboarding(
+    payload: OnboardingAnalyzeIn,
+    user_id: UUID = Depends(current_user_id),
+    session: Session = Depends(get_session),
+) -> ProfileAnalyzeResult:
+    return analyze_onboarding_profile(session, user_id, payload)
 
 
 @router.post("/profile/analyze", response_model=ProfileAnalyzeResult)
@@ -451,6 +462,11 @@ def process_background_work(
         scan = process_one_queued_scan(session)
         if scan is not None and scan.status in {"succeeded", "failed", "cancelled"}:
             scans_processed += 1
+    onboarding_cleanups = (
+        cleanup_abandoned_onboarding(session)
+        if time.monotonic() < deadline
+        else 0
+    )
     recommendation = (
         process_one_queued_recommendation(session)
         if time.monotonic() < deadline
@@ -459,4 +475,5 @@ def process_background_work(
     return {
         "scans_processed": scans_processed,
         "recommendations_processed": int(recommendation is not None),
+        "onboarding_cleanups": onboarding_cleanups,
     }

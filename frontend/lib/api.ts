@@ -371,6 +371,18 @@ export function completeOnboarding() {
   return request<Profile>("/api/profile/onboarding/complete", { method: "POST" });
 }
 
+export function analyzeOnboardingProfile(payload: {
+  github_url: string;
+  linkedin_text: string;
+  manual_info: string;
+  career_interests: string[];
+}) {
+  return request<ProfileAnalyzeResult>("/api/profile/onboarding/analyze", {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
 export function analyzeProfile() {
   return request<ProfileAnalyzeResult>("/api/profile/analyze", { method: "POST" });
 }

@@ -1,30 +1,28 @@
 "use client";
 
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import { ArrowRight, FileCheck2, Github, Linkedin, Sparkles, Waypoints } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { CareerInterestPicker } from "@/components/CareerInterestPicker";
 import { LongTaskProgress } from "@/components/LongTaskProgress";
+import { CvDiscoveryPanel } from "@/components/onboarding/CvDiscoveryPanel";
+import { SkillConfirmationPanel } from "@/components/onboarding/SkillConfirmationPanel";
+import { useCvPreview } from "@/components/onboarding/useCvPreview";
 import {
   clearOnboardingSyncing,
   markOnboardingSyncing,
   useAppData
 } from "@/components/AppDataProvider";
-import { recognizePdfInBrowser } from "@/lib/browserOcr";
 import {
-  analyzeProfile,
+  analyzeOnboardingProfile,
+  bulkUpdateProfileFacts,
   completeOnboarding,
-  saveBrowserOcr,
-  saveProfilePreferences,
-  saveProfileSources,
-  uploadCv,
   uploadLinkedInPdf
 } from "@/lib/api";
 
 export function OnboardingClient() {
   const router = useRouter();
   const { profile, profileLoading, dataError, setProfile, refreshAll, reportDataError } = useAppData();
-  const [cvFile, setCvFile] = useState<File | null>(null);
   const [linkedinFile, setLinkedinFile] = useState<File | null>(null);
   const [githubUrl, setGithubUrl] = useState("");
   const [linkedinText, setLinkedinText] = useState("");
@@ -35,6 +33,12 @@ export function OnboardingClient() {
   const [progressValue, setProgressValue] = useState(0);
   const [activeStep, setActiveStep] = useState(0);
   const [error, setError] = useState("");
+  const [selectedSkills, setSelectedSkills] = useState<string[]>([]);
+  const [skillReviewSkipped, setSkillReviewSkipped] = useState(false);
+  const selectedSkillsRef = useRef<string[]>([]);
+  const skillReviewSkippedRef = useRef(false);
+  const cvPreview = useCvPreview(setProfile);
+  const hasCv = Boolean(profile?.sources.some((source) => source.source_type === "cv"));
 
   useEffect(() => {
     if (!profile || stage !== "form") return;
@@ -44,11 +48,50 @@ export function OnboardingClient() {
     setInterests(profile.career_interests);
   }, [profile?.id, stage]);
 
-  const hasCv = Boolean(profile?.sources.some((source) => source.source_type === "cv"));
+  useEffect(() => {
+    if (stage !== "analyzing" || !cvPreview.active) return;
+    setActiveStep(cvPreview.preview.status === "uploading" ? 0 : 1);
+    setProgressValue(Math.max(4, Math.min(55, cvPreview.preview.progress * .55)));
+    setProgress(cvPreview.preview.detail);
+  }, [cvPreview.active, cvPreview.preview.detail, cvPreview.preview.progress, cvPreview.preview.status, stage]);
+
+  function selectSkills(values: string[]) {
+    selectedSkillsRef.current = values;
+    setSelectedSkills(values);
+  }
+
+  function toggleSkill(skill: string) {
+    skillReviewSkippedRef.current = false;
+    setSkillReviewSkipped(false);
+    const next = selectedSkillsRef.current.includes(skill)
+      ? selectedSkillsRef.current.filter((value) => value !== skill)
+      : [...selectedSkillsRef.current, skill];
+    selectSkills(next);
+  }
+
+  function confirmAllSkills() {
+    skillReviewSkippedRef.current = false;
+    setSkillReviewSkipped(false);
+    selectSkills(cvPreview.skills);
+  }
+
+  function skipSkillReview() {
+    skillReviewSkippedRef.current = true;
+    setSkillReviewSkipped(true);
+    selectSkills([]);
+  }
+
+  function startCvPreview(file: File | null) {
+    setError("");
+    selectSkills([]);
+    skillReviewSkippedRef.current = false;
+    setSkillReviewSkipped(false);
+    cvPreview.start(file);
+  }
 
   async function buildProfile(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!hasCv && !cvFile) {
+    if (!hasCv && !cvPreview.file) {
       setError("Upload your CV to build the profile.");
       return;
     }
@@ -60,31 +103,14 @@ export function OnboardingClient() {
     setError("");
     setActiveStep(0);
     setProgressValue(4);
-    setProgress("Securely uploading your sources");
+    setProgress("Finishing your CV preview");
     try {
-      if (cvFile) {
-        const selectedCv = cvFile;
-        const uploadedProfile = await uploadCv(selectedCv);
-        setProfile(uploadedProfile);
-        setActiveStep(1);
-        setProgressValue(16);
-        setProgress("Checking the PDF text layer");
-        const cvSource = uploadedProfile.sources.find((source) => source.source_type === "cv");
-        if (cvSource?.ocr_recommended) {
-          const ocr = await recognizePdfInBrowser(selectedCv, (update) => {
-            setProgress(update.detail);
-            setProgressValue(16 + update.progress * 45);
-          });
-          const recoveredProfile = await saveBrowserOcr(ocr);
-          setProfile(recoveredProfile);
-        }
-        setCvFile(null);
-        setProgressValue(62);
-      }
+      const pendingPreview = cvPreview.wait();
+      if (pendingPreview) await pendingPreview;
       let resolvedLinkedinText = linkedinText;
       if (linkedinFile) {
         setActiveStep(2);
-        setProgressValue(66);
+        setProgressValue(58);
         setProgress("Adding LinkedIn context");
         const uploaded = await uploadLinkedInPdf(linkedinFile);
         setProfile(uploaded);
@@ -92,25 +118,33 @@ export function OnboardingClient() {
         if (!resolvedLinkedinText.trim()) resolvedLinkedinText = uploaded.linkedin_text;
       }
       setActiveStep(2);
-      setProgressValue(72);
+      setProgressValue(70);
       setProgress("Connecting CV, GitHub, LinkedIn, and your notes");
-      const sourcedProfile = await saveProfileSources({
+      setActiveStep(3);
+      setProgressValue(82);
+      setProgress("Building and cross-checking your evidence profile");
+      const result = await analyzeOnboardingProfile({
         github_url: githubUrl,
         linkedin_text: resolvedLinkedinText,
-        manual_info: manualInfo
+        manual_info: manualInfo,
+        career_interests: interests
       });
-      setProfile(sourcedProfile);
-      const preferredProfile = await saveProfilePreferences(interests);
-      setProfile(preferredProfile);
-      setActiveStep(3);
-      setProgressValue(84);
-      setProgress("Building and cross-checking your evidence profile");
-      const result = await analyzeProfile();
-      setProfile(result.profile);
+      let completedProfile = result.profile;
+      const confirmedValues = skillReviewSkippedRef.current ? [] : selectedSkillsRef.current;
+      const confirmedIds = completedProfile.facts
+        .filter((fact) => fact.fact_type === "skill" && confirmedValues.includes(fact.value))
+        .map((fact) => fact.id);
+      if (confirmedIds.length) {
+        setProgressValue(94);
+        setProgress("Saving the skills you confirmed");
+        completedProfile = await bulkUpdateProfileFacts(confirmedIds, "approved");
+      }
+      setProfile(completedProfile);
+      cvPreview.clearFile();
       setProgressValue(100);
       setProgress("Profile analysis complete");
-      if (result.profile.status !== "ready") {
-        setError(profileAnalysisError(result.profile.status));
+      if (completedProfile.status !== "ready") {
+        setError(profileAnalysisError(completedProfile.status));
         setStage("form");
         return;
       }
@@ -163,7 +197,16 @@ export function OnboardingClient() {
           { label: "Build your profile", detail: "Extract facts and clarification questions" }
         ]}
         title={activeStep < 2 ? "Reading your professional story" : "Building your evidence profile"}
-      />
+      >
+        <SkillConfirmationPanel
+          onConfirmAll={confirmAllSkills}
+          onSkip={skipSkillReview}
+          onToggle={toggleSkill}
+          selected={selectedSkills}
+          skipped={skillReviewSkipped}
+          skills={cvPreview.skills}
+        />
+      </LongTaskProgress>
     );
   }
 
@@ -217,9 +260,10 @@ export function OnboardingClient() {
             <div className="onboarding-section-heading"><span>01</span><div><h2>Your CV</h2><p>The required source for profile analysis.</p></div></div>
             <label className="onboarding-upload">
               <FileCheck2 size={22} />
-              <span><strong>{cvFile?.name || (hasCv ? "CV already uploaded" : "Choose a CV PDF")}</strong><small>{hasCv ? "Choose another file to replace it." : "PDF, up to your configured upload limit."}</small></span>
-              <input accept="application/pdf" onChange={(event) => setCvFile(event.target.files?.[0] ?? null)} type="file" />
+              <span><strong>{cvPreview.file?.name || (hasCv ? "CV already uploaded" : "Choose a CV PDF")}</strong><small>{hasCv ? "Choose another file to replace it." : "PDF, up to your configured upload limit."}</small></span>
+              <input accept="application/pdf" disabled={cvPreview.active} onChange={(event) => startCvPreview(event.target.files?.[0] ?? null)} type="file" />
             </label>
+            <CvDiscoveryPanel preview={cvPreview.preview} skills={cvPreview.skills} />
           </section>
 
           <section className="onboarding-section">
@@ -241,7 +285,7 @@ export function OnboardingClient() {
           <div className="onboarding-actions">
             <span>{interests.length ? `${interests.length} field${interests.length === 1 ? "" : "s"} selected` : "Choose at least one field"}</span>
             <button className="button primary" disabled={profileLoading} type="submit">
-              <Sparkles size={16} /> Analyze and build profile
+              <Sparkles size={16} /> Build my CareerFit profile
             </button>
           </div>
         </div>

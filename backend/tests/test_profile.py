@@ -1,12 +1,21 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+
 import pytest
 from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel, create_engine, select
 from uuid import UUID
 
-from app.models import ClarificationQuestion, Profile, ProfileFactFeedback, ProfileSource
-from app.schemas import BrowserOcrIn, BrowserOcrPageIn, ProfilePreferencesIn, ProfileSourcesIn
+from app.models import ClarificationQuestion, Profile, ProfileFact, ProfileFactFeedback, ProfileSource
+from app.schemas import (
+    BrowserOcrIn,
+    BrowserOcrPageIn,
+    OnboardingAnalyzeIn,
+    ProfilePreferencesIn,
+    ProfileSourcesIn,
+)
+from app.services.onboarding import analyze_onboarding_profile, cleanup_abandoned_onboarding
 from app.services.profile import (
     _cached_github_text,
     _github_text,
@@ -155,6 +164,143 @@ def test_completion_recovers_a_stale_profile_after_cv_upload():
     assert completed.status == "ready"
     assert completed.last_analyzed_at is not None
     assert completed.onboarding_completed is True
+
+
+def test_onboarding_analysis_reuses_unchanged_cv_preview():
+    engine = _engine()
+    SQLModel.metadata.create_all(engine)
+    with Session(engine) as session:
+        profile = Profile(user_id=USER_ID, status="needs_analysis")
+        session.add(profile)
+        session.commit()
+        session.refresh(profile)
+        session.add(
+            ProfileSource(
+                user_id=USER_ID,
+                profile_id=profile.id or 0,
+                source_type="cv",
+                title="cv.pdf",
+                content_text="Computer Science student. Skills: Python, SQL, React.",
+            )
+        )
+        session.commit()
+        preview = analyze_profile(session, USER_ID)
+
+        result = analyze_onboarding_profile(
+            session,
+            USER_ID,
+            OnboardingAnalyzeIn(
+                github_url="",
+                linkedin_text="",
+                manual_info="",
+                career_interests=["Software Engineering"],
+            ),
+        )
+
+    assert result.profile.status == "ready"
+    assert result.profile.last_analyzed_at == preview.profile.last_analyzed_at
+    assert result.generated_facts == 0
+    assert result.profile.career_interests == ["Software Engineering"]
+
+
+def test_abandoned_onboarding_cleanup_removes_preview_data(monkeypatch):
+    engine = _engine()
+    SQLModel.metadata.create_all(engine)
+    deleted_paths: list[str] = []
+    monkeypatch.setattr("app.services.onboarding.delete_private_file", deleted_paths.append)
+    now = datetime.now(timezone.utc)
+    with Session(engine) as session:
+        abandoned = Profile(
+            user_id=USER_ID,
+            status="ready",
+            summary="Private summary",
+            updated_at=now - timedelta(hours=25),
+        )
+        recent = Profile(
+            user_id=RECENT_ID,
+            status="ready",
+            updated_at=now - timedelta(hours=2),
+        )
+        completed = Profile(
+            user_id=OLDER_ID,
+            status="ready",
+            onboarding_completed=True,
+            updated_at=now - timedelta(days=3),
+        )
+        session.add(abandoned)
+        session.add(recent)
+        session.add(completed)
+        session.commit()
+        session.refresh(abandoned)
+        source = ProfileSource(
+            user_id=USER_ID,
+            profile_id=abandoned.id or 0,
+            source_type="cv",
+            title="cv.pdf",
+            storage_path=f"{USER_ID}/cv.pdf",
+            content_text="Private CV text",
+        )
+        session.add(source)
+        session.commit()
+        session.refresh(source)
+        session.add(
+            ProfileFact(
+                user_id=USER_ID,
+                profile_id=abandoned.id or 0,
+                source_id=source.id,
+                fact_type="skill",
+                value="python",
+            )
+        )
+        session.commit()
+
+        count = cleanup_abandoned_onboarding(session, now=now)
+        refreshed = session.get(Profile, abandoned.id)
+        sources = list(session.exec(select(ProfileSource).where(ProfileSource.profile_id == abandoned.id)).all())
+        facts = list(session.exec(select(ProfileFact).where(ProfileFact.profile_id == abandoned.id)).all())
+
+    assert count == 1
+    assert deleted_paths == [f"{USER_ID}/cv.pdf"]
+    assert refreshed is not None and refreshed.status == "needs_cv" and refreshed.summary == ""
+    assert sources == []
+    assert facts == []
+
+
+def test_abandoned_cleanup_preserves_rows_when_storage_delete_fails(monkeypatch):
+    engine = _engine()
+    SQLModel.metadata.create_all(engine)
+    monkeypatch.setattr(
+        "app.services.onboarding.delete_private_file",
+        lambda _path: (_ for _ in ()).throw(RuntimeError("storage unavailable")),
+    )
+    now = datetime.now(timezone.utc)
+    with Session(engine) as session:
+        profile = Profile(
+            user_id=USER_ID,
+            status="ready",
+            updated_at=now - timedelta(days=2),
+        )
+        session.add(profile)
+        session.commit()
+        session.refresh(profile)
+        session.add(
+            ProfileSource(
+                user_id=USER_ID,
+                profile_id=profile.id or 0,
+                source_type="cv",
+                storage_path=f"{USER_ID}/cv.pdf",
+                content_text="Private CV text",
+            )
+        )
+        session.commit()
+
+        count = cleanup_abandoned_onboarding(session, now=now)
+        source = session.exec(select(ProfileSource).where(ProfileSource.profile_id == profile.id)).one()
+        refreshed = session.get(Profile, profile.id)
+
+    assert count == 0
+    assert source.content_text == "Private CV text"
+    assert refreshed is not None and refreshed.status == "ready"
 
 
 def test_unreadable_cv_is_reported_instead_of_showing_ready():

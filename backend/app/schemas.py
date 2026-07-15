@@ -97,6 +97,19 @@ class ProfilePreferencesIn(BaseModel):
         return cleaned
 
 
+class OnboardingAnalyzeIn(ProfileSourcesIn):
+    career_interests: list[str] = Field(min_length=1, max_length=25)
+
+    @field_validator("career_interests")
+    @classmethod
+    def validate_career_interests(cls, values: list[str]) -> list[str]:
+        cleaned = list(dict.fromkeys(value.strip() for value in values if value.strip()))
+        invalid = [value for value in cleaned if value not in CAREER_INTEREST_SET]
+        if invalid:
+            raise ValueError(f"Unsupported career interest: {invalid[0]}")
+        return cleaned
+
+
 class ProfileFactPatchIn(BaseModel):
     value: str = Field(min_length=1, max_length=1000)
     review_status: Literal["pending", "approved", "rejected"] = "approved"
