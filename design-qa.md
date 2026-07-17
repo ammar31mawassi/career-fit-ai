@@ -59,6 +59,8 @@ Date: 2026-07-17
 - [x] Browser console warnings/errors: none during the tested flow.
 - [x] Frontend typecheck (`npm run typecheck`).
 - [x] Frontend production build (`npm run build`).
-- [ ] Production deployment and post-deploy smoke test.
+- [x] Production deployment and post-deploy smoke test (`https://career-fit-ai-sigma.vercel.app`).
 
-Final status: passed for implementation and local release gates; production smoke is recorded after deployment.
+Production smoke result: HTTP/DOM loaded at the stable alias, the selected live role rendered a fully contained `29% Weak fit / 81% confidence` summary, seven evidence controls were present, selecting a 12% Limited component updated the explainer and `aria-pressed`, page-level horizontal overflow was absent, and browser logs were empty.
+
+Final status: passed.
