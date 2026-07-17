@@ -9,15 +9,15 @@ import type { JobCreate, JobMatchSummary, TrackedJob, TrackedJobSummary } from "
 
 const previewMatch: JobMatchSummary = {
   id: 101,
-  score: 87,
-  fit_level: "Strong",
-  confidence: .92,
+  score: 39,
+  fit_level: "Weak",
+  confidence: .86,
   status: "Lead",
   analyzed_at: "2026-07-17T09:00:00.000Z"
 };
 
 const previewJobs: TrackedJobSummary[] = [
-  summary(1, "Northstar Labs", "Senior Frontend Engineer", 87, "Strong", "Remote"),
+  summary(1, "Siemens", "Application Engineering Student", 39, "Weak", "Israel, Tel Aviv, Remote, Hybrid"),
   summary(2, "Clearline Health", "Full Stack Engineer", 74, "Strong", "Hybrid"),
   summary(3, "Atlas Systems", "Frontend Engineer", 62, "Medium", "Remote"),
   summary(4, "Lumina", "Staff UI Engineer", 48, "Weak", "London"),
@@ -26,35 +26,39 @@ const previewJobs: TrackedJobSummary[] = [
 
 const previewJob: TrackedJob = {
   id: 1,
-  source_url: "https://northstar.example/jobs/frontend",
-  company: "Northstar Labs",
-  role: "Senior Frontend Engineer",
-  location: "Remote",
+  source_url: "https://jobs.example/application-engineering-student",
+  company: "Siemens",
+  role: "Application Engineering Student",
+  location: "Israel, Tel Aviv, Remote, Hybrid",
   description_text: "",
-  source_title: "Senior Frontend Engineer · Northstar Labs",
+  source_title: "Application Engineering Student · Siemens",
   source_confidence: .96,
-  application_link: "https://northstar.example/jobs/frontend",
+  application_link: "https://jobs.example/application-engineering-student",
   status: "ready",
   error: "",
   created_at: "2026-07-17T08:55:00.000Z",
   updated_at: "2026-07-17T09:00:00.000Z",
   requirements: {
-    must_have_skills: ["React", "TypeScript", "component systems", "testing"],
-    preferred_skills: ["Next.js", "CI/CD", "performance optimization"],
+    must_have_skills: ["Go", "English", "current engineering studies"],
+    preferred_skills: ["automation", "systems thinking"],
     nice_to_have_skills: ["GraphQL"],
-    all_skills: ["React", "TypeScript", "Next.js", "testing", "CI/CD", "performance optimization"],
-    min_years_experience: 5,
-    seniority: "senior",
+    all_skills: ["Go", "English", "automation", "systems thinking"],
+    min_years_experience: 0,
+    seniority: "student",
     education: "",
-    work_mode: "Full-time",
-    domain: "developer tools",
-    summary: "Lead frontend platform work across a product engineering organization.",
+    work_mode: "remote, hybrid, part-time",
+    domain: "application engineering",
+    summary: "A student application engineering role requiring Go, English, and current engineering studies.",
     languages: ["TypeScript"],
     location_requirement: "Remote",
     work_authorization: "",
     availability: "",
-    responsibilities: ["Own shared frontend architecture", "Improve performance and developer experience", "Mentor product engineers"],
-    evidence_by_requirement: {},
+    responsibilities: ["Support application engineering projects", "Work with product and engineering teams", "Automate repeatable workflows"],
+    evidence_by_requirement: {
+      go: "Go is listed as a must-have skill for the role.",
+      english: "Professional English is required for cross-team collaboration.",
+      logistics: "The role is part-time and supports remote or hybrid work in Tel Aviv."
+    },
     ontology_version: "2026.07",
     skill_groups: [],
     experience_requirement_known: true,
@@ -63,34 +67,30 @@ const previewJob: TrackedJob = {
   },
   match: {
     id: 101,
-    score: 87,
-    fit_level: "Strong",
-    confidence: .92,
+    score: 39,
+    fit_level: "Weak",
+    confidence: .86,
     status: "Lead",
     matched_evidence: [
-      "React, TypeScript, and Next.js from work experience",
-      "Design systems and reusable component APIs",
-      "Modular frontend architecture from projects",
-      "Testing with Jest and Playwright",
-      "GitHub Actions and CI/CD from repositories"
+      "Career stage aligns with the student role."
     ],
-    missing_blockers: [],
-    gaps: ["Performance optimization impact is not quantified in the current resume."],
+    missing_blockers: ["Missing must-have skill: Go. Job evidence: Go is listed as a must-have skill for the role."],
+    gaps: [],
     model_version: "career-fit-v2",
     ontology_version: "2026.07",
     component_scores: {
-      frontend_architecture: 94,
-      component_systems: 91,
-      performance: 84,
-      testing_and_quality: 88,
-      ci_cd_automation: 79
+      education_language: 100,
+      experience_seniority: 100,
+      logistics: 75,
+      must_have_skills: 20,
+      responsibility_domain: 14
     },
     applied_caps: [],
     status_history: [{ status: "Lead", created_at: "2026-07-17T09:00:00.000Z" }],
     resume_advice: {
-      projects: ["Add one bullet that quantifies frontend performance impact using a before/after metric."],
-      skill_order: ["React", "TypeScript", "Design systems", "Testing", "CI/CD"],
-      about_text: "Frontend engineer who builds reliable product platforms, reusable systems, and evidence-led developer experiences.",
+      projects: ["Add a verified project or course example that demonstrates Go in a practical application."],
+      skill_order: ["Go", "English", "Automation", "Systems thinking"],
+      about_text: "Engineering student with practical automation and product-development experience.",
       template_id: "evidence-first",
       evidence: []
     },
@@ -135,7 +135,11 @@ export function OpportunityPreview() {
     role: selectedSummary.role,
     location: selectedSummary.location,
     source_title: `${selectedSummary.role} · ${selectedSummary.company}`,
-    match: previewJob.match ? { ...previewJob.match, ...selectedSummary.match } : null
+    match: previewJob.match ? {
+      ...previewJob.match,
+      ...selectedSummary.match,
+      ...(selectedSummary.id === 1 ? {} : { missing_blockers: [], gaps: [] })
+    } : null
   }), [selectedSummary]);
   function submit(event: FormEvent<HTMLFormElement>) { event.preventDefault(); }
 

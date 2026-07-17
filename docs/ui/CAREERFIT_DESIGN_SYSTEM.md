@@ -64,13 +64,28 @@ All motion must remain usable under `prefers-reduced-motion: reduce`. Do not add
 
 The rail has three stable semantic steps: read the role, compare evidence, and build the action plan. New backend steps should map into one of these user-facing stages unless they represent a genuinely new user decision. Avoid exposing internal agent orchestration as extra UI steps.
 
+The connector belongs to the marker row, not the text row. Keep step labels below their markers at every breakpoint so the line can never cross copy. Validate with both short and translated/long labels before release.
+
 ### Saved opportunities
 
 Each row shows company mark, role, company/location, one signal, score, and fit. Search filters the existing list. New metadata belongs in the inspector, not in denser rows.
 
 ### Evidence map
 
-The map visualizes up to five strongest entries from `match.component_scores`, plus one most important gap. Additional component scores must remain available in the Overview or Job details tab instead of adding orbit nodes indefinitely. Labels and the adjacent list are the accessible source of truth; the orbit is a supporting visualization.
+The map visualizes up to five strongest entries from `match.component_scores`, plus one most important real gap. Additional component scores must remain available in the Overview or Job details tab instead of adding orbit nodes indefinitely.
+
+The orbit is an interactive index, not decoration. Every core, component, and gap point is a real button that supports hover, focus, and click/tap. Selection updates an adjacent explanation with three things: why the item affects the score, the verified profile facts that support it, and the role requirements it was compared against. When no component-specific fact is returned, say so explicitly instead of inferring or inventing one.
+
+Coverage language is fixed to these bands:
+
+| Score | Label | Meaning |
+| --- | --- | --- |
+| 75–100 | Strong | Strong verified coverage that actively supports the match. |
+| 50–74 | Supported | Useful evidence exists, but coverage is not complete. |
+| 25–49 | Partial | Some evidence exists and the missing portion limits the score. |
+| 0–24 | Limited | Little verified coverage; never present this as a strength. |
+
+Render the critical/gap node only when `missing_blockers` or `gaps` contains a real item. A must-have blocker must explain that it can cap the overall score. A no-gap result must not manufacture urgency.
 
 ### Inspector tabs
 
@@ -102,6 +117,8 @@ Add a tab only when a future concept supports repeated, substantial work. Small 
 - Maintain warm-cream text and semantic mint/coral/amber labels at accessible contrast on dark surfaces.
 - Prefer plain language: “One gap to close” is better than a model-centric error label.
 - Company logos should come from trustworthy source data. Until the API supplies them, use the existing Lucide company mark rather than invented brand assets.
+- Essential secondary copy must be at least 12px in the workbench; reserve 11px only for genuinely tertiary metadata. Never use 8–10px text for explanations, scores, tab labels, or evidence.
+- A score must remain fully contained at 100%, 200% zoom/reflow, long role titles, and every semantic fit color. Do not use clipping or decorative geometry that can cover digits.
 
 ## Visual review harness
 
@@ -113,3 +130,5 @@ npm run dev -- --port 3001
 ```
 
 The middleware bypass is limited to `/` and only activates when that environment variable is explicitly set. Do not set it in deployed environments.
+
+The default fixture deliberately uses a long title, long location/work-mode metadata, a weak 39% match, mixed component coverage, and a critical blocker. Keep this hostile state: it is the regression test for score clipping, misleading labels, evidence honesty, and narrow-container reflow. Also retain at least one no-gap fixture.

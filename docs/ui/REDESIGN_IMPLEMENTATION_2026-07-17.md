@@ -50,3 +50,13 @@ Before adding a future feature:
 ## Validation record
 
 The implementation was checked at desktop (1536×1024), tablet (1024×900), and mobile (390×844) layout sizes. Inspector tabs, saved-role filtering, selection, responsive collapse, semantic roles, overflow, and browser console output were tested. Type checking and the production build are required release gates and are recorded in `design-qa.md` after completion.
+
+## Readability and evidence remediation — 2026-07-17
+
+The first production review exposed defects that the original happy-path fixture did not: a weak score clipped inside its decorative orb, several labels were too small, the scan connector crossed its labels, and the evidence orbit looked meaningful without actually explaining anything. A long-title, weak-match fixture now reproduces those conditions by default.
+
+The score is now a contained summary card with explicit match, fit, and confidence values. Header actions participate in the normal grid instead of competing with absolute positioning. The scanner line is isolated to the marker row, saved-role score/fit values use stable vertical geometry, and essential workbench copy is 12px or larger.
+
+The evidence map is now functional. Component and gap points are accessible buttons; hovering, focusing, or selecting one opens the same explanation panel. The panel separates score logic, verified profile evidence, and role evidence. It never claims a profile fact the matcher did not return. Component labels are derived from fixed coverage thresholds, and the gap control is omitted when there is no real gap.
+
+Future score components should plug into the same `EvidencePoint` contract instead of creating another visualization. They need a stable identifier, user-facing name, score/band, explanation, verified profile evidence, and role evidence. New evidence sources must remain traceable and should be added to the existing explainer before a new panel or tab is considered.

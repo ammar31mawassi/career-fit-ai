@@ -1,54 +1,64 @@
-# Design QA — CareerFit evidence workbench
+# Design QA — CareerFit readability and evidence remediation
 
 Date: 2026-07-17
 
-## Sources
+## Sources and test state
 
-- Approved reference: `docs/ui/careerfit-workbench-approved.png`
-- Live implementation: `http://127.0.0.1:3001/` with `NEXT_PUBLIC_DESIGN_PREVIEW=1`
-- Primary comparison state: 1536×1024, Northstar Labs selected, Evidence map tab selected.
-- Final implementation capture: `C:\Users\ammar\.codex\visualizations\2026\07\17\019f7073-5050-7672-b7db-a9e074972bf9\careerfit-workbench-pass3.png`
-- Combined final comparison: `C:\Users\ammar\.codex\visualizations\2026\07\17\019f7073-5050-7672-b7db-a9e074972bf9\careerfit-qa-comparison-pass3.png`
+- Defect evidence: `C:\Users\ammar\AppData\Local\Temp\codex-clipboard-f7c0a932-f600-47a1-8031-a86a77624e5a.png`
+- Defect evidence: `C:\Users\ammar\AppData\Local\Temp\codex-clipboard-c29cbfd3-dee1-4bf4-8893-3ef4e753fe51.png`
+- Local implementation: `http://127.0.0.1:3001/` with `NEXT_PUBLIC_DESIGN_PREVIEW=1`
+- Stress fixture: Application Engineering Student, 39% Weak fit, long location/work-mode metadata, mixed component coverage, and a missing must-have skill.
+- Desktop final: `C:\Users\ammar\.codex\visualizations\2026\07\17\019f7073-5050-7672-b7db-a9e074972bf9\careerfit-fix-final-desktop.png`
+- Mobile final: `C:\Users\ammar\.codex\visualizations\2026\07\17\019f7073-5050-7672-b7db-a9e074972bf9\careerfit-fix-mobile-inspector-final.png`
+- Interactive evidence state: `C:\Users\ammar\.codex\visualizations\2026\07\17\019f7073-5050-7672-b7db-a9e074972bf9\careerfit-fix-mobile-evidence.png`
+- Before/after comparison: `C:\Users\ammar\.codex\visualizations\2026\07\17\019f7073-5050-7672-b7db-a9e074972bf9\careerfit-fix-before-after.png`
+- Focused scanner comparison: `C:\Users\ammar\.codex\visualizations\2026\07\17\019f7073-5050-7672-b7db-a9e074972bf9\careerfit-fix-scan-card.png`
+- Focused score comparison: `C:\Users\ammar\.codex\visualizations\2026\07\17\019f7073-5050-7672-b7db-a9e074972bf9\careerfit-fix-inspector-header.png`
+
+## Findings and resolution
+
+| Priority | Finding | Resolution |
+| --- | --- | --- |
+| P1 | The weak-fit score orb clipped the percentage and collided with header actions. | Replaced it with a contained score summary and moved score/actions into the inspector grid flow. |
+| P1 | Essential evidence, navigation, and secondary copy used 8.5–10.5px text. | Raised essential supporting text to a readable 12px or greater and increased headings, tabs, and controls proportionally. |
+| P1 | The orbit was decorative, static, and did not explain the result. | Converted every point into a keyboard-accessible button with hover, focus, and click selection plus a live evidence explainer. |
+| P1 | Low component scores were incorrectly labeled “Strong.” | Added honest Strong, Supported, Partial, and Limited bands tied to explicit thresholds. |
+| P1 | The scan connector line passed through step labels. | Stacked markers above labels and constrained the line to the marker row. |
+| P2 | A gap node and “one gap” message appeared even without a returned gap. | The critical node now renders only for real blockers/gaps; otherwise the UI reports no critical gaps. |
+| P2 | Saved-row score and fit could overlap in narrow columns. | Made the summary side a stable vertical grid and removed conflicting inherited pill geometry. |
+| P2 | Mobile tabs displayed a native scrollbar that looked like a broken divider. | Kept horizontal swipe behavior while hiding the platform scrollbar and preserving visible focus. |
 
 ## Comparison history
 
 ### Pass 1
 
-- P2: the intro was too tall and the hero wrapped earlier than the reference.
-- P2: scanner fallback and inspector utilities consumed too much vertical space.
-- Fix: widened the hero column, constrained the heading, tightened scanner spacing, and moved compact utilities out of the primary content flow.
+- Score and action geometry were repaired.
+- Evidence nodes became controls and the adjacent panel exposed the reason, profile evidence, and role evidence.
+- The 39% stress fixture exposed misleading component labels and narrow-column reflow issues.
 
 ### Pass 2
 
-- P2: the workbench still began lower than the approved composition.
-- Fix: reduced scanner padding and gaps while retaining the readable three-step rail.
+- Component bands were corrected, the inspector adopted container-aware evidence layout, and long metadata/role titles were verified.
+- Scanner labels moved below the connector rail.
 
-### Pass 3
+### Final pass
 
-- Result: composition, hierarchy, palette, density, evidence map, and primary action closely match the approved direction.
-- Accepted P3 differences: real product utilities remain visible; icon-library company marks replace fictional concept logos; live data creates slightly different line lengths.
+- Desktop, 390×844 mobile, and a 612px reflow proxy had no page-level horizontal overflow.
+- Selecting “Must Have Skills” showed its 20% Limited state and the available role/profile facts.
+- Selecting “Critical blocker” explained the must-have score cap without inventing profile evidence.
+- A no-gap fixture rendered no gap node and showed “No critical gaps detected.”
+- Overview, Requirements, and Job details tabs remained functional.
 
-## Functional and responsive checks
+## Functional, accessibility, and release checks
 
-- [x] Overview tab selects and exposes metrics, evidence, gaps, and advice.
-- [x] Evidence map tab is the default and restores on role change.
-- [x] Requirements tab exposes correction controls and extracted requirements.
-- [x] Job details tab exposes agent workflow, score components, and history.
-- [x] Saved-opportunity search filters roles and restores the full list.
-- [x] Selecting a role updates the active row, role heading, score, and fit.
-- [x] Mobile 390×844 has no horizontal overflow; workbench, map, evidence, and resume action stack cleanly.
-- [x] Tablet 1024×900 has no horizontal overflow and preserves the intended breakpoint behavior.
-- [x] Login desktop and mobile use the same typography, palette, and surface system.
-- [x] Semantic banner, navigation, headings, form labels, tabs, tab panels, complementary inspector, and evidence regions are present.
-- [x] Global visible-focus and reduced-motion rules remain in place.
+- [x] Orbit points respond to hover, keyboard focus, and click/tap.
+- [x] Active evidence controls expose `aria-pressed` and reference the explainer with `aria-controls`.
+- [x] Evidence wording distinguishes verified profile facts from role requirements and explicitly reports missing component evidence.
+- [x] Native button semantics, global visible focus, and reduced-motion behavior are preserved.
+- [x] Mobile tabs remain operable by swipe and keyboard without the decorative scrollbar.
 - [x] Browser console warnings/errors: none during the tested flow.
+- [x] Frontend typecheck (`npm run typecheck`).
+- [x] Frontend production build (`npm run build`).
+- [ ] Production deployment and post-deploy smoke test.
 
-## Release gates
-
-- [x] Frontend typecheck (`npm run typecheck`)
-- [x] Frontend production build (`npm run build`)
-- [x] Commit contains only the intended frontend and documentation files
-- [x] Production deployment returns successfully (`https://career-fit-ai-sigma.vercel.app`)
-- [x] Deployed URL smoke-tested: HTTP 200, production DOM complete, no horizontal overflow, and no browser warnings/errors.
-
-Final status: passed.
+Final status: passed for implementation and local release gates; production smoke is recorded after deployment.

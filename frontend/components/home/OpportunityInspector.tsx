@@ -109,7 +109,7 @@ export function OpportunityInspector({
     <aside className="panel opportunity-inspector">
       <div className="inspector-hero">
         <span className="inspector-company-mark" aria-hidden><BriefcaseBusiness size={24} strokeWidth={1.65} /></span>
-        <div>
+        <div className="inspector-copy">
           <h2>{job.role}</h2>
           <p>{job.company}</p>
           <div className="inspector-meta">
@@ -118,26 +118,25 @@ export function OpportunityInspector({
             <span>Analyzed {formatDate(match?.analyzed_at ?? job.updated_at)}</span>
           </div>
         </div>
-        <ScoreOrb score={match?.score ?? 0} fit={match?.fit_level ?? "Weak"} />
-      </div>
-
-      <div className="inspector-toolbar">
-        <div className="inspector-actions">
-          {job.source_url || job.application_link ? (
-            <a className="button compact quiet" href={job.application_link || job.source_url} rel="noreferrer" target="_blank">
-              <ExternalLink size={14} /> Open job
-            </a>
-          ) : null}
-          {match ? (
-            <label className="status-control">
-              <span>Stage</span>
-              <select disabled={saving} onChange={(event) => void setStatus(event.target.value as JobStatus)} value={match.status}>
-                {(["Lead", "Applied", "Interview", "Rejected", "Withdrawn", "Offer"] as JobStatus[]).map((status) => <option key={status}>{status}</option>)}
-              </select>
-              {saving ? <small>Syncing</small> : null}
-            </label>
-          ) : null}
-          {matchStale ? <button className="button compact quiet" disabled={rematching} onClick={() => void refreshMatch()} type="button"><RefreshCw className={rematching ? "spin" : ""} size={14} /> {rematching ? "Refreshing…" : "Refresh match"}</button> : null}
+        <div className="inspector-side">
+          <ScoreSummary confidence={match?.confidence ?? 0} score={match?.score ?? 0} fit={match?.fit_level ?? "Weak"} />
+          <div className="inspector-actions">
+            {job.source_url || job.application_link ? (
+              <a className="button compact quiet" href={job.application_link || job.source_url} rel="noreferrer" target="_blank">
+                <ExternalLink size={14} /> Open job
+              </a>
+            ) : null}
+            {match ? (
+              <label className="status-control">
+                <span>Stage</span>
+                <select disabled={saving} onChange={(event) => void setStatus(event.target.value as JobStatus)} value={match.status}>
+                  {(["Lead", "Applied", "Interview", "Rejected", "Withdrawn", "Offer"] as JobStatus[]).map((status) => <option key={status}>{status}</option>)}
+                </select>
+                {saving ? <small>Syncing</small> : null}
+              </label>
+            ) : null}
+            {matchStale ? <button className="button compact quiet" disabled={rematching} onClick={() => void refreshMatch()} type="button"><RefreshCw className={rematching ? "spin" : ""} size={14} /> {rematching ? "Refreshing…" : "Refresh match"}</button> : null}
+          </div>
         </div>
       </div>
 
@@ -184,11 +183,64 @@ function EvidenceMap({ job, match, onReviewAdvice }: { job: TrackedJob; match: J
       .filter(([, value]) => value > 0)
       .sort((a, b) => b[1] - a[1])
       .slice(0, 5)
-      .map(([name, value]) => ({ name: titleCase(name), detail: `${Math.round(value)}% evidence coverage` }));
+      .map(([key, value]) => {
+        const score = Math.round(value);
+        const name = titleCase(key);
+        const tokens = evidenceTokens(key);
+        return {
+          id: `strength-${key}`,
+          kind: "strength" as const,
+          name,
+          score,
+          band: coverageBand(score),
+          tone: coverageTone(score),
+          reason: componentReason(name, score),
+          profileEvidence: matchingItems(match.matched_evidence, tokens),
+          roleEvidence: requirementEvidence(job, tokens)
+        };
+      });
     if (components.length) return components;
-    return job.requirements.all_skills.slice(0, 5).map((name) => ({ name, detail: "Supported by your profile" }));
-  }, [job.requirements.all_skills, match.component_scores]);
-  const gap = match.missing_blockers[0] || match.gaps[0] || "No material gap detected";
+    return job.requirements.all_skills.slice(0, 5).map((name, index) => ({
+      id: `strength-fallback-${index}`,
+      kind: "strength" as const,
+      name,
+      score: 50,
+      band: "Supported",
+      tone: "supported",
+      reason: "This skill appears in the role and has supporting profile evidence, but this scan did not return a component-level percentage.",
+      profileEvidence: matchingItems(match.matched_evidence, evidenceTokens(name)),
+      roleEvidence: requirementEvidence(job, evidenceTokens(name))
+    }));
+  }, [job, match.component_scores, match.matched_evidence]);
+  const gap = match.missing_blockers[0] || match.gaps[0] || null;
+  const gapIsCritical = Boolean(match.missing_blockers[0]);
+  const overallPoint = useMemo<EvidencePoint>(() => ({
+    id: "overall",
+    kind: "overall",
+    name: "Overall fit",
+    score: Math.round(match.score),
+    band: `${match.fit_level} fit`,
+    tone: match.fit_level.toLowerCase(),
+    reason: "The overall score combines requirement coverage, verified profile evidence, seniority, logistics, and any score caps caused by blockers.",
+    profileEvidence: match.matched_evidence.slice(0, 5),
+    roleEvidence: overallRoleEvidence(job)
+  }), [job, match.fit_level, match.matched_evidence, match.score]);
+  const gapPoint = useMemo<EvidencePoint | null>(() => gap ? ({
+    id: "gap",
+    kind: "gap",
+    name: gapIsCritical ? "Critical blocker" : "Gap to close",
+    band: gapIsCritical ? "Critical" : "Needs attention",
+    tone: "critical",
+    reason: gapIsCritical
+      ? "This is marked as a must-have requirement. Missing it can cap the total match score even when other areas are strong."
+      : "This area is missing or weak in the verified profile and is reducing the strength of the match.",
+    profileEvidence: [],
+    roleEvidence: [gap]
+  }) : null, [gap, gapIsCritical]);
+  const points = useMemo(() => [overallPoint, ...strengths, ...(gapPoint ? [gapPoint] : [])], [gapPoint, overallPoint, strengths]);
+  const [selectedId, setSelectedId] = useState("overall");
+  useEffect(() => setSelectedId("overall"), [job.id, match.id]);
+  const selectedPoint = points.find((point) => point.id === selectedId) ?? overallPoint;
 
   return (
     <>
@@ -196,23 +248,55 @@ function EvidenceMap({ job, match, onReviewAdvice }: { job: TrackedJob; match: J
         <section className="evidence-strengths" aria-labelledby="strengths-title">
           <h3 id="strengths-title">Evidence-backed strengths</h3>
           <ul>
-            {strengths.map((item) => <li key={item.name}><span><Check size={14} /></span><div><strong>{item.name}</strong><small>{item.detail}</small></div><em>Strong</em></li>)}
+            {strengths.map((item) => (
+              <li className={selectedId === item.id ? "selected" : ""} key={item.id}>
+                <button aria-controls="evidence-explainer" aria-pressed={selectedId === item.id} onClick={() => setSelectedId(item.id)} type="button">
+                  <span className={`evidence-status ${item.tone}`}><EvidenceStatusIcon score={item.score} /></span>
+                  <span><strong>{item.name}</strong><small>{item.score}% evidence coverage</small></span>
+                  <em className={item.tone}>{item.band}</em>
+                </button>
+              </li>
+            ))}
           </ul>
+          {gapPoint ? (
+            <button aria-controls="evidence-explainer" aria-pressed={selectedId === gapPoint.id} className={`evidence-gap-link${selectedId === gapPoint.id ? " selected" : ""}`} onClick={() => setSelectedId(gapPoint.id)} type="button">
+              <CircleAlert size={17} /><span><strong>{gapPoint.name}</strong><small>{gapPoint.band}</small></span>
+            </button>
+          ) : <div className="evidence-clear"><CheckCircle2 size={17} /><span>No critical gaps detected</span></div>}
         </section>
 
-        <div className="evidence-orbit" role="img" aria-label={`${strengths.length} matching evidence areas and one gap to close`}>
+        <div aria-label="Interactive match evidence map" className="evidence-orbit" role="group">
           <span className="orbit-ring ring-one" aria-hidden />
           <span className="orbit-ring ring-two" aria-hidden />
           <span className="orbit-ring ring-three" aria-hidden />
-          <span className="orbit-core" aria-hidden><Waypoints size={34} strokeWidth={1.7} /></span>
-          {strengths.map((item, index) => <span className={`orbit-node node-${index + 1}`} key={item.name} title={item.name}><Check size={15} strokeWidth={3} /></span>)}
-          <span className="orbit-node orbit-gap" title={gap}><CircleAlert size={17} /></span>
+          <button aria-controls="evidence-explainer" aria-label={`Overall fit: ${Math.round(match.score)}%. Show score explanation`} aria-pressed={selectedId === "overall"} className={`orbit-core${selectedId === "overall" ? " selected" : ""}`} onClick={() => setSelectedId("overall")} onFocus={() => setSelectedId("overall")} onMouseEnter={() => setSelectedId("overall")} type="button"><Waypoints size={34} strokeWidth={1.7} /></button>
+          {strengths.map((item, index) => (
+            <button
+              aria-controls="evidence-explainer"
+              aria-label={`${item.name}: ${item.score}% evidence coverage, ${item.band}. Show evidence`}
+              aria-pressed={selectedId === item.id}
+              className={`orbit-node node-${index + 1} ${item.tone}${selectedId === item.id ? " selected" : ""}`}
+              key={item.id}
+              onClick={() => setSelectedId(item.id)}
+              onFocus={() => setSelectedId(item.id)}
+              onMouseEnter={() => setSelectedId(item.id)}
+              type="button"
+            >
+              <EvidenceStatusIcon score={item.score} />
+            </button>
+          ))}
+          {gapPoint ? <button aria-controls="evidence-explainer" aria-label={`${gapPoint.name}. Show why this matters`} aria-pressed={selectedId === gapPoint.id} className={`orbit-node orbit-gap${selectedId === gapPoint.id ? " selected" : ""}`} onClick={() => setSelectedId(gapPoint.id)} onFocus={() => setSelectedId(gapPoint.id)} onMouseEnter={() => setSelectedId(gapPoint.id)} type="button"><CircleAlert size={17} /></button> : null}
+          <p className="orbit-instruction">Hover, focus, or select a point</p>
         </div>
 
-        <section className="matching-evidence" aria-labelledby="matching-title">
-          <h3 id="matching-title">Matching evidence</h3>
-          <ul>{match.matched_evidence.slice(0, 5).map((item) => <li key={item}><CheckCircle2 size={15} /><span>{item}</span></li>)}</ul>
-          <div className="evidence-gap"><strong><CircleAlert size={16} /> One gap to close</strong><span>{gap}</span></div>
+        <section aria-live="polite" className={`evidence-explainer ${selectedPoint.tone}`} id="evidence-explainer">
+          <header>
+            <div><span>{selectedPoint.kind === "gap" ? "Why this matters" : "Why this counts"}</span><h3>{selectedPoint.name}</h3></div>
+            {typeof selectedPoint.score === "number" ? <strong>{selectedPoint.score}%</strong> : <strong>{selectedPoint.band}</strong>}
+          </header>
+          <p>{selectedPoint.reason}</p>
+          <EvidenceSource title="Profile evidence" items={selectedPoint.profileEvidence} empty="No component-specific verified profile fact was returned for this point." />
+          <EvidenceSource title="Role evidence" items={selectedPoint.roleEvidence} empty="No requirement excerpt was returned for this point." />
         </section>
       </div>
       <section className="resume-action">
@@ -294,7 +378,7 @@ function AgentWorkflowTrace({ run }: { run: AgentRun | null }) {
   );
 }
 
-function ScoreOrb({ score, fit }: { score: number; fit: "Strong" | "Medium" | "Weak" }) {
+function ScoreSummary({ score, fit, confidence }: { score: number; fit: "Strong" | "Medium" | "Weak"; confidence: number }) {
   const rounded = Math.round(score);
   const ref = useRef<HTMLDivElement>(null);
   const [visible, setVisible] = useState(false);
@@ -305,7 +389,92 @@ function ScoreOrb({ score, fit }: { score: number; fit: "Strong" | "Medium" | "W
     observer.observe(node);
     return () => observer.disconnect();
   }, []);
-  return <div ref={ref} className={`score-orb ${fit.toLowerCase()}`} style={{ "--score": visible ? `${Math.max(0, Math.min(100, rounded))}%` : "0%" } as CSSProperties}><strong>{rounded}%</strong><span>{fit} fit</span><small>Fit confidence: {fit === "Strong" ? "High" : fit}</small></div>;
+  return <div aria-label={`${rounded}% match, ${fit} fit, ${Math.round(confidence * 100)}% confidence`} ref={ref} className={`score-summary ${fit.toLowerCase()}${visible ? " visible" : ""}`}><strong>{rounded}%</strong><span>{fit} fit</span><small>{Math.round(confidence * 100)}% confidence</small></div>;
+}
+
+type EvidencePoint = {
+  id: string;
+  kind: "overall" | "strength" | "gap";
+  name: string;
+  score?: number;
+  band: string;
+  tone: string;
+  reason: string;
+  profileEvidence: string[];
+  roleEvidence: string[];
+};
+
+function EvidenceSource({ title, items, empty }: { title: string; items: string[]; empty: string }) {
+  return <div className="evidence-source"><strong>{title}</strong>{items.length ? <ul>{items.slice(0, 3).map((item) => <li key={item}>{item}</li>)}</ul> : <p>{empty}</p>}</div>;
+}
+
+function EvidenceStatusIcon({ score }: { score: number }) {
+  if (score >= 75) return <Check size={15} strokeWidth={3} />;
+  if (score >= 50) return <CheckCircle2 size={15} />;
+  if (score >= 25) return <CircleDot size={15} />;
+  return <CircleAlert size={15} />;
+}
+
+function coverageBand(score: number) {
+  if (score >= 75) return "Strong";
+  if (score >= 50) return "Supported";
+  if (score >= 25) return "Partial";
+  return "Limited";
+}
+
+function coverageTone(score: number) {
+  if (score >= 75) return "strong";
+  if (score >= 50) return "supported";
+  if (score >= 25) return "partial";
+  return "limited";
+}
+
+function componentReason(name: string, score: number) {
+  if (score >= 75) return `${name} has strong verified coverage and actively supports the overall match.`;
+  if (score >= 50) return `${name} is supported, but some role evidence is not yet backed by an equally strong profile fact.`;
+  if (score >= 25) return `${name} has partial coverage. It helps the match, but the missing evidence limits its contribution.`;
+  return `${name} has limited verified coverage. It contributes little to the score and should not be treated as a strong match.`;
+}
+
+function evidenceTokens(value: string) {
+  const normalized = value.toLowerCase().replaceAll("-", "_");
+  const tokens = normalized.split(/[_\s/]+/).filter((token) => token.length > 2);
+  const aliases: Record<string, string[]> = {
+    education_language: ["education", "degree", "language", "english", "hebrew"],
+    experience_seniority: ["experience", "seniority", "career", "stage", "junior", "senior", "years"],
+    logistics: ["location", "remote", "hybrid", "onsite", "availability", "authorization", "work mode"],
+    must_have_skills: ["must-have", "required", "skill"],
+    preferred_skills: ["preferred", "skill"],
+    responsibility_domain: ["responsibility", "domain", "industry"],
+    relevant_evidence: ["project", "work", "repository", "experience", "evidence"]
+  };
+  for (const [key, values] of Object.entries(aliases)) {
+    if (normalized.includes(key)) tokens.push(...values);
+  }
+  return [...new Set(tokens)];
+}
+
+function matchingItems(items: string[], tokens: string[]) {
+  return items.filter((item) => {
+    const normalized = item.toLowerCase();
+    return tokens.some((token) => normalized.includes(token));
+  });
+}
+
+function requirementEvidence(job: TrackedJob, tokens: string[]) {
+  const matches = Object.entries(job.requirements.evidence_by_requirement)
+    .filter(([key, value]) => {
+      const normalized = `${key} ${value}`.toLowerCase();
+      return tokens.some((token) => normalized.includes(token));
+    })
+    .map(([, value]) => value);
+  return [...new Set(matches)].slice(0, 3);
+}
+
+function overallRoleEvidence(job: TrackedJob) {
+  const evidence = Object.values(job.requirements.evidence_by_requirement).filter(Boolean);
+  if (evidence.length) return [...new Set(evidence)].slice(0, 3);
+  return job.requirements.summary ? [job.requirements.summary] : [];
 }
 
 function Detail({ label, value, icon }: { label: string; value: string; icon?: ReactNode }) {
