@@ -1,7 +1,21 @@
 import type { Metadata } from "next";
+import { Manrope, Newsreader } from "next/font/google";
 import type { ReactNode } from "react";
 import { AppDataProvider } from "@/components/AppDataProvider";
 import "./globals.css";
+
+const manrope = Manrope({
+  subsets: ["latin"],
+  variable: "--font-sans",
+  display: "swap"
+});
+
+const newsreader = Newsreader({
+  subsets: ["latin"],
+  variable: "--font-editorial",
+  display: "swap",
+  style: ["normal", "italic"]
+});
 
 export const metadata: Metadata = {
   title: "CareerFit — Know where you fit",
@@ -11,7 +25,7 @@ export const metadata: Metadata = {
 export default function RootLayout({ children }: { children: ReactNode }) {
   return (
     <html data-scroll-behavior="smooth" lang="en">
-      <body><AppDataProvider>{children}</AppDataProvider></body>
+      <body className={`${manrope.variable} ${newsreader.variable}`}><AppDataProvider>{children}</AppDataProvider></body>
     </html>
   );
 }

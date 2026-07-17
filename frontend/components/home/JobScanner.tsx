@@ -1,7 +1,7 @@
 "use client";
 
-import { useEffect, useState, type Dispatch, type FormEvent, type SetStateAction } from "react";
-import { ArrowUpRight, ChevronDown, Radar, X } from "lucide-react";
+import { useEffect, useState, type CSSProperties, type Dispatch, type FormEvent, type SetStateAction } from "react";
+import { ArrowRight, Check, ChevronDown, Link2, Radar, X } from "lucide-react";
 import type { JobCreate } from "@/lib/api";
 
 export function JobScanner({
@@ -23,23 +23,22 @@ export function JobScanner({
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
   onCancel: () => void;
 }) {
+  const scanComplete = scanProgress?.status === "succeeded";
+  const flowProgress = submitting ? scanProgress?.progress ?? 4 : scanComplete ? 100 : 0;
   return (
     <form aria-busy={submitting} className={`panel job-form${submitting ? " is-scanning" : ""}`} onSubmit={onSubmit}>
-      <div className="section-heading">
-        <div>
-          <span className="section-kicker">New opportunity</span>
-          <h2>Map a role to your evidence profile</h2>
-          <p>Start with the job link. Add the description only when the career site blocks extraction.</p>
-        </div>
-        <span className="section-orbit"><ArrowUpRight size={20} aria-hidden /></span>
+      <div className="scan-heading">
+        <span><Radar size={18} aria-hidden /></span>
+        <div><h2>Scan a role</h2><p>Compare a real opportunity with your verified evidence.</p></div>
       </div>
       <div className="scan-entry-row">
-        <label className="field scan-url-field">
-          <span>Job URL</span>
+        <label className="scan-url-field">
+          <span className="sr-only">Job URL</span>
+          <Link2 size={19} aria-hidden />
           <input
             autoComplete="url"
             onChange={(event) => setForm((current) => ({ ...current, source_url: event.target.value }))}
-            placeholder="https://company.com/careers/job/..."
+            placeholder="Paste a job URL"
             type="url"
             value={form.source_url}
           />
@@ -49,11 +48,25 @@ export function JobScanner({
           disabled={submitting || !profileReady || (!form.source_url.trim() && !form.description_text.trim())}
           type="submit"
         >
-          {submitting ? <><span className="button-spinner" /> Analyzing</> : <><Radar size={16} /> Save and match</>}
+          {submitting ? <><span className="button-spinner" /> Analyzing</> : <>Analyze fit <ArrowRight size={17} /></>}
         </button>
       </div>
+      <div className="scan-flow" style={{ "--scan-flow-progress": `${flowProgress}%` } as CSSProperties}>
+        {[
+          { label: "Read role", threshold: 10 },
+          { label: "Compare evidence", threshold: 52 },
+          { label: "Build action plan", threshold: 88 }
+        ].map((step, index) => {
+          const complete = flowProgress >= step.threshold;
+          return (
+            <span className={complete ? "complete" : submitting && index === 0 ? "active" : ""} key={step.label}>
+              <i>{complete ? <Check size={12} strokeWidth={3} /> : index + 1}</i>{step.label}
+            </span>
+          );
+        })}
+      </div>
       <details className="scan-options" open={Boolean(form.description_text || form.company || form.role)}>
-        <summary><ChevronDown size={15} /> Add company, role, or a description fallback</summary>
+        <summary><ChevronDown size={15} /> Add a description fallback</summary>
         <div className="scan-options-body">
           <div className="form-grid">
             <label className="field"><span>Company (optional)</span><input onChange={(event) => setForm((current) => ({ ...current, company: event.target.value }))} value={form.company} /></label>

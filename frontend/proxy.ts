@@ -14,6 +14,9 @@ function secure(response: NextResponse) {
 
 export async function proxy(request: NextRequest) {
   const pathname = request.nextUrl.pathname;
+  if (process.env.NEXT_PUBLIC_DESIGN_PREVIEW === "1" && pathname === "/") {
+    return secure(NextResponse.next());
+  }
   if (
     PUBLIC_PATHS.some((path) => pathname === path || pathname.startsWith(`${path}/`)) ||
     pathname.startsWith("/_next/")

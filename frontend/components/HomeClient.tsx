@@ -217,24 +217,30 @@ export function HomeClient() {
 
   return (
     <>
-      <header className="page-heading home-hero">
-        <div><span className="eyebrow"><Sparkles size={14} /> Career signal radar</span><h1>Scan the role.<br /><em>Trust the evidence.</em></h1><p>CareerFit reads an opportunity, compares it to your verified profile, and shows the exact resume changes that improve your fit.</p></div>
-        <button className="button quiet" onClick={() => void refreshAll()} type="button"><RefreshCw size={16} /> Refresh</button>
-      </header>
+      <section className="workbench-intro">
+        <header className="page-heading home-hero">
+          <div>
+            <span className="eyebrow"><Sparkles size={14} /> Your career signal, clarified</span>
+            <h1>Know why a role fits.<br /><em>Know what to improve.</em></h1>
+            <p>Paste a job URL, compare it against your verified profile, and focus on the roles that are the best fit.</p>
+          </div>
+          <button aria-label="Refresh workspace" className="button quiet hero-refresh" onClick={() => void refreshAll()} title="Refresh workspace" type="button"><RefreshCw size={16} /> Refresh</button>
+        </header>
+
+        <JobScanner
+          form={form}
+          onCancel={() => void cancelActiveScan()}
+          onSubmit={submit}
+          profileReady={profileReady}
+          scanProgress={scan ? { status: scan.status, currentStep: scan.current_step, progress: scan.progress, traceId: scan.trace_id } : null}
+          scanStartedAt={scanStartedAt}
+          setForm={setForm}
+          submitting={submitting}
+        />
+      </section>
       {error || dataError || searchError ? <div className="notice error action-notice"><span>{error || dataError || searchError}</span>{failedScan ? <button className="button compact" onClick={() => void runScan(failedScan)} type="button">Retry safely</button> : null}</div> : null}
       {message ? <div className="notice success">{message}</div> : null}
       {profileConfirmedIncomplete ? <section className="panel warning-panel"><FileText size={22} aria-hidden /><div><h2>Profile is not ready</h2><p>Upload one CV and run profile analysis before job matching. GitHub and LinkedIn are optional.</p></div><a className="button primary" href="/profile">Complete profile</a></section> : null}
-
-      <JobScanner
-        form={form}
-        onCancel={() => void cancelActiveScan()}
-        onSubmit={submit}
-        profileReady={profileReady}
-        scanProgress={scan ? { status: scan.status, currentStep: scan.current_step, progress: scan.progress, traceId: scan.trace_id } : null}
-        scanStartedAt={scanStartedAt}
-        setForm={setForm}
-        submitting={submitting}
-      />
 
       {profile?.recommendations_enabled ? (
         <RecommendedMatches
@@ -250,17 +256,11 @@ export function HomeClient() {
         />
       ) : null}
 
-      <section className="stats signal-stats" aria-label="Job search overview">
-        <div><span>Opportunities mapped</span><strong>{stats.scanned}</strong><small>Cached summaries for quick switching</small></div>
-        <div><span>Strong signals</span><strong>{stats.strong}</strong><small>Roles worth prioritizing</small></div>
-        <div><span>In motion</span><strong>{stats.applied}</strong><small>Applications beyond lead stage</small></div>
-      </section>
-
       <section className="opportunity-workbench">
         <div className="panel flush opportunity-library">
           <div className="list-header">
-            <div><span className="section-kicker">Opportunity radar</span><h2>Your saved roles</h2><p>Search summaries instantly; longer searches query your saved database so old roles are still findable.</p></div>
-            <form className="search-box" onSubmit={(event) => event.preventDefault()}><Search size={16} aria-hidden /><input onChange={(event) => setQuery(event.target.value)} placeholder="Search company, role, skill..." value={query} />{searchLoading ? <span className="search-spinner" aria-label="Searching saved jobs" /> : null}</form>
+            <div><h2>Saved opportunities</h2><p>{jobs.length} roles · {stats.strong} strong signals</p></div>
+            <form className="search-box" onSubmit={(event) => event.preventDefault()}><Search size={15} aria-hidden /><input aria-label="Search saved opportunities" onChange={(event) => setQuery(event.target.value)} placeholder="Search roles" value={query} />{searchLoading ? <span className="search-spinner" aria-label="Searching saved jobs" /> : null}</form>
           </div>
           {jobsLoading && !jobs.length ? <JobLibrarySkeleton /> : visibleJobs.length ? (
             <div className="job-list compact-list">{visibleJobs.map((job) => <JobSummaryCard active={job.id === selectedJobId} job={job} key={job.id} onPreview={() => void fetchJobDetail(job.id)} onSelect={() => setSelectedJobId(job.id)} />)}</div>
@@ -268,6 +268,12 @@ export function HomeClient() {
           {jobsNextCursor && !query.trim() ? <div className="load-more-row"><button className="button quiet" disabled={jobsLoading} onClick={() => void loadMoreJobs()} type="button">{jobsLoading ? "Loading…" : "Load more roles"}</button></div> : null}
         </div>
         <OpportunityInspector detailError={detailError} job={selectedJob} loading={detailsLoading} onJobChanged={updateCachedJob} profileUpdatedAt={profile?.updated_at ?? null} summary={selectedSummary} />
+      </section>
+
+      <section className="stats signal-stats" aria-label="Job search overview">
+        <div><span>Opportunities mapped</span><strong>{stats.scanned}</strong><small>Saved roles ready to compare</small></div>
+        <div><span>Strong signals</span><strong>{stats.strong}</strong><small>Roles worth prioritizing</small></div>
+        <div><span>In motion</span><strong>{stats.applied}</strong><small>Applications beyond lead stage</small></div>
       </section>
     </>
   );
