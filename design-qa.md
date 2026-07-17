@@ -48,7 +48,7 @@ Date: 2026-07-17
 - [x] Frontend typecheck (`npm run typecheck`)
 - [x] Frontend production build (`npm run build`)
 - [x] Commit contains only the intended frontend and documentation files
-- [ ] Production deployment returns successfully
-- [ ] Deployed URL smoke-tested
+- [x] Production deployment returns successfully (`https://career-fit-ai-sigma.vercel.app`)
+- [x] Deployed URL smoke-tested: HTTP 200, production DOM complete, no horizontal overflow, and no browser warnings/errors.
 
-Final status: pending release gates.
+Final status: passed.
