@@ -221,7 +221,7 @@ export function AppDataProvider({ children }: { children: ReactNode }) {
       }
     }
 
-    if (pathname === "/onboarding" || pathname === "/profile") {
+    if (pathname === "/onboarding" || pathname === "/profile" || pathname === "/discover") {
       void refreshProfile().catch((error) => {
         setDataError(error instanceof Error ? error.message : "Could not load your profile.");
       });

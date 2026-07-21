@@ -7,18 +7,15 @@ import { JobLibrarySkeleton } from "@/components/home/JobLibrarySkeleton";
 import { JobScanner } from "@/components/home/JobScanner";
 import { JobSummaryCard } from "@/components/home/JobSummaryCard";
 import { OpportunityInspector } from "@/components/home/OpportunityInspector";
-import { RecommendedMatches } from "@/components/home/RecommendedMatches";
 import {
   cancelJobScan,
   createJobScan,
   getJob,
   getJobScan,
   getJobSummaries,
-  getRecommendations,
   processJobScan,
   toJobSummary,
   type JobCreate,
-  type JobRecommendation,
   type JobScan,
   type TrackedJob,
   type TrackedJobSummary
@@ -43,8 +40,6 @@ export function HomeClient() {
   const [searchResults, setSearchResults] = useState<TrackedJobSummary[] | null>(null);
   const [searchLoading, setSearchLoading] = useState(false);
   const [searchError, setSearchError] = useState("");
-  const [recommendations, setRecommendations] = useState<JobRecommendation[]>([]);
-  const [recommendationsLoading, setRecommendationsLoading] = useState(false);
   const pendingDetailIds = useRef(new Set<number>());
   const activeScanId = useRef<number | null>(null);
 
@@ -96,20 +91,6 @@ export function HomeClient() {
     }, 260);
     return () => { cancelled = true; window.clearTimeout(timer); };
   }, [deferredQuery]);
-
-  useEffect(() => {
-    if (!profile?.recommendations_enabled) {
-      setRecommendations([]);
-      return;
-    }
-    let active = true;
-    setRecommendationsLoading(true);
-    void getRecommendations()
-      .then((items) => { if (active) setRecommendations(items); })
-      .catch(() => { if (active) setRecommendations([]); })
-      .finally(() => { if (active) setRecommendationsLoading(false); });
-    return () => { active = false; };
-  }, [profile?.recommendations_enabled]);
 
   const fetchJobDetail = useCallback(async (jobId: number, showLoading = false) => {
     if (jobDetailsById[jobId] || pendingDetailIds.current.has(jobId)) return;
@@ -241,20 +222,6 @@ export function HomeClient() {
       {error || dataError || searchError ? <div className="notice error action-notice"><span>{error || dataError || searchError}</span>{failedScan ? <button className="button compact" onClick={() => void runScan(failedScan)} type="button">Retry safely</button> : null}</div> : null}
       {message ? <div className="notice success">{message}</div> : null}
       {profileConfirmedIncomplete ? <section className="panel warning-panel"><FileText size={22} aria-hidden /><div><h2>Profile is not ready</h2><p>Upload one CV and run profile analysis before job matching. GitHub and LinkedIn are optional.</p></div><a className="button primary" href="/profile">Complete profile</a></section> : null}
-
-      {profile?.recommendations_enabled ? (
-        <RecommendedMatches
-          items={recommendations}
-          loading={recommendationsLoading}
-          onItemsChange={setRecommendations}
-          onSaved={(job) => {
-            const summary = toJobSummary(job);
-            setJobs((current) => [summary, ...current.filter((item) => item.id !== summary.id)]);
-            setJobDetailsById((current) => ({ ...current, [job.id]: job }));
-            setSelectedJobId(job.id);
-          }}
-        />
-      ) : null}
 
       <section className="opportunity-workbench">
         <div className="panel flush opportunity-library">

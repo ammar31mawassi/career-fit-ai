@@ -78,6 +78,7 @@ from ..services.profile import (
 from ..services.recommendations import (
     list_recommendations,
     process_one_queued_recommendation,
+    refresh_user_recommendations,
     update_recommendation,
 )
 from ..services.notifications import (
@@ -353,6 +354,14 @@ def recommendations(
     session: Session = Depends(get_session),
 ) -> list[JobRecommendationOut]:
     return list_recommendations(session, user_id, limit)
+
+
+@router.post("/recommendations/refresh", response_model=list[JobRecommendationOut])
+def refresh_recommendations(
+    user_id: UUID = Depends(current_user_id),
+    session: Session = Depends(get_session),
+) -> list[JobRecommendationOut]:
+    return refresh_user_recommendations(session, user_id)
 
 
 @router.patch("/recommendations/{recommendation_id}", response_model=JobRecommendationActionOut)

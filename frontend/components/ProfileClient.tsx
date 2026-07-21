@@ -1,9 +1,8 @@
 "use client";
 
 import { useEffect, useMemo, useState, type FormEvent } from "react";
-import { FileCheck2, FileText, Github, Linkedin, Mail, RadioTower, RefreshCw, Save, ScanText, Sparkles, UploadCloud } from "lucide-react";
+import { FileCheck2, FileText, Github, Linkedin, RefreshCw, Save, ScanText, Sparkles, UploadCloud } from "lucide-react";
 import { useAppData } from "@/components/AppDataProvider";
-import { CareerInterestPicker } from "@/components/CareerInterestPicker";
 import { LongTaskProgress } from "@/components/LongTaskProgress";
 import { ClarificationPanel } from "@/components/profile/ClarificationPanel";
 import { AccountControls } from "@/components/profile/AccountControls";
@@ -15,11 +14,8 @@ import {
   answerProfileQuestion,
   bulkUpdateProfileFacts,
   formatDate,
-  getNotificationPreference,
   saveBrowserOcr,
   saveProfileSources,
-  saveProfilePreferences,
-  saveNotificationPreference,
   updateProfileFact,
   uploadCv,
   uploadLinkedInPdf,
@@ -31,15 +27,9 @@ export function ProfileClient() {
   const [githubUrl, setGithubUrl] = useState("");
   const [linkedinText, setLinkedinText] = useState("");
   const [manualInfo, setManualInfo] = useState("");
-  const [careerInterests, setCareerInterests] = useState<string[]>([]);
-  const [recommendationsEnabled, setRecommendationsEnabled] = useState(false);
-  const [emailAlertsEligible, setEmailAlertsEligible] = useState(false);
-  const [emailDeliveryAvailable, setEmailDeliveryAvailable] = useState(false);
-  const [emailAlertsEnabled, setEmailAlertsEnabled] = useState(false);
   const [cvFile, setCvFile] = useState<File | null>(null);
   const [linkedinFile, setLinkedinFile] = useState<File | null>(null);
   const [saving, setSaving] = useState(false);
-  const [interestsSyncing, setInterestsSyncing] = useState(false);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const [task, setTask] = useState<{ title: string; detail: string; progress: number; activeStep: number } | null>(null);
@@ -53,28 +43,7 @@ export function ProfileClient() {
     setGithubUrl(profile.github_url);
     setLinkedinText(profile.linkedin_text);
     setManualInfo(profile.manual_info);
-    setCareerInterests(profile.career_interests);
-    setRecommendationsEnabled(profile.recommendations_enabled);
-  }, [profile?.id, profile?.github_url, profile?.linkedin_text, profile?.manual_info, profile?.career_interests, profile?.recommendations_enabled]);
-
-  useEffect(() => {
-    if (!profile?.id) return;
-    let active = true;
-    void getNotificationPreference()
-      .then((preference) => {
-        if (!active) return;
-        setEmailAlertsEligible(preference.eligible);
-        setEmailDeliveryAvailable(preference.delivery_available);
-        setEmailAlertsEnabled(preference.email_enabled);
-      })
-      .catch(() => {
-        if (!active) return;
-        setEmailAlertsEligible(false);
-        setEmailDeliveryAvailable(false);
-        setEmailAlertsEnabled(false);
-      });
-    return () => { active = false; };
-  }, [profile?.id]);
+  }, [profile?.id, profile?.github_url, profile?.linkedin_text, profile?.manual_info]);
 
   const openQuestions = useMemo(
     () => (profile?.questions ?? []).filter((question) => question.status === "open"),
@@ -270,31 +239,6 @@ export function ProfileClient() {
     }
   }
 
-  async function saveInterests() {
-    const previousInterests = profile?.career_interests ?? [];
-    const previousRecommendationSetting = profile?.recommendations_enabled ?? false;
-    const previousEmailSetting = emailAlertsEnabled;
-    setInterestsSyncing(true);
-    setError("");
-    setMessage("Career interests updated.");
-    setProfile((current) => current ? { ...current, career_interests: careerInterests, recommendations_enabled: recommendationsEnabled } : current);
-    try {
-      const updated = await saveProfilePreferences(careerInterests, recommendationsEnabled);
-      setProfile(updated);
-      if (emailAlertsEligible) {
-        const preference = await saveNotificationPreference(recommendationsEnabled && emailAlertsEnabled);
-        setEmailAlertsEnabled(preference.email_enabled);
-      }
-    } catch (err) {
-      setProfile((current) => current ? { ...current, career_interests: previousInterests, recommendations_enabled: previousRecommendationSetting } : current);
-      setError(err instanceof Error ? `Interest changes were rolled back: ${err.message}` : "Interest changes were rolled back.");
-      setEmailAlertsEnabled(previousEmailSetting);
-      setMessage("");
-    } finally {
-      setInterestsSyncing(false);
-    }
-  }
-
   return (
     <>
       {task ? (
@@ -398,33 +342,6 @@ export function ProfileClient() {
           </button>
         </div>
       </form>
-
-      <section className="panel profile-interests-panel">
-        <div className="section-heading">
-          <div>
-            <span className="section-kicker">Career direction</span>
-            <h2>Fields you want to explore</h2>
-            <p>These preferences guide future discovery and filtering. They do not inflate your qualification score.</p>
-          </div>
-          <span className="review-count">{careerInterests.length} selected</span>
-        </div>
-        <CareerInterestPicker disabled={saving} onChange={setCareerInterests} selected={careerInterests} />
-        <label className={`discovery-consent ${recommendationsEnabled ? "enabled" : ""}`}>
-          <input checked={recommendationsEnabled} onChange={(event) => { const enabled = event.target.checked; setRecommendationsEnabled(enabled); if (!enabled) setEmailAlertsEnabled(false); }} type="checkbox" />
-          <span className="discovery-consent-icon"><RadioTower size={18} /></span>
-          <span><strong>Recommend new matching roles</strong><small>CareerFit may score relevant shared job descriptions against your private profile. Israel-beta sources can appear from 65%. Other users never see your profile, evidence, or score.</small></span>
-        </label>
-        {emailAlertsEligible ? (
-          <label className={`discovery-consent email-consent ${emailAlertsEnabled ? "enabled" : ""}`}>
-            <input checked={emailAlertsEnabled} disabled={!recommendationsEnabled || !emailDeliveryAvailable} onChange={(event) => setEmailAlertsEnabled(event.target.checked)} type="checkbox" />
-            <span className="discovery-consent-icon"><Mail size={18} /></span>
-            <span><strong>Email me strong new Israel-market matches</strong><small>{emailDeliveryAvailable ? "Only high-confidence roles scoring 76% or more. This is a separate opt-in, and every email includes one-click unsubscribe." : "Email delivery is prepared but waiting for the verified sender configuration."}</small></span>
-          </label>
-        ) : null}
-        <div className="form-actions">
-          <button className="button primary" disabled={interestsSyncing} onClick={() => void saveInterests()} type="button"><Save size={16} /> {interestsSyncing ? "Saved · syncing" : "Save direction & discovery"}</button>
-        </div>
-      </section>
 
       <AccountControls />
     </>

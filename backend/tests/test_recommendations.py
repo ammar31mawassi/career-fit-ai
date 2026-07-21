@@ -17,7 +17,12 @@ from app.models import (
 )
 from app.services.job_research import classify_requirements
 from app.services.job_routing import route_job_fields
-from app.services.recommendations import catalog_and_enqueue_job, generate_shadow_recommendations
+from app.services.recommendations import (
+    catalog_and_enqueue_job,
+    generate_shadow_recommendations,
+    refresh_user_recommendations,
+    update_recommendation,
+)
 
 
 SCANNER = UUID("00000000-0000-0000-0000-000000000201")
@@ -258,3 +263,86 @@ def test_goozali_suggestions_use_65_floor_and_explicit_beta_membership(monkeypat
     assert recommendations[0].user_id == RELEVANT
     assert recommendations[0].score == 68
     assert recommendations[0].status == "available"
+
+
+def test_discovery_refresh_unifies_community_and_goozali_matches(monkeypatch):
+    engine = _engine()
+    SQLModel.metadata.create_all(engine)
+    monkeypatch.setattr("app.services.recommendations.get_match_scorer", lambda: _StrongScorer())
+
+    with Session(engine) as session:
+        _profile(session, RELEVANT, "Software Engineering")
+        session.add(JobDiscoveryBetaMember(user_id=RELEVANT, market_code="IL", active=True))
+        requirements = classify_requirements("Requirements: Python and SQL.", "Backend Developer")
+        for source_name in ("community", "goozali"):
+            session.add(
+                SharedJobCatalog(
+                    content_hash=f"{source_name}-refresh-job",
+                    source_name=source_name,
+                    external_id=f"{source_name}-refresh" if source_name == "goozali" else "",
+                    company="Example",
+                    role=f"{source_name.title()} Backend Developer",
+                    career_fields_json='["Software Engineering"]',
+                    requirements_json=requirements.to_json(),
+                    source_confidence=0.9,
+                )
+            )
+        session.commit()
+
+        recommendations = refresh_user_recommendations(session, RELEVANT)
+
+    assert {item.source_name for item in recommendations} == {"community", "goozali"}
+
+
+def test_discovery_refresh_keeps_goozali_limited_to_beta_members(monkeypatch):
+    engine = _engine()
+    SQLModel.metadata.create_all(engine)
+    monkeypatch.setattr("app.services.recommendations.get_match_scorer", lambda: _StrongScorer())
+
+    with Session(engine) as session:
+        _profile(session, RELEVANT, "Software Engineering")
+        requirements = classify_requirements("Requirements: Python and SQL.", "Backend Developer")
+        session.add(
+            SharedJobCatalog(
+                content_hash="goozali-non-beta-refresh",
+                source_name="goozali",
+                external_id="goozali-non-beta-refresh",
+                role="Backend Developer",
+                career_fields_json='["Software Engineering"]',
+                requirements_json=requirements.to_json(),
+                source_confidence=0.9,
+            )
+        )
+        session.commit()
+
+        recommendations = refresh_user_recommendations(session, RELEVANT)
+
+    assert recommendations == []
+
+
+def test_discovery_refresh_does_not_resurface_a_dismissed_role(monkeypatch):
+    engine = _engine()
+    SQLModel.metadata.create_all(engine)
+    monkeypatch.setattr("app.services.recommendations.get_match_scorer", lambda: _StrongScorer())
+
+    with Session(engine) as session:
+        _profile(session, RELEVANT, "Software Engineering")
+        requirements = classify_requirements("Requirements: Python and SQL.", "Backend Developer")
+        session.add(
+            SharedJobCatalog(
+                content_hash="dismissed-refresh-job",
+                role="Backend Developer",
+                career_fields_json='["Software Engineering"]',
+                requirements_json=requirements.to_json(),
+                source_confidence=0.9,
+            )
+        )
+        session.commit()
+        first = refresh_user_recommendations(session, RELEVANT)
+        update_recommendation(session, RELEVANT, first[0].id, "dismissed")
+
+        second = refresh_user_recommendations(session, RELEVANT)
+        persisted = session.exec(select(JobRecommendation)).one()
+
+    assert second == []
+    assert persisted.status == "dismissed"

@@ -3,10 +3,11 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useState, type CSSProperties, type ReactNode } from "react";
-import { BriefcaseBusiness, LogOut, ShieldCheck, UserRound, Waypoints } from "lucide-react";
+import { BriefcaseBusiness, Compass, LogOut, ShieldCheck, UserRound, Waypoints } from "lucide-react";
 
 const nav = [
   { href: "/", label: "Opportunities", icon: BriefcaseBusiness },
+  { href: "/discover", label: "Discover", icon: Compass },
   { href: "/profile", label: "My profile", icon: UserRound }
 ];
 

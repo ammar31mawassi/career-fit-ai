@@ -25,6 +25,7 @@ from .scoring import get_match_scorer
 
 QUEUE_NAME = "careerfit_job_recommendations"
 MAX_CANDIDATES_PER_JOB = 250
+MAX_DISCOVERY_BACKFILL_JOBS = 40
 SHADOW_SCORE_THRESHOLD = 76.0
 SHADOW_CONFIDENCE_THRESHOLD = 0.55
 GOOZALI_SUGGESTION_THRESHOLD = 65.0
@@ -115,63 +116,21 @@ def generate_shadow_recommendations(
         profiles = list(session.exec(statement).all())
         run.candidate_count = len(profiles)
         requirements = requirements_from_json(catalog.requirements_json)
+        scorer = get_match_scorer()
         for profile in profiles:
-            already_saved = session.exec(
-                select(Job.id).where(Job.user_id == profile.user_id, Job.content_hash == catalog.content_hash)
-            ).first()
-            if already_saved:
-                continue
             snapshot = candidate_snapshot(session, profile)
-            if not _cheap_eligible(snapshot, requirements, catalog.location):
-                continue
-            result = get_match_scorer().score(
+            scored, is_strong = _score_catalog_for_profile(
+                session,
+                catalog,
+                profile,
                 snapshot,
-                catalog.company,
-                catalog.role,
                 requirements,
-                catalog.source_confidence,
+                fields,
+                scorer,
             )
-            run.scored_count += 1
-            is_strong = _is_available_recommendation(catalog.source_name, result)
-            recommendation = session.exec(
-                select(JobRecommendation).where(
-                    JobRecommendation.user_id == profile.user_id,
-                    JobRecommendation.catalog_job_id == catalog_job_id,
-                    JobRecommendation.model_version == result.model_version,
-                )
-            ).first()
-            if recommendation is None:
-                recommendation = JobRecommendation(
-                    user_id=profile.user_id,
-                    catalog_job_id=catalog_job_id,
-                    model_version=result.model_version,
-                )
-            recommendation.score = result.score
-            recommendation.fit_level = result.fit_level
-            recommendation.confidence = result.confidence
-            recommendation.career_fields_json = json.dumps(fields)
-            recommendation.reasons_json = json.dumps(result.matched_evidence[:4])
-            recommendation.match_snapshot_json = json.dumps(
-                {
-                    "matched_evidence": result.matched_evidence,
-                    "gaps": result.gaps,
-                    "component_scores": result.component_scores,
-                    "projects": result.projects,
-                    "skill_order": result.skill_order,
-                    "about_text": result.about_text,
-                },
-                sort_keys=True,
-            )
-            recommendation.status = "available" if is_strong else "shadow_observation"
-            recommendation.updated_at = _now()
-            session.add(recommendation)
-            session.flush()
+            run.scored_count += int(scored)
             if is_strong:
                 run.strong_count += 1
-            if catalog.source_name == "goozali" and _is_email_eligible(result):
-                from .notifications import queue_recommendation_email
-
-                queue_recommendation_email(session, recommendation)
         run.status = "completed"
         run.completed_at = _now()
         session.add(run)
@@ -246,6 +205,72 @@ def list_recommendations(session: Session, user_id: UUID, limit: int = 12) -> li
     ]
 
 
+def refresh_user_recommendations(
+    session: Session,
+    user_id: UUID,
+    limit: int = MAX_DISCOVERY_BACKFILL_JOBS,
+) -> list[JobRecommendationOut]:
+    """Score recent catalog jobs for a user who just enabled or updated discovery."""
+    profile = session.exec(select(Profile).where(Profile.user_id == user_id)).first()
+    if (
+        profile is None
+        or profile.status != "ready"
+        or not profile.onboarding_completed
+        or not profile.recommendations_enabled
+    ):
+        return []
+    interests = {
+        value
+        for value in session.exec(
+            select(ProfileInterest.interest).where(ProfileInterest.profile_id == profile.id)
+        ).all()
+    }
+    if not interests:
+        return []
+    beta_member = session.exec(
+        select(JobDiscoveryBetaMember.user_id).where(
+            JobDiscoveryBetaMember.user_id == user_id,
+            JobDiscoveryBetaMember.market_code == "IL",
+            JobDiscoveryBetaMember.active.is_(True),
+        )
+    ).first() is not None
+    catalogs = list(
+        session.exec(
+            select(SharedJobCatalog)
+            .where(SharedJobCatalog.active.is_(True))
+            .order_by(SharedJobCatalog.updated_at.desc())
+            .limit(max(1, min(limit, MAX_DISCOVERY_BACKFILL_JOBS)) * 4)
+        ).all()
+    )
+    snapshot = candidate_snapshot(session, profile)
+    scorer = get_match_scorer()
+    scored = 0
+    for catalog in catalogs:
+        fields = _json_list(catalog.career_fields_json)
+        if not interests.intersection(fields):
+            continue
+        if catalog.source_name == "goozali" and not beta_member:
+            continue
+        if catalog.first_seen_by == user_id:
+            continue
+        requirements = requirements_from_json(catalog.requirements_json)
+        was_scored, _ = _score_catalog_for_profile(
+            session,
+            catalog,
+            profile,
+            snapshot,
+            requirements,
+            fields,
+            scorer,
+            queue_email=False,
+        )
+        scored += int(was_scored)
+        if scored >= limit:
+            break
+    session.commit()
+    return list_recommendations(session, user_id, limit=30)
+
+
 def update_recommendation(
     session: Session,
     user_id: UUID,
@@ -317,6 +342,75 @@ def enqueue_catalog_job(
         )
     )
     session.flush()
+
+
+def _score_catalog_for_profile(
+    session: Session,
+    catalog: SharedJobCatalog,
+    profile: Profile,
+    snapshot,
+    requirements,
+    fields: list[str],
+    scorer,
+    *,
+    queue_email: bool = True,
+) -> tuple[bool, bool]:
+    already_saved = session.exec(
+        select(Job.id).where(
+            Job.user_id == profile.user_id,
+            Job.content_hash == catalog.content_hash,
+        )
+    ).first()
+    if already_saved or not _cheap_eligible(snapshot, requirements, catalog.location):
+        return False, False
+    result = scorer.score(
+        snapshot,
+        catalog.company,
+        catalog.role,
+        requirements,
+        catalog.source_confidence,
+    )
+    is_available = _is_available_recommendation(catalog.source_name, result)
+    recommendation = session.exec(
+        select(JobRecommendation).where(
+            JobRecommendation.user_id == profile.user_id,
+            JobRecommendation.catalog_job_id == (catalog.id or 0),
+            JobRecommendation.model_version == result.model_version,
+        )
+    ).first()
+    if recommendation is None:
+        recommendation = JobRecommendation(
+            user_id=profile.user_id,
+            catalog_job_id=catalog.id or 0,
+            model_version=result.model_version,
+        )
+    terminal_status = recommendation.status in {"dismissed", "saved"}
+    recommendation.score = result.score
+    recommendation.fit_level = result.fit_level
+    recommendation.confidence = result.confidence
+    recommendation.career_fields_json = json.dumps(fields)
+    recommendation.reasons_json = json.dumps(result.matched_evidence[:4])
+    recommendation.match_snapshot_json = json.dumps(
+        {
+            "matched_evidence": result.matched_evidence,
+            "gaps": result.gaps,
+            "component_scores": result.component_scores,
+            "projects": result.projects,
+            "skill_order": result.skill_order,
+            "about_text": result.about_text,
+        },
+        sort_keys=True,
+    )
+    if not terminal_status:
+        recommendation.status = "available" if is_available else "shadow_observation"
+    recommendation.updated_at = _now()
+    session.add(recommendation)
+    session.flush()
+    if queue_email and catalog.source_name == "goozali" and _is_email_eligible(result):
+        from .notifications import queue_recommendation_email
+
+        queue_recommendation_email(session, recommendation)
+    return True, is_available
 
 
 def _json_list(value: str) -> list[str]:

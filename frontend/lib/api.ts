@@ -475,8 +475,12 @@ export function cancelJobScan(scanId: number) {
   return request<JobScan>(`/api/job-scans/${scanId}`, { method: "DELETE" });
 }
 
-export function getRecommendations() {
-  return request<JobRecommendation[]>("/api/recommendations");
+export function getRecommendations(limit = 12) {
+  return request<JobRecommendation[]>(`/api/recommendations?limit=${encodeURIComponent(String(limit))}`);
+}
+
+export function refreshRecommendations() {
+  return request<JobRecommendation[]>("/api/recommendations/refresh", { method: "POST" });
 }
 
 export function updateRecommendation(recommendationId: number, status: "dismissed" | "saved") {

@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { ArrowUpRight, BookmarkPlus, Sparkles, X } from "lucide-react";
+import { ArrowUpRight, BookmarkPlus, Radar, RefreshCw, Sparkles, X } from "lucide-react";
 import {
   updateRecommendation,
   type JobRecommendation,
@@ -12,12 +12,16 @@ export function RecommendedMatches({
   items,
   loading,
   onItemsChange,
-  onSaved
+  onSaved,
+  onRefresh,
+  showEmpty = false
 }: {
   items: JobRecommendation[];
   loading: boolean;
   onItemsChange: (items: JobRecommendation[]) => void;
   onSaved: (job: TrackedJob) => void;
+  onRefresh?: () => void;
+  showEmpty?: boolean;
 }) {
   const [busyId, setBusyId] = useState<number | null>(null);
   const [error, setError] = useState("");
@@ -48,21 +52,28 @@ export function RecommendedMatches({
     }
   }
 
-  if (!loading && !items.length) return null;
+  if (!loading && !items.length && !showEmpty) return null;
 
   return (
-    <section className="recommendation-rail" aria-busy={loading} aria-labelledby="recommendation-title">
+    <section className={`recommendation-rail ${showEmpty ? "discovery-feed" : ""}`} aria-busy={loading} aria-labelledby="recommendation-title">
       <div className="recommendation-heading">
         <div>
           <span className="section-kicker"><Sparkles size={13} /> Private discovery</span>
-          <h2 id="recommendation-title">New roles found for you</h2>
-          <p>Fresh job sources and community scans, shortlisted by your interests and scored only against your private profile.</p>
+          <h2 id="recommendation-title">Matches found for you</h2>
+          <p>One feed of public-source roles and community scans, shortlisted by your interests and scored only against your private profile.</p>
         </div>
         <span className="recommendation-privacy">Opt-in · private scoring</span>
       </div>
       {error ? <div className="notice error compact-notice" role="alert">{error}</div> : null}
       <div className="recommendation-track">
         {loading && !items.length ? [0, 1].map((item) => <div className="recommendation-card is-loading" key={item}><span className="skeleton-block wide" /><span className="skeleton-block text" /></div>) : null}
+        {!loading && !items.length && showEmpty ? (
+          <div className="recommendation-empty">
+            <span><Radar size={24} /></span>
+            <div><strong>We are watching for your next match</strong><p>No current role clears your evidence and confidence thresholds yet. New Goozali and shared-scan roles will land in this same feed.</p></div>
+            {onRefresh ? <button className="button quiet" onClick={onRefresh} type="button"><RefreshCw size={15} /> Check now</button> : null}
+          </div>
+        ) : null}
         {items.map((item) => (
           <article className="recommendation-card" key={item.id}>
             <div className="recommendation-score"><strong>{Math.round(item.score)}%</strong><span>{item.fit_level}</span></div>
@@ -70,7 +81,7 @@ export function RecommendedMatches({
               <span>{item.company}</span>
               <h3>{item.role}</h3>
               <p>{item.reasons[0] || "Strong evidence alignment with your approved profile."}</p>
-              <div className="recommendation-tags">{item.source_name === "goozali" ? <span>Goozali beta</span> : null}{item.career_fields.slice(0, 2).map((field) => <span key={field}>{field}</span>)}{item.location ? <span>{item.location}</span> : null}</div>
+              <div className="recommendation-tags"><span>{item.source_name === "goozali" ? "Goozali" : "Shared scan"}</span>{item.career_fields.slice(0, 2).map((field) => <span key={field}>{field}</span>)}{item.location ? <span>{item.location}</span> : null}</div>
             </div>
             <div className="recommendation-actions">
               <button aria-label={`Dismiss ${item.role}`} className="icon-button" disabled={busyId === item.id} onClick={() => void dismiss(item)} title="Dismiss" type="button"><X size={15} /></button>
