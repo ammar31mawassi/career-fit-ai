@@ -17,6 +17,8 @@ MAX_COMPRESSED_BYTES = 12_000_000
 MAX_JSON_BYTES = 64_000_000
 NETWORK_TIMEOUT_SECONDS = 45
 USER_AGENT = "CareerFit-JobDiscovery/1.0 (+https://career-fit-ai-sigma.vercel.app)"
+EMAIL_PATTERN = re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.IGNORECASE)
+ISRAEL_PHONE_PATTERN = re.compile(r"(?<!\d)(?:\+?972|0)(?:[\s().-]*\d){7,10}(?!\d)")
 
 
 class GoozaliSourceError(RuntimeError):
@@ -148,7 +150,7 @@ def parse_shared_view(payload: object, bootstrap: _Bootstrap | None = None) -> G
         languages = _choice_text(cells, columns_by_name.get("Language requirement"))
         education = _cell_text(cells, columns_by_name.get("Education requirements"))
         min_experience = _cell_text(cells, columns_by_name.get("Min Experience (Y)"))
-        combined = _job_text(
+        combined = _remove_contact_details(_job_text(
             description=description,
             requirements=requirements,
             scope=scope,
@@ -156,7 +158,7 @@ def parse_shared_view(payload: object, bootstrap: _Bootstrap | None = None) -> G
             languages=languages,
             education=education,
             min_experience=min_experience,
-        )
+        ))
         if not role or not company or len(combined) < 120:
             continue
         discovered_at = _datetime(row.get("createdTime"))
@@ -348,6 +350,11 @@ def _safe_public_url(value: str) -> str:
         return ""
     parsed = urllib.parse.urlparse(value)
     return value[:2000] if parsed.scheme in {"http", "https"} and parsed.netloc else ""
+
+
+def _remove_contact_details(value: str) -> str:
+    without_email = EMAIL_PATTERN.sub("[contact email removed]", value)
+    return ISRAEL_PHONE_PATTERN.sub("[contact phone removed]", without_email)
 
 
 def _record_url(bootstrap: _Bootstrap | None, record_id: str) -> str:

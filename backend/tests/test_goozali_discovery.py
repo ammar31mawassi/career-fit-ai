@@ -62,7 +62,7 @@ def test_shared_view_parser_maps_job_fields_and_ignores_contact_fields():
                         "cellValuesByColumnId": {
                             "title": "Backend Engineer",
                             "company": "Example",
-                            "description": "Build and operate a production API used by thousands of customers.",
+                            "description": "Build and operate a production API used by thousands of customers. Contact recruiter@example.com or +972-50-123-4567.",
                             "requirements": "Three years of Python, FastAPI, PostgreSQL, testing and cloud experience.",
                             "field": "software",
                             "location": ["tel_aviv"],
@@ -87,6 +87,9 @@ def test_shared_view_parser_maps_job_fields_and_ignores_contact_fields():
     assert "Full Time" in result.jobs[0].description_text
     assert "contact@example.com" not in result.jobs[0].description_text
     assert "+972" not in result.jobs[0].description_text
+    assert "recruiter@example.com" not in result.jobs[0].description_text
+    assert "[contact email removed]" in result.jobs[0].description_text
+    assert "[contact phone removed]" in result.jobs[0].description_text
 
 
 def test_shared_view_parser_fails_closed_when_required_columns_change():
