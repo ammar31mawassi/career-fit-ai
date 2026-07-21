@@ -54,9 +54,9 @@ export function RecommendedMatches({
     <section className="recommendation-rail" aria-busy={loading} aria-labelledby="recommendation-title">
       <div className="recommendation-heading">
         <div>
-          <span className="section-kicker"><Sparkles size={13} /> Shared signal</span>
-          <h2 id="recommendation-title">Strong roles found for you</h2>
-          <p>Jobs scanned by the community, shortlisted by your interests and scored only against your private profile.</p>
+          <span className="section-kicker"><Sparkles size={13} /> Private discovery</span>
+          <h2 id="recommendation-title">New roles found for you</h2>
+          <p>Fresh job sources and community scans, shortlisted by your interests and scored only against your private profile.</p>
         </div>
         <span className="recommendation-privacy">Opt-in · private scoring</span>
       </div>
@@ -70,7 +70,7 @@ export function RecommendedMatches({
               <span>{item.company}</span>
               <h3>{item.role}</h3>
               <p>{item.reasons[0] || "Strong evidence alignment with your approved profile."}</p>
-              <div className="recommendation-tags">{item.career_fields.slice(0, 2).map((field) => <span key={field}>{field}</span>)}{item.location ? <span>{item.location}</span> : null}</div>
+              <div className="recommendation-tags">{item.source_name === "goozali" ? <span>Goozali beta</span> : null}{item.career_fields.slice(0, 2).map((field) => <span key={field}>{field}</span>)}{item.location ? <span>{item.location}</span> : null}</div>
             </div>
             <div className="recommendation-actions">
               <button aria-label={`Dismiss ${item.role}`} className="icon-button" disabled={busyId === item.id} onClick={() => void dismiss(item)} title="Dismiss" type="button"><X size={15} /></button>

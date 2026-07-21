@@ -9,10 +9,20 @@ from uuid import UUID
 from sqlmodel import Session, select
 
 from ..config import get_settings
-from ..models import JobRequirementRevision, Profile, ProfileFactFeedback, ProfileSource
+from ..models import (
+    JobDiscoveryBetaMember,
+    JobNotificationPreference,
+    JobRequirementRevision,
+    NotificationDelivery,
+    Profile,
+    ProfileFactFeedback,
+    ProfileSource,
+)
 from ..schemas import (
     AccountExportOut,
     AccountFeedbackExportOut,
+    AccountNotificationDeliveryOut,
+    AccountNotificationPreferenceOut,
     AccountRequirementFeedbackOut,
     AccountSourceExportOut,
 )
@@ -42,6 +52,15 @@ def export_account(session: Session, user_id: UUID) -> AccountExportOut:
             select(JobRequirementRevision)
             .where(JobRequirementRevision.user_id == user_id)
             .order_by(JobRequirementRevision.created_at)
+        ).all()
+    )
+    beta_member = session.get(JobDiscoveryBetaMember, user_id)
+    notification_preference = session.get(JobNotificationPreference, user_id)
+    notification_deliveries = list(
+        session.exec(
+            select(NotificationDelivery)
+            .where(NotificationDelivery.user_id == user_id)
+            .order_by(NotificationDelivery.created_at)
         ).all()
     )
     return AccountExportOut(
@@ -75,6 +94,28 @@ def export_account(session: Session, user_id: UUID) -> AccountExportOut:
                 created_at=item.created_at,
             )
             for item in requirement_feedback
+        ],
+        discovery_market=(
+            beta_member.market_code if beta_member is not None and beta_member.active else ""
+        ),
+        notification_preference=(
+            AccountNotificationPreferenceOut(
+                email_enabled=notification_preference.email_enabled,
+                unsubscribed_at=notification_preference.unsubscribed_at,
+            )
+            if notification_preference is not None
+            else None
+        ),
+        notification_deliveries=[
+            AccountNotificationDeliveryOut(
+                recommendation_id=item.recommendation_id,
+                channel=item.channel,
+                status=item.status,
+                attempts=item.attempts,
+                created_at=item.created_at,
+                sent_at=item.sent_at,
+            )
+            for item in notification_deliveries
         ],
         jobs=list_jobs(session, user_id, limit=10_000),
     )

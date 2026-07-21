@@ -348,12 +348,29 @@ class AccountRequirementFeedbackOut(BaseModel):
     created_at: datetime
 
 
+class AccountNotificationPreferenceOut(BaseModel):
+    email_enabled: bool = False
+    unsubscribed_at: datetime | None = None
+
+
+class AccountNotificationDeliveryOut(BaseModel):
+    recommendation_id: int
+    channel: str
+    status: str
+    attempts: int
+    created_at: datetime
+    sent_at: datetime | None = None
+
+
 class AccountExportOut(BaseModel):
     exported_at: datetime
     profile: ProfileOut
     sources: list[AccountSourceExportOut] = Field(default_factory=list)
     fact_feedback: list[AccountFeedbackExportOut] = Field(default_factory=list)
     requirement_feedback: list[AccountRequirementFeedbackOut] = Field(default_factory=list)
+    discovery_market: str = ""
+    notification_preference: AccountNotificationPreferenceOut | None = None
+    notification_deliveries: list[AccountNotificationDeliveryOut] = Field(default_factory=list)
     jobs: list[JobOut] = Field(default_factory=list)
 
 
@@ -420,6 +437,7 @@ class JobSummaryPageOut(BaseModel):
 class JobRecommendationOut(BaseModel):
     id: int
     catalog_job_id: int
+    source_name: str = "community"
     source_url: str
     application_link: str
     company: str
@@ -441,6 +459,16 @@ class JobRecommendationPatchIn(BaseModel):
 class JobRecommendationActionOut(BaseModel):
     recommendation: JobRecommendationOut
     job: JobOut | None = None
+
+
+class NotificationPreferenceOut(BaseModel):
+    eligible: bool = False
+    delivery_available: bool = False
+    email_enabled: bool = False
+
+
+class NotificationPreferenceIn(BaseModel):
+    email_enabled: bool
 
 
 class ProfileAnalyzeResult(BaseModel):

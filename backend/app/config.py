@@ -4,6 +4,7 @@ import os
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
+from uuid import UUID
 
 from dotenv import load_dotenv
 
@@ -31,6 +32,16 @@ class Settings:
     github_token: str | None
     cron_secret: str | None
     score_calibration_path: Path | None
+    frontend_url: str
+    public_api_url: str
+    goozali_enabled: bool
+    goozali_embed_url: str
+    goozali_initial_lookback_hours: int
+    goozali_max_jobs_per_run: int
+    goozali_beta_user_ids: tuple[UUID, ...]
+    resend_api_key: str | None
+    notification_from_email: str | None
+    notification_signing_secret: str | None
 
 
 def _csv_values(value: str) -> tuple[str, ...]:
@@ -40,6 +51,23 @@ def _csv_values(value: str) -> tuple[str, ...]:
 def _path_value(value: str) -> Path:
     path = Path(value).expanduser()
     return path if path.is_absolute() else (ROOT_DIR / path).resolve()
+
+
+def _bool_value(value: str) -> bool:
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _uuid_values(value: str) -> tuple[UUID, ...]:
+    parsed: list[UUID] = []
+    for item in value.split(","):
+        candidate = item.strip()
+        if not candidate:
+            continue
+        try:
+            parsed.append(UUID(candidate))
+        except ValueError:
+            continue
+    return tuple(parsed)
 
 
 @lru_cache
@@ -72,4 +100,19 @@ def get_settings() -> Settings:
             if os.getenv("SCORE_CALIBRATION_PATH")
             else None
         ),
+        frontend_url=os.getenv("FRONTEND_URL", "http://localhost:3000").strip().rstrip("/"),
+        public_api_url=os.getenv("PUBLIC_API_URL", "http://127.0.0.1:8000").strip().rstrip("/"),
+        goozali_enabled=_bool_value(os.getenv("GOOZALI_DISCOVERY_ENABLED", "false")),
+        goozali_embed_url=os.getenv(
+            "GOOZALI_EMBED_URL",
+            "https://airtable.com/embed/appwewqLk7iUY4azc/shrQBuWjXd0YgPqV6?backgroundColor=cyan&viewControls=on",
+        ).strip(),
+        goozali_initial_lookback_hours=max(
+            1, int(os.getenv("GOOZALI_INITIAL_LOOKBACK_HOURS", "72"))
+        ),
+        goozali_max_jobs_per_run=max(1, int(os.getenv("GOOZALI_MAX_JOBS_PER_RUN", "40"))),
+        goozali_beta_user_ids=_uuid_values(os.getenv("GOOZALI_BETA_USER_IDS", "")),
+        resend_api_key=os.getenv("RESEND_API_KEY") or None,
+        notification_from_email=os.getenv("NOTIFICATION_FROM_EMAIL") or None,
+        notification_signing_secret=os.getenv("NOTIFICATION_SIGNING_SECRET") or None,
     )

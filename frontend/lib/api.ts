@@ -227,6 +227,7 @@ export type JobSummaryPage = {
 export type JobRecommendation = {
   id: number;
   catalog_job_id: number;
+  source_name: string;
   source_url: string;
   application_link: string;
   company: string;
@@ -241,6 +242,12 @@ export type JobRecommendation = {
   created_at: string;
 };
 
+export type NotificationPreference = {
+  eligible: boolean;
+  delivery_available: boolean;
+  email_enabled: boolean;
+};
+
 export type JobRequirementsReview = Pick<JobRequirements,
   "must_have_skills" | "preferred_skills" | "nice_to_have_skills" |
   "min_years_experience" | "experience_requirement_known" | "seniority" |
@@ -253,6 +260,9 @@ export type AccountExport = {
   sources: Array<{ source_type: string; title: string; content_text: string; updated_at: string }>;
   fact_feedback: Array<{ fact_type: string; action: string; original_value: string; corrected_value: string; created_at: string }>;
   requirement_feedback: Array<{ job_id: number; original_requirements: Record<string, unknown>; corrected_requirements: Record<string, unknown>; changed_fields: string[]; created_at: string }>;
+  discovery_market: string;
+  notification_preference: { email_enabled: boolean; unsubscribed_at: string | null } | null;
+  notification_deliveries: Array<{ recommendation_id: number; channel: string; status: string; attempts: number; created_at: string; sent_at: string | null }>;
   jobs: TrackedJob[];
 };
 
@@ -473,6 +483,17 @@ export function updateRecommendation(recommendationId: number, status: "dismisse
   return request<{ recommendation: JobRecommendation; job: TrackedJob | null }>(`/api/recommendations/${recommendationId}`, {
     method: "PATCH",
     body: JSON.stringify({ status })
+  });
+}
+
+export function getNotificationPreference() {
+  return request<NotificationPreference>("/api/notifications/preferences");
+}
+
+export function saveNotificationPreference(emailEnabled: boolean) {
+  return request<NotificationPreference>("/api/notifications/preferences", {
+    method: "PUT",
+    body: JSON.stringify({ email_enabled: emailEnabled })
   });
 }
 

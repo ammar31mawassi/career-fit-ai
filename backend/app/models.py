@@ -301,6 +301,10 @@ class SharedJobCatalog(SQLModel, table=True):
     career_fields_json: str = "[]"
     source_confidence: float = 0.0
     first_seen_by: Optional[UUID] = Field(default=None, index=True)
+    source_name: str = Field(default="community", index=True)
+    external_id: str = Field(default="", index=True)
+    source_published_at: Optional[datetime] = None
+    last_seen_at: Optional[datetime] = Field(default=None, index=True)
     active: bool = Field(default=True, index=True)
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
@@ -340,3 +344,61 @@ class JobRecommendation(SQLModel, table=True):
     status: str = Field(default="shadow_observation", index=True)
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
+
+
+class JobSourceRun(SQLModel, table=True):
+    __tablename__ = "job_source_runs"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    source_name: str = Field(index=True)
+    status: str = Field(default="running", index=True)
+    records_seen: int = 0
+    records_valid: int = 0
+    created_count: int = 0
+    updated_count: int = 0
+    ignored_count: int = 0
+    deactivated_count: int = 0
+    error_code: str = ""
+    error: str = ""
+    created_at: datetime = Field(default_factory=utc_now)
+    completed_at: Optional[datetime] = None
+
+
+class JobDiscoveryBetaMember(SQLModel, table=True):
+    __tablename__ = "job_discovery_beta_members"
+
+    user_id: UUID = Field(primary_key=True)
+    market_code: str = Field(default="IL", index=True)
+    active: bool = Field(default=True, index=True)
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
+
+
+class JobNotificationPreference(SQLModel, table=True):
+    __tablename__ = "job_notification_preferences"
+
+    user_id: UUID = Field(primary_key=True)
+    email_enabled: bool = Field(default=False, index=True)
+    unsubscribed_at: Optional[datetime] = None
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
+
+
+class NotificationDelivery(SQLModel, table=True):
+    __tablename__ = "notification_deliveries"
+    __table_args__ = (
+        UniqueConstraint("recommendation_id", "channel", name="uq_notification_delivery_channel"),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    user_id: UUID = Field(index=True)
+    recommendation_id: int = Field(foreign_key="job_recommendations.id", index=True)
+    channel: str = Field(default="email", index=True)
+    status: str = Field(default="queued", index=True)
+    attempts: int = 0
+    provider_message_id: str = ""
+    error_code: str = ""
+    error: str = ""
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
+    sent_at: Optional[datetime] = None

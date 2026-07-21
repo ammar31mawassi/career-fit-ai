@@ -32,10 +32,11 @@ The beta does not use OpenAI, ChatGPT, or another hosted generative model. Profi
 - Durable PGMQ-backed scan jobs with persisted progress, cancellation, stale-worker recovery, and bounded retries.
 - User-reviewed job requirements that immediately recalculate the match and create privacy-safe evaluation labels.
 - Opt-in community job recommendations using a cheap eligibility shortlist before full evidence scoring.
+- An independent Goozali discovery beta for explicitly enrolled IL test accounts, with bounded imports, 65+ in-app suggestions, and optional 76+ email alerts.
 - Cursor-paginated job summaries, ETags, explicit rematching, trace IDs, and privacy-safe extraction/onboarding-funnel metrics with no CV text, answers, or fact values.
 - A replaceable scorer boundary with an optional monotonic calibration artifact; deterministic blockers and caps remain authoritative.
 
-Out of scope for v1: Goozali scanning, Gmail, WhatsApp, automatic applications, multiple CVs, and LinkedIn scraping.
+Out of scope for v1: broad Goozali rollout, Gmail, WhatsApp, automatic applications, multiple CVs, and LinkedIn scraping.
 
 ## Engineering records
 
@@ -43,6 +44,7 @@ Out of scope for v1: Goozali scanning, Gmail, WhatsApp, automatic applications, 
 - [Senior full-stack product intelligence release](docs/SENIOR_FULLSTACK_RELEASE_2026-07-13.md)
 - [Future product and engineering proposals](docs/CEO_FUTURE_IMPROVEMENTS.md)
 - [UI, performance, and agent research plan](docs/CAREERFIT_UI_AI_RESEARCH_PLAN.md)
+- [Goozali discovery beta operations](docs/GOOZALI_DISCOVERY_BETA.md)
 
 ## Local development
 
@@ -80,6 +82,8 @@ For an existing database, apply the SQL files in `supabase/migrations/` in filen
 Use the API project URL in the form `https://<project-ref>.supabase.co`, not the Supabase dashboard URL. Use a publishable key for browser/auth requests and a secret key only in backend/Vercel environment variables.
 
 The current Hobby deployment invokes recovery once per day because Hobby Cron does not support minute-level schedules. Normal scans start immediately from the authenticated client and continue in the persisted queue; move the same worker endpoint to a more frequent schedule when scan volume or the hosting plan increases.
+
+Hourly Goozali discovery uses Supabase Cron to call the secured `/api/workers/discover` endpoint. The source is disabled by default and requires an explicit UUID allowlist. Email is a second opt-in and remains unavailable until Resend, a verified sender, and a dedicated unsubscribe-signing secret are configured. See the operations guide before enabling either path.
 
 The same secured worker removes unfinished onboarding preview data after 24 hours, in batches of five per invocation. Completed profiles are never included in this cleanup.
 

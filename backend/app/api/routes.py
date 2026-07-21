@@ -3,10 +3,11 @@ from __future__ import annotations
 import secrets
 import hashlib
 import time
+from html import escape as html_escape
 
 from fastapi import APIRouter, Depends, File, Header, HTTPException, Query, Response, UploadFile
 from fastapi.encoders import jsonable_encoder
-from starlette.responses import JSONResponse
+from starlette.responses import HTMLResponse, JSONResponse
 from sqlmodel import Session
 from uuid import UUID
 
@@ -29,6 +30,8 @@ from ..schemas import (
     JobSummaryOut,
     OnboardingAnalyzeIn,
     OnboardingCompleteIn,
+    NotificationPreferenceIn,
+    NotificationPreferenceOut,
     ProfileAnalyzeResult,
     ProfileFactBulkReviewIn,
     ProfileFactCreateIn,
@@ -77,6 +80,13 @@ from ..services.recommendations import (
     process_one_queued_recommendation,
     update_recommendation,
 )
+from ..services.notifications import (
+    get_notification_preference,
+    process_one_queued_email,
+    unsubscribe_email,
+    update_notification_preference,
+)
+from ..services.job_discovery import run_goozali_discovery
 
 
 router = APIRouter(prefix="/api")
@@ -159,6 +169,13 @@ def save_browser_ocr(
         return apply_browser_ocr(session, user_id, payload)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    signature = "|".join(
+        [str(user_id), query.strip().lower(), cursor, page.watermark.isoformat() if page.watermark else "empty"]
+    )
+    etag = f'"{hashlib.sha256(signature.encode("utf-8")).hexdigest()[:24]}"'
+    if if_none_match == etag:
+        return Response(status_code=304, headers={"ETag": etag})
+    return JSONResponse(content=jsonable_encoder(page), headers={"ETag": etag})
 
 
 @router.post("/profile/linkedin-pdf", response_model=ProfileOut)
@@ -387,13 +404,47 @@ def job_summary_page(
         page = list_job_summary_page(session, user_id, query=query, limit=limit, cursor=cursor)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    signature = "|".join(
-        [str(user_id), query.strip().lower(), cursor, page.watermark.isoformat() if page.watermark else "empty"]
+
+
+@router.get("/notifications/preferences", response_model=NotificationPreferenceOut)
+def notification_preferences(
+    user_id: UUID = Depends(current_user_id),
+    session: Session = Depends(get_session),
+) -> NotificationPreferenceOut:
+    return get_notification_preference(session, user_id)
+
+
+@router.put("/notifications/preferences", response_model=NotificationPreferenceOut)
+def put_notification_preferences(
+    payload: NotificationPreferenceIn,
+    user_id: UUID = Depends(current_user_id),
+    session: Session = Depends(get_session),
+) -> NotificationPreferenceOut:
+    try:
+        return update_notification_preference(session, user_id, payload.email_enabled)
+    except ValueError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+
+
+@router.get("/notifications/unsubscribe", response_class=HTMLResponse)
+def unsubscribe_confirmation(token: str = Query(min_length=20, max_length=300)) -> HTMLResponse:
+    safe_token = html_escape(token)
+    return HTMLResponse(
+        "<!doctype html><html><body style='font-family:system-ui;max-width:560px;margin:64px auto;padding:24px'>"
+        "<h1>Stop CareerFit job emails?</h1><p>In-app job suggestions will remain available.</p>"
+        f"<form method='post'><input type='hidden' name='token' value='{safe_token}'>"
+        "<button type='submit' style='padding:12px 18px'>Stop job emails</button></form></body></html>"
     )
-    etag = f'"{hashlib.sha256(signature.encode("utf-8")).hexdigest()[:24]}"'
-    if if_none_match == etag:
-        return Response(status_code=304, headers={"ETag": etag})
-    return JSONResponse(content=jsonable_encoder(page), headers={"ETag": etag})
+
+
+@router.post("/notifications/unsubscribe", response_class=HTMLResponse)
+def unsubscribe_notification_email(
+    token: str = Query(min_length=20, max_length=300),
+    session: Session = Depends(get_session),
+) -> HTMLResponse:
+    if not unsubscribe_email(session, token):
+        return HTMLResponse("<h1>This unsubscribe link is invalid.</h1>", status_code=400)
+    return HTMLResponse("<h1>Job emails are off.</h1><p>In-app recommendations remain available.</p>")
 
 
 @router.get("/jobs/{job_id}", response_model=JobOut)
@@ -451,11 +502,7 @@ def process_background_work(
     authorization: str = Header(default=""),
     session: Session = Depends(get_session),
 ) -> dict[str, int]:
-    settings = get_settings()
-    expected = settings.cron_secret or settings.backend_api_key
-    supplied = authorization.removeprefix("Bearer ").strip()
-    if not expected or not secrets.compare_digest(supplied, expected):
-        raise HTTPException(status_code=401, detail="Worker authorization required.")
+    _authorize_worker(authorization)
     deadline = time.monotonic() + 50
     scans_processed = 0
     for _ in range(5):
@@ -474,8 +521,52 @@ def process_background_work(
         if time.monotonic() < deadline
         else None
     )
+    email = process_one_queued_email(session) if time.monotonic() < deadline else None
     return {
         "scans_processed": scans_processed,
         "recommendations_processed": int(recommendation is not None),
+        "emails_processed": int(email is not None),
         "onboarding_cleanups": onboarding_cleanups,
     }
+
+
+@router.api_route("/workers/discover", methods=["GET", "POST"])
+def process_discovery_work(
+    authorization: str = Header(default=""),
+    session: Session = Depends(get_session),
+) -> dict[str, object]:
+    _authorize_worker(authorization)
+    deadline = time.monotonic() + 50
+    outcome = run_goozali_discovery(session)
+    recommendations_processed = 0
+    emails_processed = 0
+    for _ in range(10):
+        if time.monotonic() >= deadline:
+            break
+        if process_one_queued_recommendation(session) is None:
+            break
+        recommendations_processed += 1
+    for _ in range(10):
+        if time.monotonic() >= deadline:
+            break
+        if process_one_queued_email(session) is None:
+            break
+        emails_processed += 1
+    return {
+        "source_status": outcome.status,
+        "records_seen": outcome.records_seen,
+        "records_valid": outcome.records_valid,
+        "jobs_created": outcome.created,
+        "jobs_updated": outcome.updated,
+        "jobs_deactivated": outcome.deactivated,
+        "recommendations_processed": recommendations_processed,
+        "emails_processed": emails_processed,
+    }
+
+
+def _authorize_worker(authorization: str) -> None:
+    settings = get_settings()
+    expected = settings.cron_secret or settings.backend_api_key
+    supplied = authorization.removeprefix("Bearer ").strip()
+    if not expected or not secrets.compare_digest(supplied, expected):
+        raise HTTPException(status_code=401, detail="Worker authorization required.")

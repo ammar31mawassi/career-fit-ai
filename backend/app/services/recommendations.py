@@ -9,6 +9,7 @@ from sqlmodel import Session, select
 
 from ..models import (
     Job,
+    JobDiscoveryBetaMember,
     JobRecommendation,
     Profile,
     ProfileInterest,
@@ -26,6 +27,8 @@ QUEUE_NAME = "careerfit_job_recommendations"
 MAX_CANDIDATES_PER_JOB = 250
 SHADOW_SCORE_THRESHOLD = 76.0
 SHADOW_CONFIDENCE_THRESHOLD = 0.55
+GOOZALI_SUGGESTION_THRESHOLD = 65.0
+GOOZALI_SUGGESTION_CONFIDENCE = 0.45
 
 
 def catalog_and_enqueue_job(session: Session, source_user_id: UUID, job: Job) -> SharedJobCatalog | None:
@@ -62,7 +65,7 @@ def catalog_and_enqueue_job(session: Session, source_user_id: UUID, job: Job) ->
     session.add(catalog)
     session.flush()
     if should_enqueue:
-        _enqueue_if_supported(session, catalog.id or 0, source_user_id)
+        enqueue_catalog_job(session, catalog.id or 0, source_user_id)
     session.commit()
     return catalog
 
@@ -99,6 +102,14 @@ def generate_shadow_recommendations(
             .distinct()
             .limit(MAX_CANDIDATES_PER_JOB)
         )
+        if catalog.source_name == "goozali":
+            statement = statement.join(
+                JobDiscoveryBetaMember,
+                JobDiscoveryBetaMember.user_id == Profile.user_id,
+            ).where(
+                JobDiscoveryBetaMember.market_code == "IL",
+                JobDiscoveryBetaMember.active.is_(True),
+            )
         if active_source_user_id is not None:
             statement = statement.where(Profile.user_id != active_source_user_id)
         profiles = list(session.exec(statement).all())
@@ -121,12 +132,7 @@ def generate_shadow_recommendations(
                 catalog.source_confidence,
             )
             run.scored_count += 1
-            is_strong = (
-                result.fit_level == "Strong"
-                and result.score >= SHADOW_SCORE_THRESHOLD
-                and result.confidence >= SHADOW_CONFIDENCE_THRESHOLD
-                and not result.missing_blockers
-            )
+            is_strong = _is_available_recommendation(catalog.source_name, result)
             recommendation = session.exec(
                 select(JobRecommendation).where(
                     JobRecommendation.user_id == profile.user_id,
@@ -159,8 +165,13 @@ def generate_shadow_recommendations(
             recommendation.status = "available" if is_strong else "shadow_observation"
             recommendation.updated_at = _now()
             session.add(recommendation)
+            session.flush()
             if is_strong:
                 run.strong_count += 1
+            if catalog.source_name == "goozali" and _is_email_eligible(result):
+                from .notifications import queue_recommendation_email
+
+                queue_recommendation_email(session, recommendation)
         run.status = "completed"
         run.completed_at = _now()
         session.add(run)
@@ -190,7 +201,7 @@ def process_one_queued_recommendation(session: Session) -> RecommendationRun | N
     run = generate_shadow_recommendations(
         session,
         int(message["catalog_job_id"]),
-        UUID(str(message["source_user_id"])),
+        UUID(str(message["source_user_id"])) if message.get("source_user_id") else None,
     )
     session.exec(
         text("select pgmq.archive(:queue_name, :msg_id)").bindparams(
@@ -286,10 +297,19 @@ def update_recommendation(
     return _recommendation_out(recommendation, catalog), job_output(session, user_id, job.id or 0)
 
 
-def _enqueue_if_supported(session: Session, catalog_job_id: int, source_user_id: UUID) -> None:
+def enqueue_catalog_job(
+    session: Session,
+    catalog_job_id: int,
+    source_user_id: UUID | None,
+) -> None:
     if session.get_bind().dialect.name != "postgresql":
         return
-    payload = json.dumps({"catalog_job_id": catalog_job_id, "source_user_id": str(source_user_id)})
+    payload = json.dumps(
+        {
+            "catalog_job_id": catalog_job_id,
+            "source_user_id": str(source_user_id) if source_user_id else None,
+        }
+    )
     session.exec(
         text("select * from pgmq.send(:queue_name, cast(:payload as jsonb))").bindparams(
             queue_name=QUEUE_NAME,
@@ -322,6 +342,7 @@ def _recommendation_out(
     return JobRecommendationOut(
         id=recommendation.id or 0,
         catalog_job_id=catalog.id or 0,
+        source_name=catalog.source_name,
         source_url=catalog.source_url,
         application_link=catalog.application_link,
         company=catalog.company,
@@ -349,6 +370,31 @@ def _cheap_eligible(snapshot, requirements, job_location: str) -> bool:
     candidate_tokens = _location_tokens(snapshot.location)
     job_tokens = _location_tokens(requirements.location_requirement or job_location)
     return not candidate_tokens or not job_tokens or bool(candidate_tokens & job_tokens)
+
+
+def _is_available_recommendation(source_name: str, result) -> bool:
+    if result.missing_blockers:
+        return False
+    if source_name == "goozali":
+        return (
+            result.fit_level in {"Medium", "Strong"}
+            and result.score >= GOOZALI_SUGGESTION_THRESHOLD
+            and result.confidence >= GOOZALI_SUGGESTION_CONFIDENCE
+        )
+    return (
+        result.fit_level == "Strong"
+        and result.score >= SHADOW_SCORE_THRESHOLD
+        and result.confidence >= SHADOW_CONFIDENCE_THRESHOLD
+    )
+
+
+def _is_email_eligible(result) -> bool:
+    return (
+        result.fit_level == "Strong"
+        and result.score >= SHADOW_SCORE_THRESHOLD
+        and result.confidence >= SHADOW_CONFIDENCE_THRESHOLD
+        and not result.missing_blockers
+    )
 
 
 def _location_tokens(value: str) -> set[str]:
