@@ -34,6 +34,7 @@ from ..schemas import (
 from ..config import get_settings
 from .ontology import canonical_skill, extract_skills, infer_domain, skill_domain
 from .document_reader import PDF_PARSER_VERSION, read_pdf_document
+from .experience_normalization import professional_experience
 from .profile_extraction import (
     EXTRACTOR_VERSION,
     ExtractedFact,
@@ -1279,22 +1280,7 @@ def _meaningful_character_count(text: str) -> int:
 
 
 def _extract_professional_years(text: str) -> float:
-    lower = text.lower()
-    patterns = (
-        r"\b(\d+(?:\.\d+)?)\+?\s*(?:years|yrs)\s+of\s+(?:professional|commercial|industry|software|engineering|work)\s+experience\b",
-        r"\bprofessional\s+experience\s*[:\-]?\s*(\d+(?:\.\d+)?)\+?\s*(?:years|yrs)\b",
-        r"\bexperience\s*[:\-]?\s*(\d+(?:\.\d+)?)\+?\s*(?:years|yrs)\b",
-    )
-    matches = [float(value) for pattern in patterns for value in re.findall(pattern, lower)]
-    months = [
-        float(value)
-        for value in re.findall(
-            r"\b(\d+)\+?\s*months?\s+of\s+(?:professional|commercial|industry|software|engineering|work)\s+experience\b",
-            lower,
-        )
-    ]
-    values = [*matches, *[month / 12 for month in months]]
-    return round(max(values), 1) if values else 0.0
+    return professional_experience(text).years
 
 
 def _extract_internship_years(text: str) -> float:

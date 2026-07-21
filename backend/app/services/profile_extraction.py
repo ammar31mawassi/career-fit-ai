@@ -3,32 +3,12 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
+from .cv_sections import section_heading
 from .ontology import extract_skills, infer_domain, skill_domain
 
 
-EXTRACTOR_VERSION = "profile-rules-v1.3.0"
+EXTRACTOR_VERSION = "profile-rules-v1.4.0"
 
-SECTION_WORDS = {
-    "profile",
-    "summary",
-    "education",
-    "experience",
-    "professional experience",
-    "work experience",
-    "research experience",
-    "projects",
-    "selected projects",
-    "selected engineering projects",
-    "technical skills",
-    "skills",
-    "languages",
-    "tools",
-    "awards",
-    "achievements",
-    "volunteering",
-    "honors-awards",
-    "hackathons",
-}
 LANGUAGES = ("arabic", "english", "hebrew", "french", "german", "spanish", "russian")
 PROFICIENCY = ("native", "fluent", "professional", "working", "bilingual", "mother tongue")
 ACTION_WORDS = ("built", "developed", "implemented", "created", "designed", "engineered", "delivered", "expanded")
@@ -226,7 +206,7 @@ def _skill_evidence_lines(lines: list[str]) -> list[str]:
     for index, line in enumerate(lines):
         section = _section(line)
         if section:
-            in_projects = section in {"projects", "selected projects", "selected engineering projects", "hackathons"}
+            in_projects = section == "projects"
             continue
         if not in_projects:
             continue
@@ -242,20 +222,12 @@ def _lines(text: str) -> list[str]:
 
 
 def _is_heading(line: str) -> bool:
-    normalized = re.sub(r"[^a-z -]", "", line.lower()).strip()
-    if normalized in SECTION_WORDS:
-        return True
-    words = normalized.split()
-    return bool(words and len(words) <= 5 and all(word in {item for section in SECTION_WORDS for item in section.split()} for word in words))
+    section, content = section_heading(line)
+    return bool(section and not content)
 
 
 def _section(line: str) -> str | None:
-    normalized = re.sub(r"[^a-z ]", " ", line.lower())
-    normalized = re.sub(r"\s+", " ", normalized).strip()
-    for name in sorted(SECTION_WORDS, key=len, reverse=True):
-        if normalized == name or (len(normalized.split()) <= 6 and re.search(rf"\b{re.escape(name)}\b", normalized)):
-            return name
-    return None
+    return section_heading(line)[0]
 
 
 def _projects(source_type: str, lines: list[str]) -> list[tuple[str, str]]:
@@ -270,11 +242,13 @@ def _projects(source_type: str, lines: list[str]) -> list[tuple[str, str]]:
     in_projects = False
     project_title = ""
     for index, line in enumerate(lines):
-        section = _section(line)
+        section, inline_content = section_heading(line)
         if section:
-            in_projects = section in {"projects", "selected projects", "selected engineering projects", "hackathons"}
+            in_projects = section == "projects"
             project_title = ""
-            continue
+            if not inline_content:
+                continue
+            line = inline_content
         lower = line.lower()
         has_action = any(re.search(rf"\b{word}\b", lower) for word in ACTION_WORDS)
         if in_projects and has_action:
@@ -350,7 +324,7 @@ def _project_title_candidate(line: str) -> bool:
 def _declared_skill_lines(lines: list[str]) -> set[str]:
     declared: set[str] = set()
     in_skills = False
-    skill_sections = {"technical skills", "skills", "tools"}
+    skill_sections = {"skills"}
     for line in lines:
         section = _section(line)
         if section:
@@ -367,10 +341,12 @@ def _experiences(lines: list[str]) -> list[tuple[str, str]]:
     output: list[tuple[str, str]] = []
     in_experience = False
     for index, line in enumerate(lines):
-        section = _section(line)
+        section, inline_content = section_heading(line)
         if section:
-            in_experience = section in {"experience", "professional experience", "work experience", "research experience"}
-            continue
+            in_experience = section == "experience"
+            if not inline_content:
+                continue
+            line = inline_content
         lower = line.lower()
         if not any(re.search(rf"\b{word}\b", lower) for word in ROLE_WORDS):
             continue

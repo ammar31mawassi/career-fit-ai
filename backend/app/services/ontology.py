@@ -4,7 +4,7 @@ import re
 from dataclasses import dataclass
 
 
-ONTOLOGY_VERSION = "skills-v1.2.2"
+ONTOLOGY_VERSION = "skills-v1.4.0"
 
 
 @dataclass(frozen=True)
@@ -13,6 +13,7 @@ class SkillDefinition:
     aliases: tuple[str, ...]
     domain: str
     related: tuple[str, ...] = ()
+    exact_aliases: tuple[str, ...] = ()
 
 
 def _skill(
@@ -20,8 +21,9 @@ def _skill(
     domain: str,
     *aliases: str,
     related: tuple[str, ...] = (),
+    exact_aliases: tuple[str, ...] = (),
 ) -> SkillDefinition:
-    return SkillDefinition(canonical, (canonical, *aliases), domain, related)
+    return SkillDefinition(canonical, (canonical, *aliases), domain, related, exact_aliases)
 
 
 SKILLS: tuple[SkillDefinition, ...] = (
@@ -32,6 +34,12 @@ SKILLS: tuple[SkillDefinition, ...] = (
     _skill("c#", "backend", "c sharp", related=(".net",)),
     _skill("go", "backend", "golang"),
     _skill("rust", "embedded", related=("c++", "embedded systems")),
+    _skill("php", "backend", related=("laravel", "symfony")),
+    _skill("ruby", "backend", related=("ruby on rails",)),
+    _skill("ruby on rails", "backend", "rails", "ror", related=("ruby",)),
+    _skill("laravel", "backend", related=("php",)),
+    _skill("symfony", "backend", related=("php",)),
+    _skill("scala", "backend", related=("java", "spark")),
     _skill("kotlin", "mobile", related=("java", "android")),
     _skill("swift", "mobile", related=("ios",)),
     _skill("javascript", "frontend", "js", related=("typescript", "node.js")),
@@ -48,10 +56,11 @@ SKILLS: tuple[SkillDefinition, ...] = (
     _skill("flask", "backend", related=("python",)),
     _skill("spring", "backend", "spring boot", related=("java",)),
     _skill(".net", "backend", "dotnet", "asp.net", related=("c#",)),
-    _skill("rest api", "backend", "restful api", "restful services", "rest"),
+    _skill("rest api", "backend", "restful api", "restful services", "rest", "web services", "web-services", "apis"),
     _skill("graphql", "backend"),
     _skill("microservices", "backend", "microservice architecture"),
     _skill("sql", "data", "structured query language", related=("postgresql", "mysql", "sqlite")),
+    _skill("r", "data", "r language", related=("data analysis", "data science")),
     _skill("postgresql", "data", "postgres", "postgre sql", related=("sql",)),
     _skill("mysql", "data", related=("sql",)),
     _skill("sqlite", "data", related=("sql",)),
@@ -64,7 +73,22 @@ SKILLS: tuple[SkillDefinition, ...] = (
     _skill("kafka", "data", "apache kafka"),
     _skill("airflow", "data", "apache airflow"),
     _skill("etl", "data", "extract transform load"),
+    _skill(
+        "data analysis",
+        "data",
+        "data analytics",
+        related=("sql", "r", "python"),
+        exact_aliases=("data analyst",),
+    ),
+    _skill(
+        "data engineering",
+        "data",
+        related=("etl", "spark", "airflow"),
+        exact_aliases=("data engineer",),
+    ),
+    _skill("data science", "ml", related=("machine learning", "data analysis", "python", "r")),
     _skill("machine learning", "ml", "ml"),
+    _skill("artificial intelligence", "ml", "ai", related=("machine learning",)),
     _skill("deep learning", "ml", "neural networks"),
     _skill("pytorch", "ml", "torch"),
     _skill("tensorflow", "ml", "tensor flow"),
@@ -78,15 +102,29 @@ SKILLS: tuple[SkillDefinition, ...] = (
     _skill("gcp", "cloud", "google cloud", "google cloud platform"),
     _skill("terraform", "cloud"),
     _skill("ansible", "cloud"),
+    _skill("cloud computing", "cloud", "cloud services"),
+    _skill("devops", "cloud", "dev ops", related=("ci/cd", "docker", "kubernetes")),
     _skill("ci/cd", "cloud", "continuous integration", "continuous delivery", "continuous deployment"),
+    _skill("jenkins", "cloud", related=("ci/cd",)),
     _skill("github actions", "cloud"),
     _skill("linux", "systems", "unix"),
     _skill("bash", "systems", "shell scripting"),
+    _skill("system administration", "systems", "sysadmin", "systems administration"),
     _skill("git", "engineering", "version control"),
     _skill("github", "engineering"),
     _skill("unit testing", "qa", "unit tests", "pytest", "junit"),
     _skill("integration testing", "qa", "integration tests"),
-    _skill("test automation", "qa", "automated testing"),
+    _skill("test automation", "qa", "automated testing", "qa automation", exact_aliases=("automation",)),
+    _skill("quality assurance", "qa", "software qa", "software quality assurance", "qa"),
+    _skill(
+        "software testing",
+        "qa",
+        "testing",
+        "functional testing",
+        "regression testing",
+        "system testing",
+        "acceptance testing",
+    ),
     _skill("manual testing", "qa", "manual qa", "manual tester", "manual software testing"),
     _skill("test planning", "qa", "test plan", "test plans"),
     _skill("verification and validation", "qa", "v&v", "verification & validation"),
@@ -96,6 +134,7 @@ SKILLS: tuple[SkillDefinition, ...] = (
     _skill("artillery systems", "defense", "artillery", "artillery system"),
     _skill("selenium", "qa"),
     _skill("playwright", "qa"),
+    _skill("test-driven development", "qa", "tdd", "test driven development"),
     _skill("embedded systems", "embedded", "embedded", "embedded software", "embedded development"),
     _skill("firmware", "embedded"),
     _skill("rtos", "embedded", "real time operating system", "real-time operating system"),
@@ -112,17 +151,87 @@ SKILLS: tuple[SkillDefinition, ...] = (
     _skill("ios", "mobile", "ios development"),
     _skill("react native", "mobile"),
     _skill("flutter", "mobile", "dart"),
-    _skill("cybersecurity", "security", "information security", "application security"),
+    _skill("unity", "games", "unity3d", "unity 3d"),
+    _skill(
+        "2d animation",
+        "games",
+        "2d animator",
+        "2d artist",
+        "spine animation",
+        related=("motion graphics", "digital illustration"),
+    ),
+    _skill(
+        "3d art",
+        "games",
+        "3d artist",
+        "3d modeling",
+        "3d modelling",
+        "3d animation",
+        "blender",
+        "maya",
+        "3ds max",
+        related=("2d animation", "visual effects"),
+        exact_aliases=("artist",),
+    ),
+    _skill("motion graphics", "games", "motion design", "after effects"),
+    _skill("digital illustration", "games", "illustration", "illustrator", "concept art", "character design"),
+    _skill("visual effects", "games", "vfx"),
+    _skill("image editing", "games", "photoshop", "adobe photoshop"),
+    _skill("video editing", "games", "video production", "color grading"),
+    _skill(
+        "cybersecurity",
+        "security",
+        "information security",
+        "application security",
+        exact_aliases=("security",),
+    ),
     _skill("penetration testing", "security", "pentesting"),
     _skill("cryptography", "security"),
     _skill("oauth", "security", "oauth2"),
     _skill("supabase", "backend"),
     _skill("firebase", "backend"),
+    _skill("salesforce", "business", "salesforce crm"),
+    _skill("sap", "business", "sap erp"),
     _skill("agile", "engineering", "scrum"),
     _skill("system design", "engineering", "software architecture"),
+    _skill("software development", "engineering", "software engineering", "web development"),
+    _skill("software development lifecycle", "engineering", "software development life cycle", "sdlc"),
+    _skill("code review", "engineering", "code reviews", "peer review"),
+    _skill("observability", "systems", "monitoring"),
+    _skill("saas", "business", "software as a service"),
     _skill("data structures", "engineering", "data structures and algorithms", "dsa"),
     _skill("algorithms", "engineering", "algorithm design"),
     _skill("oop", "engineering", "object oriented programming", "object-oriented programming"),
+    _skill("project management", "professional", "project manager"),
+    _skill("product management", "professional", "product manager", exact_aliases=("product owner",)),
+    _skill("business analysis", "professional", "business analyst", "requirements analysis"),
+    _skill("technical writing", "professional", "technical documentation"),
+    _skill(
+        "technical support",
+        "professional",
+        "customer support",
+        "help desk",
+        "helpdesk",
+        exact_aliases=("support",),
+    ),
+    _skill("recruitment", "professional", "recruiting", "talent acquisition", exact_aliases=("recruiter",)),
+    _skill("human resources", "professional", "hr management", exact_aliases=("hr",)),
+    _skill("sales", "professional", "sales management"),
+    _skill("lead generation", "professional"),
+    _skill("digital marketing", "professional", "online marketing", exact_aliases=("marketing",)),
+    _skill("seo", "professional", "search engine optimization"),
+    _skill(
+        "ui/ux design",
+        "frontend",
+        "ui design",
+        "ux design",
+        "user experience design",
+        "user interface design",
+        "visual design",
+        exact_aliases=("design",),
+    ),
+    _skill("graphic design", "professional"),
+    _skill("blockchain", "software", "block chain", "web3", exact_aliases=("block-chain",)),
     _skill("management", "professional", "management skills", "managerial skills"),
     _skill("project coordination", "professional", "project coordinator"),
     _skill("planning", "professional", "project planning"),
@@ -132,9 +241,20 @@ SKILLS: tuple[SkillDefinition, ...] = (
     _skill("teamwork", "professional", "team work", "collaboration"),
     _skill("communication", "professional", "communication skills"),
     _skill("decision making", "professional", "decision-making"),
+    _skill("mentoring", "professional", "coaching", "teaching"),
+    _skill("analytical thinking", "professional", "analytical skills"),
 )
 
 _BY_CANONICAL = {skill.canonical: skill for skill in SKILLS}
+_EXACT_ALIASES = sorted(
+    (
+        (alias.lower(), skill.canonical)
+        for skill in SKILLS
+        for alias in (*skill.aliases, *skill.exact_aliases)
+    ),
+    key=lambda item: len(item[0]),
+    reverse=True,
+)
 _ALIASES = sorted(
     ((alias.lower(), skill.canonical) for skill in SKILLS for alias in skill.aliases),
     key=lambda item: len(item[0]),
@@ -144,7 +264,7 @@ _ALIASES = sorted(
 
 def canonical_skill(value: str) -> str | None:
     normalized = _normalize(value)
-    for alias, canonical in _ALIASES:
+    for alias, canonical in _EXACT_ALIASES:
         if normalized == _normalize(alias):
             return canonical
     return None
@@ -155,7 +275,7 @@ def extract_skills(text: str) -> list[str]:
     occupied: list[tuple[int, int]] = []
     for alias, canonical in _ALIASES:
         pattern = _term_pattern(alias)
-        flags = 0 if alias in {"c", "r", "go", "rest"} else re.IGNORECASE
+        flags = 0 if alias in {"c", "r", "go", "rest", "qa"} else re.IGNORECASE
         for match in re.finditer(pattern, text, flags=flags):
             span = match.span()
             if any(span[0] < end and span[1] > start for start, end in occupied):
@@ -205,6 +325,10 @@ def _term_pattern(term: str) -> str:
     # doing so turns every `.com` address into evidence for C.
     if term == "c":
         return r"(?<![A-Za-z0-9])C(?![A-Za-z0-9+#])"
+    if term == "r":
+        return r"(?<![A-Za-z0-9])R(?![A-Za-z0-9+#])"
+    if term == "qa":
+        return r"(?<![A-Za-z0-9])QA(?![A-Za-z0-9+#])"
     if term == "go":
         # Go is also a common English verb. Only count the language when it is
         # written as the proper noun "Go"; "Golang" remains case-insensitive.

@@ -21,7 +21,7 @@ USER_AGENT = (
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36"
 )
 
-JOB_READER_VERSION = "reader-v2.2.0"
+JOB_READER_VERSION = "reader-v2.3.0"
 
 CAREER_HINTS = ("career", "careers", "job", "jobs", "position", "greenhouse", "lever", "workday", "comeet", "workable")
 MUST_HINTS = ("must", "required", "requirements", "qualification", "you have", "minimum", "mandatory")
@@ -335,16 +335,20 @@ def _structured_source(url: str, html_text: str) -> dict[str, str] | None:
     job_posting = _json_ld_job_posting(html_text)
     if not job_posting:
         return None
-    description = str(job_posting.get("description") or "")
-    title = clean_text(str(job_posting.get("title") or ""))
+    description = _json_ld_job_text(job_posting)
+    title = clean_text(_json_ld_scalar(job_posting.get("title") or job_posting.get("name")))
     organization = job_posting.get("hiringOrganization") or {}
-    company = clean_text(str(organization.get("name") or "")) if isinstance(organization, dict) else ""
+    if isinstance(organization, list):
+        organization = next((item for item in organization if item), {})
+    company = clean_text(
+        _json_ld_scalar(organization.get("name") if isinstance(organization, dict) else organization)
+    )
     return {
         "title": title,
         "company": company,
         "location": _json_ld_location(job_posting),
-        "description": _html_fragment_text(description),
-        "application_link": str(job_posting.get("url") or url),
+        "description": description,
+        "application_link": _json_ld_scalar(job_posting.get("url")) or url,
         "method": "json_ld",
     }
 
@@ -391,6 +395,7 @@ def _workday_source(url: str) -> dict[str, str] | None:
 def _json_ld_job_posting(html_text: str) -> dict | None:
     parser = _JsonLdParser()
     parser.feed(html_text)
+    postings: list[dict] = []
     for raw in parser.blocks:
         try:
             payload = json.loads(html.unescape(raw))
@@ -400,8 +405,17 @@ def _json_ld_job_posting(html_text: str) -> dict | None:
             item_type = item.get("@type")
             types = item_type if isinstance(item_type, list) else [item_type]
             if any(str(value).lower() == "jobposting" for value in types):
-                return item
-    return None
+                postings.append(item)
+    if not postings:
+        return None
+    return max(
+        postings,
+        key=lambda item: (
+            len(_json_ld_scalar(item.get("description"))),
+            sum(bool(item.get(key)) for key in _JOB_TEXT_FIELDS),
+            bool(item.get("title") or item.get("name")),
+        ),
+    )
 
 
 def _walk_json(value):
@@ -420,9 +434,12 @@ def _json_ld_location(posting: dict) -> str:
     if isinstance(locations, dict):
         locations = [locations]
     for location in locations if isinstance(locations, list) else []:
+        if isinstance(location, str):
+            values.append(location)
+            continue
         if not isinstance(location, dict):
             continue
-        address = location.get("address") or {}
+        address = location.get("address") or location
         if not isinstance(address, dict):
             continue
         for key in ("addressLocality", "addressRegion", "addressCountry"):
@@ -434,9 +451,75 @@ def _json_ld_location(posting: dict) -> str:
             if value:
                 parts = [part.strip() for part in str(value).split(",") if part.strip()]
                 values.extend(parts or [str(value)])
+        if not any(address.get(key) for key in ("addressLocality", "addressRegion", "addressCountry")):
+            name = _json_ld_scalar(location.get("name"))
+            if name:
+                values.append(name)
+    applicant_locations = posting.get("applicantLocationRequirements") or []
+    if isinstance(applicant_locations, (dict, str)):
+        applicant_locations = [applicant_locations]
+    for location in applicant_locations if isinstance(applicant_locations, list) else []:
+        if isinstance(location, dict):
+            value = _json_ld_scalar(location.get("name") or location.get("address"))
+        else:
+            value = _json_ld_scalar(location)
+        if value:
+            values.append(value)
     if str(posting.get("jobLocationType") or "").upper() == "TELECOMMUTE":
         values.append("Remote")
     return ", ".join(_dedupe([clean_text(value) for value in values if value])) or "Not specified"
+
+
+_JOB_TEXT_FIELDS = (
+    ("Description", "description"),
+    ("Responsibilities", "responsibilities"),
+    ("Qualifications", "qualifications"),
+    ("Skills", "skills"),
+    ("Experience requirements", "experienceRequirements"),
+    ("Education requirements", "educationRequirements"),
+    ("Employment type", "employmentType"),
+    ("Work arrangement", "jobLocationType"),
+    ("Benefits", "jobBenefits"),
+)
+
+
+def _json_ld_job_text(posting: dict) -> str:
+    parts: list[str] = []
+    retained: list[str] = []
+    for label, key in _JOB_TEXT_FIELDS:
+        value = _json_ld_scalar(posting.get(key))
+        if not value:
+            continue
+        text = _html_fragment_text(value)
+        if not text:
+            continue
+        if key == "employmentType":
+            text = text.lower().replace("_", "-")
+        elif key == "jobLocationType" and text.upper() == "TELECOMMUTE":
+            text = "remote"
+        normalized = re.sub(r"\s+", " ", text.lower()).strip()
+        if any(normalized == existing or normalized in existing for existing in retained):
+            continue
+        retained.append(normalized)
+        parts.append(text if key == "description" else f"{label}:\n{text}")
+    return _normalize_job_text("\n".join(parts))[:20000]
+
+
+def _json_ld_scalar(value: object) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (int, float)):
+        return str(value)
+    if isinstance(value, list):
+        return ", ".join(filter(None, (_json_ld_scalar(item) for item in value)))
+    if isinstance(value, dict):
+        for key in ("name", "value", "identifier", "description"):
+            candidate = _json_ld_scalar(value.get(key))
+            if candidate:
+                return candidate
+    return ""
 
 
 def _html_fragment_text(value: str) -> str:
@@ -692,7 +775,7 @@ def _skill_groups(segments: list[tuple[str, str]]) -> list[RequirementGroup]:
     for priority, segment in segments:
         if priority not in {"must", "preferred", "nice"}:
             continue
-        skills = extract_skills(segment)
+        skills = _alternative_skills(segment)
         if len(skills) < 2 or not _is_alternative_requirement(segment):
             continue
         key = (priority, "one_of", tuple(sorted(skills)))
@@ -708,6 +791,19 @@ def _skill_groups(segments: list[tuple[str, str]]) -> list[RequirementGroup]:
             )
         )
     return groups
+
+
+def _alternative_skills(segment: str) -> list[str]:
+    """Keep contextual skills before an explicit alternative list out of its group."""
+    lower = segment.lower()
+    markers = [
+        position
+        for phrase in ("one or more", "one of", "any of", "such as", "e.g.", "for example")
+        for position in [lower.find(phrase)]
+        if position >= 0
+    ]
+    clause = segment[min(markers) :] if markers else segment
+    return extract_skills(clause)
 
 
 def _is_alternative_requirement(segment: str) -> bool:
@@ -858,6 +954,27 @@ def _experience_requirement(lower: str) -> tuple[float, bool]:
                 values.append(float(match.group(1)))
                 if index == 0:
                     occupied_ranges.append(span)
+    month_patterns = (
+        re.compile(
+            r"\b(\d+(?:\.\d+)?)\s*(?:[-\u2013\u2014]|\bto\b)\s*"
+            r"(\d+(?:\.\d+)?)\+?\s*months?\b"
+        ),
+        re.compile(
+            r"\b(\d+(?:\.\d+)?)\+?\s*months?(?:\s+of)?\s+"
+            r"(?:[a-z][a-z0-9+#./-]*\s+){0,5}experience\b"
+        ),
+        re.compile(r"\b(?:minimum|at least)\s+(\d+(?:\.\d+)?)\+?\s*months?\b"),
+    )
+    occupied_month_ranges: list[tuple[int, int]] = []
+    for index, pattern in enumerate(month_patterns):
+        for match in pattern.finditer(normalized):
+            span = match.span()
+            if index > 0 and any(span[0] < end and span[1] > start for start, end in occupied_month_ranges):
+                continue
+            if _is_professional_years_context(normalized, match.start(), match.end()):
+                values.append(float(match.group(1)) / 12)
+                if index == 0:
+                    occupied_month_ranges.append(span)
     if values:
         return max(values), True
     if any(

@@ -247,7 +247,7 @@ def test_alternative_languages_and_experience_are_typed():
     assert requirements.min_years_experience == 1
     assert requirements.experience_requirement_known is True
     assert requirements.seniority == "junior"
-    assert requirements.must_have_skills == ["data structures", "ios"]
+    assert requirements.must_have_skills == ["software development", "data structures", "ios"]
     assert len(requirements.skill_groups) == 1
     assert requirements.skill_groups[0].mode == "one_of"
     assert requirements.skill_groups[0].skills == ["python", "c", "c++", "java", "javascript"]
@@ -351,6 +351,47 @@ def test_written_and_ranged_experience_use_the_required_minimum():
 
     assert written.min_years_experience == 5
     assert ranged.min_years_experience == 3
+
+
+def test_json_ld_separate_job_fields_are_merged_into_the_posting(monkeypatch):
+    html = """
+    <html><head><title>Platform Engineer | ExampleCo</title>
+    <script type="application/ld+json">
+    {
+      "@context": "https://schema.org",
+      "@graph": [
+        {"@type": "JobPosting", "title": "Old teaser", "description": "Apply now."},
+        {
+          "@type": ["Thing", "JobPosting"],
+          "title": "Platform Engineer",
+          "hiringOrganization": [{"@type": "Organization", "name": "ExampleCo"}],
+          "description": "Build and operate reliable services for our product platform and collaborate with engineering teams.",
+          "responsibilities": ["Design production services", "Improve observability and incident response"],
+          "qualifications": "Strong Linux and networking knowledge with clear communication.",
+          "skills": ["Python", "Docker", "Kubernetes"],
+          "experienceRequirements": "At least 18 months of professional software experience.",
+          "educationRequirements": "Relevant technical degree or equivalent practical experience.",
+          "employmentType": "FULL_TIME",
+          "jobLocationType": "TELECOMMUTE",
+          "applicantLocationRequirements": {"@type": "Country", "name": "Israel"},
+          "url": "https://jobs.example.com/platform-engineer"
+        }
+      ]
+    }
+    </script></head><body><main><h1>Platform Engineer</h1></main></body></html>
+    """
+    monkeypatch.setattr(job_research, "validate_public_job_url", lambda _: None)
+    monkeypatch.setattr(job_research, "_fetch", lambda _: html)
+
+    job = extract_job_from_input("https://jobs.example.com/platform-engineer", "", "", "")
+
+    assert job.company == "ExampleCo"
+    assert job.role == "Platform Engineer"
+    assert job.reader_strategy == "json_ld"
+    assert {"python", "docker", "kubernetes", "linux", "networking"} <= set(job.requirements.all_skills)
+    assert job.requirements.min_years_experience == 1.5
+    assert job.requirements.work_mode == "remote, full-time"
+    assert job.location == "Israel, Remote"
 
 
 def test_one_language_satisfies_group_but_real_blockers_remain():
