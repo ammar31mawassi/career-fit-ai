@@ -540,13 +540,13 @@ def process_discovery_work(
     outcome = run_goozali_discovery(session)
     recommendations_processed = 0
     emails_processed = 0
-    for _ in range(10):
+    for _ in range(50):
         if time.monotonic() >= deadline:
             break
         if process_one_queued_recommendation(session) is None:
             break
         recommendations_processed += 1
-    for _ in range(10):
+    for _ in range(50):
         if time.monotonic() >= deadline:
             break
         if process_one_queued_email(session) is None:
