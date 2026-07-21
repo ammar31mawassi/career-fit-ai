@@ -21,7 +21,7 @@ USER_AGENT = (
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36"
 )
 
-JOB_READER_VERSION = "reader-v2.3.0"
+JOB_READER_VERSION = "reader-v2.4.0"
 
 CAREER_HINTS = ("career", "careers", "job", "jobs", "position", "greenhouse", "lever", "workday", "comeet", "workable")
 MUST_HINTS = ("must", "required", "requirements", "qualification", "you have", "minimum", "mandatory")
@@ -1041,7 +1041,9 @@ def _min_years(lower: str) -> float:
 
 def _seniority(role: str, lower: str, min_years: float) -> str:
     title = role.lower()
-    if any(term in title for term in ("senior", "staff", "principal", "lead")):
+    if any(term in title for term in ("senior", "staff", "principal", "lead")) or re.search(
+        r"\bsr\b\.?", title
+    ):
         return "senior"
     if any(term in title for term in ("student", "intern", "internship")):
         return "student"

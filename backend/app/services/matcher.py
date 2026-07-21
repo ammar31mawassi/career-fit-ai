@@ -8,7 +8,7 @@ from .ontology import ONTOLOGY_VERSION, extract_skills, skill_match_strength
 from .profile import CandidateSnapshot, SkillEvidence
 
 
-MODEL_VERSION = "fit-v2.3.0"
+MODEL_VERSION = "fit-v2.4.0"
 
 
 @dataclass(frozen=True)
@@ -215,17 +215,26 @@ def score_match(
                 f"Experience mismatch: job requires {required:g}+ professional years; profile has 0 confirmed professional years."
             )
             caps.append((45.0, "No confirmed professional experience for an experienced role (maximum 45)."))
-        elif required - candidate.years_experience > 1:
+        elif candidate.years_experience < required:
+            deficit = required - candidate.years_experience
             blockers.append(
                 f"Experience mismatch: job requires {required:g}+ years; profile has {candidate.years_experience:g}."
             )
-            caps.append((55.0, "Professional experience is more than one year below the minimum (maximum 55)."))
+            if deficit > 1:
+                caps.append((55.0, "Professional experience is more than one year below the minimum (maximum 55)."))
+            else:
+                caps.append((60.0, "Professional experience is below the stated minimum (maximum 60)."))
         else:
             matched.append(
-                f"Professional experience covers or approaches the requirement: {candidate.years_experience:g} vs {required:g}+ years."
+                f"Professional experience covers the requirement: {candidate.years_experience:g} vs {required:g}+ years."
             )
 
-    if requirements.seniority == "senior" and candidate.years_experience < 5:
+    senior_years = (
+        max(4.0, requirements.min_years_experience)
+        if requirements.experience_requirement_known
+        else 5.0
+    )
+    if requirements.seniority == "senior" and candidate.years_experience < senior_years:
         blockers.append("Seniority mismatch: senior/lead role without senior-level professional evidence.")
         caps.append((35.0, "Senior/lead evidence is not present (maximum 35)."))
     elif requirements.seniority in {"student", "junior"} and candidate.career_stage in {

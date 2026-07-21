@@ -17,9 +17,11 @@ from app.models import (
 )
 from app.services.job_research import classify_requirements
 from app.services.job_routing import route_job_fields
+from app.services.matcher import MODEL_VERSION
 from app.services.recommendations import (
     catalog_and_enqueue_job,
     generate_shadow_recommendations,
+    list_recommendations,
     refresh_user_recommendations,
     update_recommendation,
 )
@@ -61,7 +63,7 @@ class _StrongScorer:
             projects=["CareerFit"],
             skill_order=["Python", "FastAPI", "SQL"],
             about_text="Backend developer with evidence-backed Python experience.",
-            model_version="fit-test-v1",
+            model_version=MODEL_VERSION,
             component_scores={"skills": 91.0},
         )
 
@@ -80,6 +82,19 @@ def test_job_routing_uses_domain_and_role_hints():
 
     assert route_job_fields("Backend Developer", backend)[0] == "Software Engineering"
     assert "Hardware Engineering" in route_job_fields("FPGA Verification Engineer", hardware)
+
+
+def test_explicit_product_role_does_not_inherit_technical_domain_fields():
+    requirements = classify_requirements(
+        "Own an API security roadmap and work with engineering and cloud teams.",
+        "API Security Sr. Product Manager",
+    )
+
+    assert route_job_fields(
+        "API Security Sr. Product Manager",
+        requirements,
+        "Product Management",
+    ) == ["Product Management"]
 
 
 def test_shadow_recommendations_prefilter_candidates_and_hide_scanner(monkeypatch):
@@ -263,6 +278,111 @@ def test_goozali_suggestions_use_65_floor_and_explicit_beta_membership(monkeypat
     assert recommendations[0].user_id == RELEVANT
     assert recommendations[0].score == 68
     assert recommendations[0].status == "available"
+
+
+def test_goozali_primary_field_is_a_hard_user_filter(monkeypatch):
+    engine = _engine()
+    SQLModel.metadata.create_all(engine)
+    monkeypatch.setattr("app.services.recommendations.get_match_scorer", lambda: _StrongScorer())
+
+    with Session(engine) as session:
+        _profile(session, RELEVANT, "Software Engineering")
+        session.add(JobDiscoveryBetaMember(user_id=RELEVANT, market_code="IL", active=True))
+        old_requirements = classify_requirements(
+            "Work with API security, cloud, data, and engineering teams.",
+            "API Security Sr. Product Manager",
+        )
+        catalog = SharedJobCatalog(
+            content_hash="product-manager-field-regression",
+            source_name="goozali",
+            external_id="product-manager-field-regression",
+            role="API Security Sr. Product Manager",
+            description_text=(
+                "Own internal tools and vendor processes.\n\n"
+                "Requirements:\nWork with API security and engineering teams.\n\n"
+                "Employment scope: Full Time\nLocation: Israel\nMinimum experience: 5 years"
+            ),
+            career_fields_json='["Product Management", "Software Engineering"]',
+            requirements_json=old_requirements.to_json(),
+            source_confidence=0.92,
+        )
+        session.add(catalog)
+        session.commit()
+        session.refresh(catalog)
+
+        run = generate_shadow_recommendations(session, catalog.id or 0, None)
+
+    assert run.candidate_count == 0
+    assert run.scored_count == 0
+
+
+def test_goozali_structured_experience_is_a_hard_suggestion_gate(monkeypatch):
+    engine = _engine()
+    SQLModel.metadata.create_all(engine)
+    monkeypatch.setattr("app.services.recommendations.get_match_scorer", lambda: _StrongScorer())
+
+    with Session(engine) as session:
+        _profile(session, RELEVANT, "Software Engineering")
+        session.add(JobDiscoveryBetaMember(user_id=RELEVANT, market_code="IL", active=True))
+        old_requirements = classify_requirements("Requirements: Python and SQL.", "Backend Developer")
+        session.add(
+            SharedJobCatalog(
+                content_hash="goozali-experience-regression",
+                source_name="goozali",
+                external_id="goozali-experience-regression",
+                role="Backend Developer",
+                location="Israel",
+                description_text=(
+                    "Build production backend services with Python and SQL.\n\n"
+                    "Requirements:\nPython and SQL are required.\n\n"
+                    "Employment scope: Full Time\nLocation: Israel\nMinimum experience: 4 years"
+                ),
+                career_fields_json='["Software Engineering"]',
+                requirements_json=old_requirements.to_json(),
+                source_confidence=0.92,
+            )
+        )
+        session.commit()
+
+        recommendations = refresh_user_recommendations(session, RELEVANT)
+
+    assert recommendations == []
+
+
+def test_old_model_recommendations_are_not_listed():
+    engine = _engine()
+    SQLModel.metadata.create_all(engine)
+
+    with Session(engine) as session:
+        _profile(session, RELEVANT, "Software Engineering")
+        requirements = classify_requirements("Requirements: Python and SQL.", "Backend Developer")
+        catalog = SharedJobCatalog(
+            content_hash="stale-model-job",
+            role="Backend Developer",
+            career_fields_json='["Software Engineering"]',
+            requirements_json=requirements.to_json(),
+            source_confidence=0.9,
+        )
+        session.add(catalog)
+        session.commit()
+        session.refresh(catalog)
+        session.add(
+            JobRecommendation(
+                user_id=RELEVANT,
+                catalog_job_id=catalog.id or 0,
+                model_version="fit-v2.3.0",
+                score=92,
+                fit_level="Strong",
+                confidence=0.9,
+                status="available",
+                career_fields_json='["Software Engineering"]',
+            )
+        )
+        session.commit()
+
+        recommendations = list_recommendations(session, RELEVANT)
+
+    assert recommendations == []
 
 
 def test_discovery_refresh_unifies_community_and_goozali_matches(monkeypatch):

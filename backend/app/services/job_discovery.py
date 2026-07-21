@@ -10,9 +10,8 @@ from sqlmodel import Session, select
 
 from ..config import Settings, get_settings
 from ..models import JobDiscoveryBetaMember, JobSourceRun, SharedJobCatalog
-from .career_interests import CAREER_INTEREST_SET
 from .goozali import GoozaliFetchResult, GoozaliJob, SOURCE_NAME, fetch_goozali_jobs
-from .job_research import classify_requirements
+from .goozali_reader import classify_goozali_job
 from .job_routing import route_job_fields
 from .recommendations import enqueue_catalog_job
 
@@ -122,10 +121,8 @@ def _ingest_fetch_result(
         catalog.last_seen_at = now
         catalog.active = True
         if changed:
-            requirements = classify_requirements(job.description_text, job.role)
-            fields = route_job_fields(job.role, requirements)
-            if job.career_field in CAREER_INTEREST_SET:
-                fields = [job.career_field, *[field for field in fields if field != job.career_field]]
+            requirements = classify_goozali_job(job)
+            fields = route_job_fields(job.role, requirements, job.career_field)
             catalog.source_url = job.source_url
             catalog.application_link = job.application_link
             catalog.company = job.company

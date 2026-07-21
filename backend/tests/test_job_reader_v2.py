@@ -353,6 +353,15 @@ def test_written_and_ranged_experience_use_the_required_minimum():
     assert ranged.min_years_experience == 3
 
 
+def test_abbreviated_sr_title_is_classified_as_senior():
+    requirements = classify_requirements(
+        "Own the product roadmap and partner with engineering, design, and customers.",
+        "API Security Sr. Product Manager",
+    )
+
+    assert requirements.seniority == "senior"
+
+
 def test_json_ld_separate_job_fields_are_merged_into_the_posting(monkeypatch):
     html = """
     <html><head><title>Platform Engineer | ExampleCo</title>

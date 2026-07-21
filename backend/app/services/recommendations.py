@@ -17,8 +17,10 @@ from ..models import (
     SharedJobCatalog,
 )
 from ..schemas import JobOut, JobRecommendationOut
-from .job_research import requirements_from_json
+from .goozali_reader import GOOZALI_READER_VERSION, classify_goozali_text
+from .job_research import JobRequirements, requirements_from_json
 from .job_routing import route_job_fields
+from .matcher import MODEL_VERSION
 from .profile import candidate_snapshot
 from .scoring import get_match_scorer
 
@@ -79,7 +81,8 @@ def generate_shadow_recommendations(
     catalog = session.get(SharedJobCatalog, catalog_job_id)
     if catalog is None or not catalog.active:
         raise ValueError("Catalog job not found.")
-    fields = _json_list(catalog.career_fields_json)
+    requirements = _catalog_requirements(catalog)
+    fields = _catalog_fields(catalog, requirements)
     # Queue messages may outlive the account that originally scanned a shared job.
     # Do not let that stale audit reference block recommendations for other users.
     source_profile = session.exec(
@@ -98,7 +101,7 @@ def generate_shadow_recommendations(
                 Profile.status == "ready",
                 Profile.onboarding_completed.is_(True),
                 Profile.recommendations_enabled.is_(True),
-                ProfileInterest.interest.in_(fields or ["__none__"]),
+                ProfileInterest.interest.in_(fields[:1] or ["__none__"]),
             )
             .distinct()
             .limit(MAX_CANDIDATES_PER_JOB)
@@ -115,7 +118,6 @@ def generate_shadow_recommendations(
             statement = statement.where(Profile.user_id != active_source_user_id)
         profiles = list(session.exec(statement).all())
         run.candidate_count = len(profiles)
-        requirements = requirements_from_json(catalog.requirements_json)
         scorer = get_match_scorer()
         for profile in profiles:
             snapshot = candidate_snapshot(session, profile)
@@ -173,6 +175,8 @@ def process_one_queued_recommendation(session: Session) -> RecommendationRun | N
 
 
 def list_recommendations(session: Session, user_id: UUID, limit: int = 12) -> list[JobRecommendationOut]:
+    if limit <= 0:
+        return []
     profile = session.exec(select(Profile).where(Profile.user_id == user_id)).first()
     if profile is None or not profile.recommendations_enabled:
         return []
@@ -182,9 +186,10 @@ def list_recommendations(session: Session, user_id: UUID, limit: int = 12) -> li
             .where(
                 JobRecommendation.user_id == user_id,
                 JobRecommendation.status.in_(["available", "shadow_eligible"]),
+                JobRecommendation.model_version.like(f"{MODEL_VERSION}%"),
             )
             .order_by(JobRecommendation.score.desc(), JobRecommendation.updated_at.desc())
-            .limit(limit)
+            .limit(max(limit, 1) * 4)
         ).all()
     )
     if not recommendations:
@@ -198,11 +203,28 @@ def list_recommendations(session: Session, user_id: UUID, limit: int = 12) -> li
             )
         ).all()
     }
-    return [
-        _recommendation_out(item, catalogs[item.catalog_job_id])
-        for item in recommendations
-        if item.catalog_job_id in catalogs
-    ]
+    interests = {
+        value
+        for value in session.exec(
+            select(ProfileInterest.interest).where(ProfileInterest.profile_id == profile.id)
+        ).all()
+    }
+    snapshot = candidate_snapshot(session, profile)
+    output: list[JobRecommendationOut] = []
+    for item in recommendations:
+        catalog = catalogs.get(item.catalog_job_id)
+        if catalog is None:
+            continue
+        requirements = _catalog_requirements(catalog)
+        fields = _catalog_fields(catalog, requirements)
+        if not _career_field_eligible(interests, fields):
+            continue
+        if not _cheap_eligible(snapshot, requirements, catalog.location):
+            continue
+        output.append(_recommendation_out(item, catalog, fields))
+        if len(output) >= limit:
+            break
+    return output
 
 
 def refresh_user_recommendations(
@@ -246,14 +268,14 @@ def refresh_user_recommendations(
     scorer = get_match_scorer()
     scored = 0
     for catalog in catalogs:
-        fields = _json_list(catalog.career_fields_json)
-        if not interests.intersection(fields):
+        requirements = _catalog_requirements(catalog)
+        fields = _catalog_fields(catalog, requirements)
+        if not _career_field_eligible(interests, fields):
             continue
         if catalog.source_name == "goozali" and not beta_member:
             continue
         if catalog.first_seen_by == user_id:
             continue
-        requirements = requirements_from_json(catalog.requirements_json)
         was_scored, _ = _score_catalog_for_profile(
             session,
             catalog,
@@ -307,7 +329,7 @@ def update_recommendation(
     job.description_text = catalog.description_text
     job.source_title = catalog.role
     job.source_confidence = catalog.source_confidence
-    job.requirements_json = catalog.requirements_json
+    job.requirements_json = _catalog_requirements(catalog).to_json()
     job.status = "analyzed"
     job.error = ""
     job.updated_at = _now()
@@ -432,6 +454,7 @@ def _json_dict(value: str) -> dict[str, object]:
 def _recommendation_out(
     recommendation: JobRecommendation,
     catalog: SharedJobCatalog,
+    career_fields: list[str] | None = None,
 ) -> JobRecommendationOut:
     return JobRecommendationOut(
         id=recommendation.id or 0,
@@ -445,17 +468,45 @@ def _recommendation_out(
         score=recommendation.score,
         fit_level=recommendation.fit_level,  # type: ignore[arg-type]
         confidence=recommendation.confidence,
-        career_fields=_json_list(recommendation.career_fields_json),
+        career_fields=career_fields or _json_list(recommendation.career_fields_json),
         reasons=_json_list(recommendation.reasons_json),
         status=recommendation.status,
         created_at=recommendation.created_at,
     )
 
 
+def _catalog_requirements(catalog: SharedJobCatalog) -> JobRequirements:
+    stored = requirements_from_json(catalog.requirements_json)
+    if catalog.source_name != "goozali" or stored.reader_version == GOOZALI_READER_VERSION:
+        return stored
+    return classify_goozali_text(catalog.description_text, catalog.role)
+
+
+def _catalog_fields(catalog: SharedJobCatalog, requirements: JobRequirements) -> list[str]:
+    stored_fields = _json_list(catalog.career_fields_json)
+    declared_field = stored_fields[0] if catalog.source_name == "goozali" and stored_fields else ""
+    return route_job_fields(catalog.role, requirements, declared_field)
+
+
+def _career_field_eligible(interests: set[str], fields: list[str]) -> bool:
+    # Career choices are an explicit user filter, not a soft scoring signal.
+    # The first field is the role's primary function; secondary technical domains
+    # must not make a management or operations role leak into an engineering feed.
+    return bool(fields and fields[0] in interests)
+
+
 def _cheap_eligible(snapshot, requirements, job_location: str) -> bool:
-    if requirements.seniority == "senior" and snapshot.years_experience < 3:
+    if (
+        requirements.min_years_experience > 0
+        and snapshot.years_experience < requirements.min_years_experience
+    ):
         return False
-    if requirements.min_years_experience >= 3 and snapshot.years_experience == 0:
+    senior_years = (
+        max(4.0, requirements.min_years_experience)
+        if requirements.experience_requirement_known
+        else 5.0
+    )
+    if requirements.seniority == "senior" and snapshot.years_experience < senior_years:
         return False
     if "part-time" in snapshot.availability.lower() and "full-time" in requirements.availability.lower():
         return False

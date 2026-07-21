@@ -101,8 +101,18 @@ for domain, role, skills in ROLE_CASES:
 def test_reviewed_calibration_ranges(case_id, candidate, requirements, minimum, maximum):
     result = score_match(candidate, "Ignored Company", case_id, requirements, 1.0)
     assert minimum <= result.score <= maximum
-    assert result.model_version == "fit-v2.3.0"
+    assert result.model_version == "fit-v2.4.0"
     assert result.feature_snapshot["component_scores"]
+
+
+def test_candidate_below_stated_experience_minimum_is_blocked():
+    candidate = _candidate(["python", "postgresql"], "backend", years=3)
+    requirements = _requirements("backend", ["python", "postgresql"], years=4)
+
+    result = score_match(candidate, "Ignored Company", "Backend Developer", requirements, 1.0)
+
+    assert result.score <= 60
+    assert any("Experience mismatch" in blocker for blocker in result.missing_blockers)
 
 
 def test_template_catalog_is_complete_and_never_leaks_tokens():

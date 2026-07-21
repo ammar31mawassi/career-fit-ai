@@ -38,6 +38,11 @@ class GoozaliJob:
     source_published_at: datetime | None
     discovered_at: datetime
     source_confidence: float
+    requirements_text: str = ""
+    employment_scope: str = ""
+    language_requirements: str = ""
+    education_requirements: str = ""
+    minimum_experience: str = ""
 
 
 @dataclass(frozen=True)
@@ -183,6 +188,11 @@ def parse_shared_view(payload: object, bootstrap: _Bootstrap | None = None) -> G
                 source_published_at=published_at,
                 discovered_at=discovered_at,
                 source_confidence=0.92 if requirements else 0.82,
+                requirements_text=requirements,
+                employment_scope=scope,
+                language_requirements=languages,
+                education_requirements=education,
+                minimum_experience=min_experience,
             )
         )
     jobs.sort(key=lambda item: item.discovered_at, reverse=True)
