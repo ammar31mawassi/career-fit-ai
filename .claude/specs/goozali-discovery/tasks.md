@@ -46,9 +46,9 @@
 - **Dependencies**: T-2, T-3, T-4
 
 ### T-6: Verify and document the beta
-- **Status**: in_progress
+- **Status**: completed
 - **Wired**: n/a
-- **Verified**: no
+- **Verified**: yes
 - **Requirements**: US-1, US-2, US-3, US-4
 - **Description**: Run backend tests, frontend checks/build, diff checks, secret scan, and document risks and rollout steps.
 - **Acceptance**: Full automated verification passes and the independent-source fragility is documented.
