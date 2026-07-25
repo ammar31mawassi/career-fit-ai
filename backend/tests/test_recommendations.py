@@ -10,12 +10,16 @@ from sqlmodel import Session, SQLModel, create_engine, select
 from app.models import (
     Job,
     JobDiscoveryBetaMember,
+    JobMatch,
     JobRecommendation,
     Profile,
     ProfileInterest,
+    RecommendationEvent,
+    RecommendationFieldCalibration,
     RecommendationRun,
     SharedJobCatalog,
 )
+from app.services.jobs import update_job_status
 from app.services.job_research import classify_requirements
 from app.services.job_routing import route_job_fields
 from app.services.matcher import MODEL_VERSION
@@ -23,6 +27,8 @@ from app.services.recommendations import (
     catalog_and_enqueue_job,
     generate_shadow_recommendations,
     list_recommendations,
+    record_recommendation_view,
+    refresh_field_calibration,
     refresh_user_recommendations,
     update_recommendation,
 )
@@ -80,7 +86,16 @@ class _ObservationScorer(_StrongScorer):
 class _BelowThresholdScorer(_ObservationScorer):
     def score(self, *_args, **_kwargs):
         result = super().score()
-        result.score = 64.0
+        result.score = 39.0
+        result.fit_level = "Weak"
+        return result
+
+
+class _PossibleScorer(_ObservationScorer):
+    def score(self, *_args, **_kwargs):
+        result = super().score()
+        result.score = 40.0
+        result.fit_level = "Weak"
         return result
 
 
@@ -264,7 +279,7 @@ def test_deleted_source_account_does_not_break_recommendation_run(monkeypatch):
     assert run.candidate_count == 1
 
 
-def test_goozali_suggestions_use_65_floor_and_explicit_beta_membership(monkeypatch):
+def test_goozali_suggestions_use_discovery_floor_and_explicit_beta_membership(monkeypatch):
     engine = _engine()
     SQLModel.metadata.create_all(engine)
     monkeypatch.setattr("app.services.recommendations.get_match_scorer", lambda: _ObservationScorer())
@@ -298,10 +313,10 @@ def test_goozali_suggestions_use_65_floor_and_explicit_beta_membership(monkeypat
     assert recommendations[0].status == "available"
 
 
-def test_community_suggestions_share_the_65_discovery_floor(monkeypatch):
+def test_community_suggestions_include_the_40_discovery_floor(monkeypatch):
     engine = _engine()
     SQLModel.metadata.create_all(engine)
-    monkeypatch.setattr("app.services.recommendations.get_match_scorer", lambda: _ObservationScorer())
+    monkeypatch.setattr("app.services.recommendations.get_match_scorer", lambda: _PossibleScorer())
 
     with Session(engine) as session:
         _profile(session, RELEVANT, "Software Engineering")
@@ -322,8 +337,45 @@ def test_community_suggestions_share_the_65_discovery_floor(monkeypatch):
         recommendation = session.exec(select(JobRecommendation)).one()
 
     assert run.strong_count == 1
-    assert recommendation.score == 68
+    assert recommendation.score == 40
     assert recommendation.status == "available"
+
+
+def test_field_calibration_threshold_is_applied_during_scoring(monkeypatch):
+    engine = _engine()
+    SQLModel.metadata.create_all(engine)
+    monkeypatch.setattr("app.services.recommendations.get_match_scorer", lambda: _PossibleScorer())
+
+    with Session(engine) as session:
+        _profile(session, RELEVANT, "Software Engineering")
+        session.add(
+            RecommendationFieldCalibration(
+                career_field="Software Engineering",
+                minimum_score=50,
+                sample_size=20,
+                positive_count=10,
+                negative_count=10,
+            )
+        )
+        requirements = classify_requirements("Requirements: Python and SQL.", "Backend Intern")
+        catalog = SharedJobCatalog(
+            content_hash="field-calibrated-threshold",
+            role="Backend Intern",
+            career_fields_json='["Software Engineering"]',
+            requirements_json=requirements.to_json(),
+            source_confidence=0.9,
+        )
+        session.add(catalog)
+        session.commit()
+        session.refresh(catalog)
+
+        run = generate_shadow_recommendations(session, catalog.id or 0, None)
+        recommendation = session.exec(select(JobRecommendation)).one()
+
+    assert run.scored_count == 1
+    assert run.strong_count == 0
+    assert recommendation.score == 40
+    assert recommendation.status == "shadow_observation"
 
 
 def test_goozali_primary_field_is_a_hard_user_filter(monkeypatch):
@@ -587,10 +639,183 @@ def test_discovery_refresh_does_not_resurface_a_dismissed_role(monkeypatch):
         )
         session.commit()
         first = refresh_user_recommendations(session, RELEVANT)
-        update_recommendation(session, RELEVANT, first[0].id, "dismissed")
+        update_recommendation(
+            session,
+            RELEVANT,
+            first[0].id,
+            "dismissed",
+            dismiss_reason="not_interested",
+        )
 
         second = refresh_user_recommendations(session, RELEVANT)
         persisted = session.exec(select(JobRecommendation)).one()
 
     assert second == []
     assert persisted.status == "dismissed"
+
+
+def test_recommendation_events_are_idempotent_and_snapshot_dismiss_reason():
+    engine = _engine()
+    SQLModel.metadata.create_all(engine)
+
+    with Session(engine) as session:
+        _profile(session, RELEVANT, "Software Engineering")
+        requirements = classify_requirements("Requirements: Python and SQL.", "Backend Developer")
+        catalog = SharedJobCatalog(
+            content_hash="feedback-event-job",
+            source_name="goozali",
+            role="Backend Developer",
+            career_fields_json='["Software Engineering"]',
+            requirements_json=requirements.to_json(),
+            source_confidence=0.9,
+        )
+        session.add(catalog)
+        session.commit()
+        session.refresh(catalog)
+        recommendation = JobRecommendation(
+            user_id=RELEVANT,
+            catalog_job_id=catalog.id or 0,
+            model_version=MODEL_VERSION,
+            score=47,
+            fit_level="Weak",
+            confidence=0.7,
+            status="available",
+            career_fields_json='["Software Engineering"]',
+        )
+        session.add(recommendation)
+        session.commit()
+        session.refresh(recommendation)
+
+        record_recommendation_view(session, RELEVANT, recommendation.id or 0)
+        record_recommendation_view(session, RELEVANT, recommendation.id or 0)
+        update_recommendation(
+            session,
+            RELEVANT,
+            recommendation.id or 0,
+            "dismissed",
+            dismiss_reason="wrong_field",
+        )
+        events = list(
+            session.exec(
+                select(RecommendationEvent).order_by(RecommendationEvent.event_type)
+            ).all()
+        )
+
+    assert [event.event_type for event in events] == ["dismissed", "viewed"]
+    dismissed = events[0]
+    assert dismissed.dismiss_reason == "wrong_field"
+    assert dismissed.score_band == "possible"
+    assert dismissed.career_field == "Software Engineering"
+    assert dismissed.source_name == "goozali"
+
+
+def test_applied_job_status_records_recommendation_application_once():
+    engine = _engine()
+    SQLModel.metadata.create_all(engine)
+
+    with Session(engine) as session:
+        _profile(session, RELEVANT, "Software Engineering")
+        requirements = classify_requirements("Requirements: Python and SQL.", "Backend Developer")
+        catalog = SharedJobCatalog(
+            content_hash="application-event-job",
+            role="Backend Developer",
+            career_fields_json='["Software Engineering"]',
+            requirements_json=requirements.to_json(),
+            source_confidence=0.9,
+        )
+        job = Job(
+            user_id=RELEVANT,
+            content_hash="application-event-job",
+            role="Backend Developer",
+            requirements_json=requirements.to_json(),
+            status="analyzed",
+        )
+        session.add_all([catalog, job])
+        session.commit()
+        session.refresh(catalog)
+        session.refresh(job)
+        match = JobMatch(user_id=RELEVANT, job_id=job.id or 0, status="Lead")
+        recommendation = JobRecommendation(
+            user_id=RELEVANT,
+            catalog_job_id=catalog.id or 0,
+            materialized_job_id=job.id,
+            model_version=MODEL_VERSION,
+            score=72,
+            fit_level="Medium",
+            confidence=0.8,
+            status="saved",
+            career_fields_json='["Software Engineering"]',
+        )
+        session.add_all([match, recommendation])
+        session.commit()
+
+        update_job_status(session, RELEVANT, job.id or 0, "Applied")
+        update_job_status(session, RELEVANT, job.id or 0, "Applied")
+        events = list(
+            session.exec(
+                select(RecommendationEvent).where(
+                    RecommendationEvent.event_type == "applied"
+                )
+            ).all()
+        )
+
+    assert len(events) == 1
+    assert events[0].materialized_job_id == job.id
+    assert events[0].score_band == "medium"
+
+
+def test_field_calibration_raises_only_the_noisy_field_threshold():
+    engine = _engine()
+    SQLModel.metadata.create_all(engine)
+
+    with Session(engine) as session:
+        _profile(session, RELEVANT, "Product Management")
+        for index in range(20):
+            catalog = SharedJobCatalog(
+                content_hash=f"calibration-job-{index}",
+                role=f"Product role {index}",
+                career_fields_json='["Product Management"]',
+            )
+            session.add(catalog)
+            session.flush()
+            possible = index < 8
+            recommendation = JobRecommendation(
+                user_id=RELEVANT,
+                catalog_job_id=catalog.id or 0,
+                model_version=f"{MODEL_VERSION}-calibration-{index}",
+                score=45 if possible else 82,
+                fit_level="Weak" if possible else "Strong",
+                confidence=0.8,
+                status="dismissed" if possible else "saved",
+                career_fields_json='["Product Management"]',
+            )
+            session.add(recommendation)
+            session.flush()
+            session.add(
+                RecommendationEvent(
+                    user_id=RELEVANT,
+                    recommendation_id=recommendation.id or 0,
+                    catalog_job_id=catalog.id or 0,
+                    event_type="dismissed" if possible else "saved",
+                    dismiss_reason="wrong_field" if possible else "",
+                    score=recommendation.score,
+                    score_band="possible" if possible else "strong",
+                    career_field="Product Management",
+                    model_version=recommendation.model_version,
+                )
+            )
+        session.commit()
+
+        calibration = refresh_field_calibration(session, "Product Management")
+        session.commit()
+        session.refresh(calibration)
+        untouched = session.get(RecommendationFieldCalibration, "Software Engineering")
+        calibration_values = (
+            calibration.minimum_score,
+            calibration.sample_size,
+            calibration.possible_sample_size,
+            calibration.possible_positive_count,
+        )
+
+    assert calibration_values == (50, 20, 8, 0)
+    assert untouched is None

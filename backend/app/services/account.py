@@ -17,12 +17,14 @@ from ..models import (
     Profile,
     ProfileFactFeedback,
     ProfileSource,
+    RecommendationEvent,
 )
 from ..schemas import (
     AccountExportOut,
     AccountFeedbackExportOut,
     AccountNotificationDeliveryOut,
     AccountNotificationPreferenceOut,
+    AccountRecommendationEventOut,
     AccountRequirementFeedbackOut,
     AccountSourceExportOut,
 )
@@ -61,6 +63,13 @@ def export_account(session: Session, user_id: UUID) -> AccountExportOut:
             select(NotificationDelivery)
             .where(NotificationDelivery.user_id == user_id)
             .order_by(NotificationDelivery.created_at)
+        ).all()
+    )
+    recommendation_feedback = list(
+        session.exec(
+            select(RecommendationEvent)
+            .where(RecommendationEvent.user_id == user_id)
+            .order_by(RecommendationEvent.created_at)
         ).all()
     )
     return AccountExportOut(
@@ -116,6 +125,20 @@ def export_account(session: Session, user_id: UUID) -> AccountExportOut:
                 sent_at=item.sent_at,
             )
             for item in notification_deliveries
+        ],
+        recommendation_feedback=[
+            AccountRecommendationEventOut(
+                recommendation_id=item.recommendation_id,
+                event_type=item.event_type,
+                dismiss_reason=item.dismiss_reason,
+                score=item.score,
+                score_band=item.score_band,
+                career_field=item.career_field,
+                source_name=item.source_name,
+                model_version=item.model_version,
+                created_at=item.created_at,
+            )
+            for item in recommendation_feedback
         ],
         jobs=list_jobs(session, user_id, limit=10_000),
     )

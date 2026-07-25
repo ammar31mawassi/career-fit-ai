@@ -362,6 +362,18 @@ class AccountNotificationDeliveryOut(BaseModel):
     sent_at: datetime | None = None
 
 
+class AccountRecommendationEventOut(BaseModel):
+    recommendation_id: int
+    event_type: str
+    dismiss_reason: str
+    score: float
+    score_band: str
+    career_field: str
+    source_name: str
+    model_version: str
+    created_at: datetime
+
+
 class AccountExportOut(BaseModel):
     exported_at: datetime
     profile: ProfileOut
@@ -371,6 +383,7 @@ class AccountExportOut(BaseModel):
     discovery_market: str = ""
     notification_preference: AccountNotificationPreferenceOut | None = None
     notification_deliveries: list[AccountNotificationDeliveryOut] = Field(default_factory=list)
+    recommendation_feedback: list[AccountRecommendationEventOut] = Field(default_factory=list)
     jobs: list[JobOut] = Field(default_factory=list)
 
 
@@ -454,6 +467,27 @@ class JobRecommendationOut(BaseModel):
 
 class JobRecommendationPatchIn(BaseModel):
     status: Literal["dismissed", "saved"]
+    dismiss_reason: Literal[
+        "too_senior",
+        "wrong_field",
+        "wrong_location",
+        "missing_skills",
+        "employment_type",
+        "not_interested",
+        "other",
+    ] | None = None
+
+    @model_validator(mode="after")
+    def validate_dismiss_reason(self):
+        if self.status == "dismissed" and self.dismiss_reason is None:
+            raise ValueError("Choose why this recommendation is not suitable.")
+        if self.status != "dismissed" and self.dismiss_reason is not None:
+            raise ValueError("Dismiss reasons are only accepted for dismissed recommendations.")
+        return self
+
+
+class JobRecommendationEventIn(BaseModel):
+    event_type: Literal["viewed"]
 
 
 class JobRecommendationActionOut(BaseModel):

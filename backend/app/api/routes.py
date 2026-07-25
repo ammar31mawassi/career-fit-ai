@@ -21,6 +21,7 @@ from ..schemas import (
     JobCreateIn,
     JobOut,
     JobRecommendationActionOut,
+    JobRecommendationEventIn,
     JobRecommendationOut,
     JobRecommendationPatchIn,
     JobSummaryPageOut,
@@ -78,6 +79,7 @@ from ..services.profile import (
 from ..services.recommendations import (
     list_recommendations,
     process_one_queued_recommendation,
+    record_recommendation_view,
     refresh_user_recommendations,
     update_recommendation,
 )
@@ -373,9 +375,28 @@ def patch_recommendation(
 ) -> JobRecommendationActionOut:
     try:
         recommendation, job = update_recommendation(
-            session, user_id, recommendation_id, payload.status
+            session,
+            user_id,
+            recommendation_id,
+            payload.status,
+            dismiss_reason=payload.dismiss_reason,
         )
         return JobRecommendationActionOut(recommendation=recommendation, job=job)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/recommendations/{recommendation_id}/events", status_code=204)
+def create_recommendation_event(
+    recommendation_id: int,
+    payload: JobRecommendationEventIn,
+    user_id: UUID = Depends(current_user_id),
+    session: Session = Depends(get_session),
+) -> Response:
+    try:
+        if payload.event_type == "viewed":
+            record_recommendation_view(session, user_id, recommendation_id)
+        return Response(status_code=204)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 

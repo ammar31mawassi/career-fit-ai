@@ -39,7 +39,7 @@ from .agent_workflows import (
 from .job_research import JOB_READER_VERSION, extract_job_from_input, requirements_from_json
 from .matcher import MODEL_VERSION
 from .profile import candidate_snapshot, get_or_create_profile
-from .recommendations import catalog_and_enqueue_job
+from .recommendations import catalog_and_enqueue_job, record_recommendation_application
 from .scoring import get_match_scorer
 from .telemetry import record_evaluation_example, record_extraction_metric, safe_error_code
 
@@ -447,6 +447,8 @@ def update_job_status(session: Session, user_id: UUID, job_id: int, status: str)
     session.add(match)
     if previous_status != status:
         session.add(JobStatusEvent(user_id=user_id, match_id=match.id or 0, status=status, created_at=_now()))
+        if status == "Applied":
+            record_recommendation_application(session, user_id, job_id)
     session.commit()
     return job_output(session, user_id, job_id)
 

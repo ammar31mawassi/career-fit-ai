@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterator
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
 from sqlalchemy import or_, text
+from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
 from ..models import (
@@ -14,6 +15,8 @@ from ..models import (
     JobRecommendation,
     Profile,
     ProfileInterest,
+    RecommendationEvent,
+    RecommendationFieldCalibration,
     RecommendationRun,
     SharedJobCatalog,
 )
@@ -33,8 +36,20 @@ MAX_DISCOVERY_SCORE_BUDGET = 250
 DISCOVERY_CATALOG_BATCH_SIZE = 250
 SHADOW_SCORE_THRESHOLD = 76.0
 SHADOW_CONFIDENCE_THRESHOLD = 0.55
-DISCOVERY_SUGGESTION_THRESHOLD = 65.0
+DISCOVERY_SUGGESTION_THRESHOLD = 40.0
 DISCOVERY_SUGGESTION_CONFIDENCE = 0.45
+CALIBRATION_WINDOW_DAYS = 90
+CALIBRATION_MINIMUM_SAMPLE = 20
+CALIBRATION_BAND_MINIMUM_SAMPLE = 8
+DISMISS_REASONS = {
+    "too_senior",
+    "wrong_field",
+    "wrong_location",
+    "missing_skills",
+    "employment_type",
+    "not_interested",
+    "other",
+}
 
 
 def catalog_and_enqueue_job(session: Session, source_user_id: UUID, job: Job) -> SharedJobCatalog | None:
@@ -122,6 +137,7 @@ def generate_shadow_recommendations(
         profiles = list(session.exec(statement).all())
         run.candidate_count = len(profiles)
         scorer = get_match_scorer()
+        minimum_score = discovery_threshold_for_field(session, fields[0] if fields else "")
         for profile in profiles:
             snapshot = candidate_snapshot(session, profile)
             scored, is_strong = _score_catalog_for_profile(
@@ -132,6 +148,7 @@ def generate_shadow_recommendations(
                 requirements,
                 fields,
                 scorer,
+                minimum_score=minimum_score,
             )
             run.scored_count += int(scored)
             if is_strong:
@@ -213,14 +230,29 @@ def list_recommendations(session: Session, user_id: UUID, limit: int = 12) -> li
         ).all()
     }
     snapshot = candidate_snapshot(session, profile)
-    output: list[JobRecommendationOut] = []
+    prepared: list[tuple[JobRecommendation, SharedJobCatalog, JobRequirements, list[str]]] = []
+    primary_fields: set[str] = set()
     for item in recommendations:
         catalog = catalogs.get(item.catalog_job_id)
         if catalog is None:
             continue
         requirements = _catalog_requirements(catalog)
         fields = _catalog_fields(catalog, requirements)
+        prepared.append((item, catalog, requirements, fields))
+        primary_fields.add(fields[0] if fields else "")
+    calibrations = {
+        item.career_field: item.minimum_score
+        for item in session.exec(
+            select(RecommendationFieldCalibration).where(
+                RecommendationFieldCalibration.career_field.in_(primary_fields or {"__none__"})
+            )
+        ).all()
+    }
+    output: list[JobRecommendationOut] = []
+    for item, catalog, requirements, fields in prepared:
         if not _career_field_eligible(interests, fields):
+            continue
+        if item.score < calibrations.get(fields[0] if fields else "", DISCOVERY_SUGGESTION_THRESHOLD):
             continue
         if not _cheap_eligible(snapshot, requirements, catalog.location):
             continue
@@ -261,6 +293,7 @@ def refresh_user_recommendations(
     ).first() is not None
     snapshot = candidate_snapshot(session, profile)
     scorer = get_match_scorer()
+    threshold_cache: dict[str, float] = {}
     recommendation_target = max(1, min(limit, MAX_DISCOVERY_BACKFILL_JOBS))
     scored = 0
     available = 0
@@ -271,6 +304,9 @@ def refresh_user_recommendations(
             continue
         if catalog.first_seen_by == user_id:
             continue
+        primary_field = fields[0] if fields else ""
+        if primary_field not in threshold_cache:
+            threshold_cache[primary_field] = discovery_threshold_for_field(session, primary_field)
         was_scored, is_available = _score_catalog_for_profile(
             session,
             catalog,
@@ -280,6 +316,7 @@ def refresh_user_recommendations(
             fields,
             scorer,
             queue_email=False,
+            minimum_score=threshold_cache[primary_field],
         )
         scored += int(was_scored)
         available += int(is_available)
@@ -294,6 +331,8 @@ def update_recommendation(
     user_id: UUID,
     recommendation_id: int,
     status: str,
+    *,
+    dismiss_reason: str | None = None,
 ) -> tuple[JobRecommendationOut, JobOut | None]:
     # Imported lazily because jobs catalogues completed scans into this module.
     from .jobs import job_output, save_match
@@ -304,14 +343,28 @@ def update_recommendation(
     catalog = session.get(SharedJobCatalog, recommendation.catalog_job_id)
     if catalog is None or not catalog.active:
         raise ValueError("Recommended job is no longer available.")
+    if status not in {"dismissed", "saved"}:
+        raise ValueError("Unsupported recommendation action.")
+    if recommendation.status in {"dismissed", "saved"} and recommendation.status != status:
+        raise ValueError("Recommendation was already handled.")
+    if recommendation.status not in {"available", "shadow_eligible", status}:
+        raise ValueError("Recommendation is not actionable.")
     if status == "dismissed":
+        if dismiss_reason not in DISMISS_REASONS:
+            raise ValueError("Choose a valid dismissal reason.")
         recommendation.status = "dismissed"
         recommendation.updated_at = _now()
         session.add(recommendation)
+        _record_recommendation_event(
+            session,
+            recommendation,
+            catalog,
+            "dismissed",
+            dismiss_reason=dismiss_reason,
+        )
+        refresh_field_calibration(session, _primary_field(recommendation))
         session.commit()
         return _recommendation_out(recommendation, catalog), None
-    if status != "saved":
-        raise ValueError("Unsupported recommendation action.")
     job = session.exec(
         select(Job).where(Job.user_id == user_id, Job.content_hash == catalog.content_hash)
     ).first()
@@ -334,10 +387,213 @@ def update_recommendation(
     profile = session.exec(select(Profile).where(Profile.user_id == user_id)).one()
     save_match(session, user_id, profile, job, commit=False)
     recommendation.status = "saved"
+    recommendation.materialized_job_id = job.id
     recommendation.updated_at = _now()
     session.add(recommendation)
+    _record_recommendation_event(session, recommendation, catalog, "saved", materialized_job_id=job.id)
+    refresh_field_calibration(session, _primary_field(recommendation))
     session.commit()
     return _recommendation_out(recommendation, catalog), job_output(session, user_id, job.id or 0)
+
+
+def record_recommendation_view(
+    session: Session,
+    user_id: UUID,
+    recommendation_id: int,
+) -> None:
+    recommendation = session.get(JobRecommendation, recommendation_id)
+    if recommendation is None or recommendation.user_id != user_id:
+        raise ValueError("Recommendation not found.")
+    catalog = session.get(SharedJobCatalog, recommendation.catalog_job_id)
+    if catalog is None:
+        raise ValueError("Recommended job is no longer available.")
+    _record_recommendation_event(session, recommendation, catalog, "viewed")
+    session.commit()
+
+
+def record_recommendation_application(
+    session: Session,
+    user_id: UUID,
+    job_id: int,
+) -> None:
+    recommendation = session.exec(
+        select(JobRecommendation)
+        .where(
+            JobRecommendation.user_id == user_id,
+            JobRecommendation.materialized_job_id == job_id,
+        )
+        .order_by(JobRecommendation.updated_at.desc())
+    ).first()
+    if recommendation is None:
+        job = session.get(Job, job_id)
+        if job is None or job.user_id != user_id:
+            return
+        catalog = session.exec(
+            select(SharedJobCatalog).where(SharedJobCatalog.content_hash == job.content_hash)
+        ).first()
+        if catalog is None:
+            return
+        recommendation = session.exec(
+            select(JobRecommendation)
+            .where(
+                JobRecommendation.user_id == user_id,
+                JobRecommendation.catalog_job_id == (catalog.id or 0),
+                JobRecommendation.status == "saved",
+            )
+            .order_by(JobRecommendation.updated_at.desc())
+        ).first()
+        if recommendation is None:
+            return
+        recommendation.materialized_job_id = job_id
+        session.add(recommendation)
+    catalog = session.get(SharedJobCatalog, recommendation.catalog_job_id)
+    if catalog is None:
+        return
+    _record_recommendation_event(
+        session,
+        recommendation,
+        catalog,
+        "applied",
+        materialized_job_id=job_id,
+    )
+    refresh_field_calibration(session, _primary_field(recommendation))
+
+
+def discovery_threshold_for_field(session: Session, career_field: str) -> float:
+    if not career_field:
+        return DISCOVERY_SUGGESTION_THRESHOLD
+    calibration = session.get(RecommendationFieldCalibration, career_field)
+    if calibration is None or calibration.minimum_score not in {40.0, 50.0, 65.0}:
+        return DISCOVERY_SUGGESTION_THRESHOLD
+    return calibration.minimum_score
+
+
+def refresh_field_calibration(
+    session: Session,
+    career_field: str,
+) -> RecommendationFieldCalibration | None:
+    if not career_field or career_field == "unknown":
+        return None
+    cutoff = _now() - timedelta(days=CALIBRATION_WINDOW_DAYS)
+    events = list(
+        session.exec(
+            select(
+                RecommendationEvent.recommendation_id,
+                RecommendationEvent.event_type,
+                RecommendationEvent.score,
+            ).where(
+                RecommendationEvent.career_field == career_field,
+                RecommendationEvent.event_type.in_(["saved", "applied", "dismissed"]),
+                RecommendationEvent.created_at >= cutoff,
+            )
+        ).all()
+    )
+    # A recommendation may be saved and later applied. It still contributes one
+    # positive example so frequent users do not receive extra voting weight.
+    outcomes: dict[int, tuple[bool, float]] = {}
+    for recommendation_id, event_type, score in events:
+        is_positive = event_type in {"saved", "applied"}
+        current = outcomes.get(recommendation_id)
+        if current is None or (is_positive and not current[0]):
+            outcomes[recommendation_id] = (is_positive, score)
+
+    values = list(outcomes.values())
+    possible = [value for value in values if 40 <= value[1] < 50]
+    medium = [value for value in values if 50 <= value[1] < 65]
+    positive_count = sum(1 for is_positive, _score in values if is_positive)
+    possible_positive_count = sum(1 for is_positive, _score in possible if is_positive)
+    medium_positive_count = sum(1 for is_positive, _score in medium if is_positive)
+
+    minimum_score = DISCOVERY_SUGGESTION_THRESHOLD
+    if len(values) >= CALIBRATION_MINIMUM_SAMPLE:
+        if (
+            len(possible) >= CALIBRATION_BAND_MINIMUM_SAMPLE
+            and possible_positive_count / len(possible) < 0.15
+        ):
+            minimum_score = 50.0
+        if (
+            len(medium) >= CALIBRATION_BAND_MINIMUM_SAMPLE
+            and medium_positive_count / len(medium) < 0.20
+        ):
+            minimum_score = 65.0
+
+    calibration = session.get(RecommendationFieldCalibration, career_field)
+    if calibration is None:
+        calibration = RecommendationFieldCalibration(career_field=career_field)
+    calibration.minimum_score = minimum_score
+    calibration.sample_size = len(values)
+    calibration.positive_count = positive_count
+    calibration.negative_count = len(values) - positive_count
+    calibration.possible_sample_size = len(possible)
+    calibration.possible_positive_count = possible_positive_count
+    calibration.medium_sample_size = len(medium)
+    calibration.medium_positive_count = medium_positive_count
+    calibration.window_days = CALIBRATION_WINDOW_DAYS
+    calibration.updated_at = _now()
+    session.add(calibration)
+    session.flush()
+    return calibration
+
+
+def _record_recommendation_event(
+    session: Session,
+    recommendation: JobRecommendation,
+    catalog: SharedJobCatalog,
+    event_type: str,
+    *,
+    dismiss_reason: str = "",
+    materialized_job_id: int | None = None,
+) -> RecommendationEvent:
+    recommendation_id = recommendation.id or 0
+    existing = session.exec(
+        select(RecommendationEvent).where(
+            RecommendationEvent.user_id == recommendation.user_id,
+            RecommendationEvent.recommendation_id == recommendation_id,
+            RecommendationEvent.event_type == event_type,
+        )
+    ).first()
+    if existing is not None:
+        return existing
+    event = RecommendationEvent(
+        user_id=recommendation.user_id,
+        recommendation_id=recommendation_id,
+        catalog_job_id=recommendation.catalog_job_id,
+        materialized_job_id=materialized_job_id or recommendation.materialized_job_id,
+        event_type=event_type,
+        dismiss_reason=dismiss_reason,
+        score=recommendation.score,
+        score_band=_score_band(recommendation.score),
+        career_field=_primary_field(recommendation),
+        source_name=catalog.source_name,
+        model_version=recommendation.model_version,
+    )
+    try:
+        with session.begin_nested():
+            session.add(event)
+            session.flush()
+    except IntegrityError:
+        concurrent = session.exec(
+            select(RecommendationEvent).where(
+                RecommendationEvent.user_id == recommendation.user_id,
+                RecommendationEvent.recommendation_id == recommendation_id,
+                RecommendationEvent.event_type == event_type,
+            )
+        ).one()
+        return concurrent
+    return event
+
+
+def _primary_field(recommendation: JobRecommendation) -> str:
+    fields = _json_list(recommendation.career_fields_json)
+    return fields[0].strip() if fields and fields[0].strip() else "unknown"
+
+
+def _score_band(score: float) -> str:
+    if score < 50:
+        return "possible"
+    if score < 75:
+        return "medium"
+    return "strong"
 
 
 def enqueue_catalog_job(
@@ -372,6 +628,7 @@ def _score_catalog_for_profile(
     scorer,
     *,
     queue_email: bool = True,
+    minimum_score: float | None = None,
 ) -> tuple[bool, bool]:
     already_saved = session.exec(
         select(Job.id).where(
@@ -388,7 +645,12 @@ def _score_catalog_for_profile(
         requirements,
         catalog.source_confidence,
     )
-    is_available = _is_available_recommendation(result)
+    threshold = (
+        minimum_score
+        if minimum_score is not None
+        else discovery_threshold_for_field(session, fields[0] if fields else "")
+    )
+    is_available = _is_available_recommendation(result, threshold)
     recommendation = session.exec(
         select(JobRecommendation).where(
             JobRecommendation.user_id == profile.user_id,
@@ -545,12 +807,15 @@ def _cheap_eligible(snapshot, requirements, job_location: str) -> bool:
     return not candidate_tokens or not job_tokens or bool(candidate_tokens & job_tokens)
 
 
-def _is_available_recommendation(result) -> bool:
+def _is_available_recommendation(
+    result,
+    minimum_score: float = DISCOVERY_SUGGESTION_THRESHOLD,
+) -> bool:
     if result.missing_blockers:
         return False
     return (
-        result.fit_level in {"Medium", "Strong"}
-        and result.score >= DISCOVERY_SUGGESTION_THRESHOLD
+        result.fit_level in {"Weak", "Medium", "Strong"}
+        and result.score >= max(DISCOVERY_SUGGESTION_THRESHOLD, min(65.0, minimum_score))
         and result.confidence >= DISCOVERY_SUGGESTION_CONFIDENCE
     )
 

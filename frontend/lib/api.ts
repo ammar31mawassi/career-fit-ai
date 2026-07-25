@@ -242,6 +242,15 @@ export type JobRecommendation = {
   created_at: string;
 };
 
+export type RecommendationDismissReason =
+  | "too_senior"
+  | "wrong_field"
+  | "wrong_location"
+  | "missing_skills"
+  | "employment_type"
+  | "not_interested"
+  | "other";
+
 export type NotificationPreference = {
   eligible: boolean;
   delivery_available: boolean;
@@ -263,6 +272,7 @@ export type AccountExport = {
   discovery_market: string;
   notification_preference: { email_enabled: boolean; unsubscribed_at: string | null } | null;
   notification_deliveries: Array<{ recommendation_id: number; channel: string; status: string; attempts: number; created_at: string; sent_at: string | null }>;
+  recommendation_feedback: Array<{ recommendation_id: number; event_type: string; dismiss_reason: string; score: number; score_band: string; career_field: string; source_name: string; model_version: string; created_at: string }>;
   jobs: TrackedJob[];
 };
 
@@ -483,10 +493,24 @@ export function refreshRecommendations() {
   return request<JobRecommendation[]>("/api/recommendations/refresh", { method: "POST" });
 }
 
-export function updateRecommendation(recommendationId: number, status: "dismissed" | "saved") {
+export function updateRecommendation(
+  recommendationId: number,
+  status: "dismissed" | "saved",
+  dismissReason?: RecommendationDismissReason
+) {
   return request<{ recommendation: JobRecommendation; job: TrackedJob | null }>(`/api/recommendations/${recommendationId}`, {
     method: "PATCH",
-    body: JSON.stringify({ status })
+    body: JSON.stringify({
+      status,
+      ...(dismissReason ? { dismiss_reason: dismissReason } : {})
+    })
+  });
+}
+
+export function recordRecommendationView(recommendationId: number) {
+  return requestEmpty(`/api/recommendations/${recommendationId}/events`, {
+    method: "POST",
+    body: JSON.stringify({ event_type: "viewed" })
   });
 }
 

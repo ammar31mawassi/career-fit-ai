@@ -334,6 +334,7 @@ class JobRecommendation(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     user_id: UUID = Field(index=True)
     catalog_job_id: int = Field(foreign_key="shared_job_catalog.id", index=True)
+    materialized_job_id: Optional[int] = Field(default=None, foreign_key="jobs.id", index=True)
     score: float = 0.0
     fit_level: str = Field(default="Weak", index=True)
     confidence: float = 0.0
@@ -343,6 +344,48 @@ class JobRecommendation(SQLModel, table=True):
     model_version: str = Field(default="", index=True)
     status: str = Field(default="shadow_observation", index=True)
     created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
+
+
+class RecommendationEvent(SQLModel, table=True):
+    __tablename__ = "recommendation_events"
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id",
+            "recommendation_id",
+            "event_type",
+            name="uq_recommendation_event_type",
+        ),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    user_id: UUID = Field(index=True)
+    recommendation_id: int = Field(foreign_key="job_recommendations.id", index=True)
+    catalog_job_id: int = Field(foreign_key="shared_job_catalog.id", index=True)
+    materialized_job_id: Optional[int] = Field(default=None, foreign_key="jobs.id", index=True)
+    event_type: str = Field(index=True)
+    dismiss_reason: str = ""
+    score: float = 0.0
+    score_band: str = Field(index=True)
+    career_field: str = Field(default="unknown", index=True)
+    source_name: str = Field(default="community", index=True)
+    model_version: str = Field(default="", index=True)
+    created_at: datetime = Field(default_factory=utc_now)
+
+
+class RecommendationFieldCalibration(SQLModel, table=True):
+    __tablename__ = "recommendation_field_calibrations"
+
+    career_field: str = Field(primary_key=True)
+    minimum_score: float = 40.0
+    sample_size: int = 0
+    positive_count: int = 0
+    negative_count: int = 0
+    possible_sample_size: int = 0
+    possible_positive_count: int = 0
+    medium_sample_size: int = 0
+    medium_positive_count: int = 0
+    window_days: int = 90
     updated_at: datetime = Field(default_factory=utc_now)
 
 

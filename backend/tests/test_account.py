@@ -6,7 +6,14 @@ from uuid import UUID
 from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel, create_engine
 
-from app.models import Profile, ProfileFactFeedback, ProfileSource
+from app.models import (
+    JobRecommendation,
+    Profile,
+    ProfileFactFeedback,
+    ProfileSource,
+    RecommendationEvent,
+    SharedJobCatalog,
+)
 from app.services import account
 
 
@@ -44,6 +51,33 @@ def test_account_export_contains_user_content_without_private_storage_paths():
                 original_value="python",
             )
         )
+        catalog = SharedJobCatalog(content_hash="account-feedback-job", role="Backend Developer")
+        session.add(catalog)
+        session.flush()
+        recommendation = JobRecommendation(
+            user_id=USER_ID,
+            catalog_job_id=catalog.id or 0,
+            model_version="fit-v-test",
+            score=44,
+            fit_level="Weak",
+            status="dismissed",
+            career_fields_json='["Software Engineering"]',
+        )
+        session.add(recommendation)
+        session.flush()
+        session.add(
+            RecommendationEvent(
+                user_id=USER_ID,
+                recommendation_id=recommendation.id or 0,
+                catalog_job_id=catalog.id or 0,
+                event_type="dismissed",
+                dismiss_reason="too_senior",
+                score=44,
+                score_band="possible",
+                career_field="Software Engineering",
+                model_version="fit-v-test",
+            )
+        )
         session.commit()
 
         exported = account.export_account(session, USER_ID)
@@ -53,6 +87,8 @@ def test_account_export_contains_user_content_without_private_storage_paths():
     assert "storage_path" not in payload["sources"][0]
     assert "storage_path" not in payload["profile"]["sources"][0]
     assert payload["fact_feedback"][0]["action"] == "approved"
+    assert payload["recommendation_feedback"][0]["dismiss_reason"] == "too_senior"
+    assert payload["recommendation_feedback"][0]["score_band"] == "possible"
 
 
 def test_admin_account_deletion_uses_server_identity_headers(monkeypatch):
