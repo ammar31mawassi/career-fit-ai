@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator
 from datetime import datetime, timezone
 from uuid import UUID
 
-from sqlalchemy import text
+from sqlalchemy import or_, text
 from sqlmodel import Session, select
 
 from ..models import (
@@ -28,10 +29,12 @@ from .scoring import get_match_scorer
 QUEUE_NAME = "careerfit_job_recommendations"
 MAX_CANDIDATES_PER_JOB = 250
 MAX_DISCOVERY_BACKFILL_JOBS = 40
+MAX_DISCOVERY_SCORE_BUDGET = 250
+DISCOVERY_CATALOG_BATCH_SIZE = 250
 SHADOW_SCORE_THRESHOLD = 76.0
 SHADOW_CONFIDENCE_THRESHOLD = 0.55
-GOOZALI_SUGGESTION_THRESHOLD = 65.0
-GOOZALI_SUGGESTION_CONFIDENCE = 0.45
+DISCOVERY_SUGGESTION_THRESHOLD = 65.0
+DISCOVERY_SUGGESTION_CONFIDENCE = 0.45
 
 
 def catalog_and_enqueue_job(session: Session, source_user_id: UUID, job: Job) -> SharedJobCatalog | None:
@@ -232,7 +235,7 @@ def refresh_user_recommendations(
     user_id: UUID,
     limit: int = MAX_DISCOVERY_BACKFILL_JOBS,
 ) -> list[JobRecommendationOut]:
-    """Score recent catalog jobs for a user who just enabled or updated discovery."""
+    """Score eligible catalog jobs for a user who enabled or updated discovery."""
     profile = session.exec(select(Profile).where(Profile.user_id == user_id)).first()
     if (
         profile is None
@@ -256,27 +259,19 @@ def refresh_user_recommendations(
             JobDiscoveryBetaMember.active.is_(True),
         )
     ).first() is not None
-    catalogs = list(
-        session.exec(
-            select(SharedJobCatalog)
-            .where(SharedJobCatalog.active.is_(True))
-            .order_by(SharedJobCatalog.updated_at.desc())
-            .limit(max(1, min(limit, MAX_DISCOVERY_BACKFILL_JOBS)) * 4)
-        ).all()
-    )
     snapshot = candidate_snapshot(session, profile)
     scorer = get_match_scorer()
+    recommendation_target = max(1, min(limit, MAX_DISCOVERY_BACKFILL_JOBS))
     scored = 0
-    for catalog in catalogs:
+    available = 0
+    for catalog in _candidate_catalogs(session, interests, beta_member):
         requirements = _catalog_requirements(catalog)
         fields = _catalog_fields(catalog, requirements)
         if not _career_field_eligible(interests, fields):
             continue
-        if catalog.source_name == "goozali" and not beta_member:
-            continue
         if catalog.first_seen_by == user_id:
             continue
-        was_scored, _ = _score_catalog_for_profile(
+        was_scored, is_available = _score_catalog_for_profile(
             session,
             catalog,
             profile,
@@ -287,7 +282,8 @@ def refresh_user_recommendations(
             queue_email=False,
         )
         scored += int(was_scored)
-        if scored >= limit:
+        available += int(is_available)
+        if available >= recommendation_target or scored >= MAX_DISCOVERY_SCORE_BUDGET:
             break
     session.commit()
     return list_recommendations(session, user_id, limit=30)
@@ -392,7 +388,7 @@ def _score_catalog_for_profile(
         requirements,
         catalog.source_confidence,
     )
-    is_available = _is_available_recommendation(catalog.source_name, result)
+    is_available = _is_available_recommendation(result)
     recommendation = session.exec(
         select(JobRecommendation).where(
             JobRecommendation.user_id == profile.user_id,
@@ -432,7 +428,7 @@ def _score_catalog_for_profile(
         from .notifications import queue_recommendation_email
 
         queue_recommendation_email(session, recommendation)
-    return True, is_available
+    return True, is_available and not terminal_status
 
 
 def _json_list(value: str) -> list[str]:
@@ -482,6 +478,38 @@ def _catalog_requirements(catalog: SharedJobCatalog) -> JobRequirements:
     return classify_goozali_text(catalog.description_text, catalog.role)
 
 
+def _candidate_catalogs(
+    session: Session,
+    interests: set[str],
+    beta_member: bool,
+) -> Iterator[SharedJobCatalog]:
+    """Page through field-relevant jobs before applying expensive scoring."""
+    field_filters = [
+        SharedJobCatalog.career_fields_json.contains(json.dumps(interest))
+        for interest in sorted(interests)
+    ]
+    catalog_filters = [
+        SharedJobCatalog.active.is_(True),
+        or_(*field_filters),
+    ]
+    if not beta_member:
+        catalog_filters.append(SharedJobCatalog.source_name != "goozali")
+    offset = 0
+    while True:
+        statement = (
+            select(SharedJobCatalog)
+            .where(*catalog_filters)
+            .order_by(SharedJobCatalog.updated_at.desc(), SharedJobCatalog.id.desc())
+            .offset(offset)
+            .limit(DISCOVERY_CATALOG_BATCH_SIZE)
+        )
+        batch = list(session.exec(statement).all())
+        if not batch:
+            return
+        yield from batch
+        offset += len(batch)
+
+
 def _catalog_fields(catalog: SharedJobCatalog, requirements: JobRequirements) -> list[str]:
     stored_fields = _json_list(catalog.career_fields_json)
     declared_field = stored_fields[0] if catalog.source_name == "goozali" and stored_fields else ""
@@ -517,19 +545,13 @@ def _cheap_eligible(snapshot, requirements, job_location: str) -> bool:
     return not candidate_tokens or not job_tokens or bool(candidate_tokens & job_tokens)
 
 
-def _is_available_recommendation(source_name: str, result) -> bool:
+def _is_available_recommendation(result) -> bool:
     if result.missing_blockers:
         return False
-    if source_name == "goozali":
-        return (
-            result.fit_level in {"Medium", "Strong"}
-            and result.score >= GOOZALI_SUGGESTION_THRESHOLD
-            and result.confidence >= GOOZALI_SUGGESTION_CONFIDENCE
-        )
     return (
-        result.fit_level == "Strong"
-        and result.score >= SHADOW_SCORE_THRESHOLD
-        and result.confidence >= SHADOW_CONFIDENCE_THRESHOLD
+        result.fit_level in {"Medium", "Strong"}
+        and result.score >= DISCOVERY_SUGGESTION_THRESHOLD
+        and result.confidence >= DISCOVERY_SUGGESTION_CONFIDENCE
     )
 
 

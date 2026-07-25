@@ -2,7 +2,21 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
-import { Compass, LockKeyhole, Radar, RefreshCw, Save, ShieldCheck, Sparkles, UsersRound } from "lucide-react";
+import {
+  BriefcaseBusiness,
+  ChevronDown,
+  Clock3,
+  Compass,
+  LockKeyhole,
+  Power,
+  Radar,
+  RefreshCw,
+  Save,
+  ShieldCheck,
+  Sparkles,
+  Target,
+  UsersRound
+} from "lucide-react";
 import { useAppData } from "@/components/AppDataProvider";
 import { CareerInterestPicker } from "@/components/CareerInterestPicker";
 import { RecommendedMatches } from "@/components/home/RecommendedMatches";
@@ -164,17 +178,12 @@ export function DiscoverClient() {
 
   return (
     <div className="discover-page">
-      <header className="page-heading discover-hero">
-        <div>
+      <header className={`page-heading discover-hero ${enabled ? "is-enabled" : "is-disabled"}`}>
+        <div className="discover-hero-copy">
           <span className="eyebrow"><Compass size={14} /> Private job discovery</span>
-          <h1>Let the right roles<br /><em>find their way to you.</em></h1>
-          <p>One private feed combines eligible Goozali roles with jobs discovered through CareerFit scans. Your CV, evidence, and score are never shared.</p>
+          <h1>Jobs that fit you,<br /><em>before you search.</em></h1>
+          <p>CareerFit checks Goozali and community-scanned roles against your approved profile. Your CV, evidence, and score always stay private.</p>
         </div>
-        {enabled ? (
-          <button className="button quiet" disabled={loadingMatches} onClick={() => void reloadMatches()} type="button">
-            <RefreshCw className={loadingMatches ? "spin" : ""} size={16} /> Refresh matches
-          </button>
-        ) : null}
       </header>
 
       {error || dataError ? <div className="notice error" role="alert">{error || dataError}</div> : null}
@@ -185,12 +194,12 @@ export function DiscoverClient() {
           <div className="discover-permission-copy">
             <span className="discover-orbit" aria-hidden><Radar size={32} /></span>
             <span className="section-kicker">Discovery is off</span>
-            <h2 id="discover-permission-title">Allow CareerFit to look for matching jobs</h2>
-            <p>CareerFit will privately compare your approved profile with one combined catalog: public beta sources available to your account and roles shared when other people scan them.</p>
+            <h2 id="discover-permission-title">Turn your profile into a private job radar</h2>
+            <p>Choose the work you want. CareerFit will compare your approved evidence with one combined catalog and only show roles that clear the matching threshold.</p>
             <div className="discover-principles">
               <span><ShieldCheck size={17} /><b>Private matching</b><small>Only you see your evidence and score.</small></span>
-              <span><UsersRound size={17} /><b>One shared feed</b><small>Goozali and community scans appear together.</small></span>
-              <span><LockKeyhole size={17} /><b>Your control</b><small>Pause discovery or dismiss any role.</small></span>
+              <span><UsersRound size={17} /><b>One useful feed</b><small>Goozali and shared scans stay together.</small></span>
+              <span><LockKeyhole size={17} /><b>You decide</b><small>Save, dismiss, or pause at any time.</small></span>
             </div>
           </div>
           <div className="discover-permission-action">
@@ -220,11 +229,23 @@ export function DiscoverClient() {
       ) : (
         <>
           <section className="discover-status-strip" aria-label="Discovery status">
-            <div className="discovery-live"><span aria-hidden /><div><small>Status</small><strong>Discovery on</strong></div></div>
-            <div><small>Watching</small><strong>{careerInterests.length} career {careerInterests.length === 1 ? "field" : "fields"}</strong></div>
-            <div><small>Current feed</small><strong>{recommendations.length ? `${recommendations.length} ${recommendations.length === 1 ? "match" : "matches"} · ${sourceCount} ${sourceCount === 1 ? "source" : "sources"}` : "Watching the unified catalog"}</strong></div>
-            <div><small>Refresh cycle</small><strong>Hourly + shared scans</strong></div>
-            <button className="button quiet" disabled={saving} onClick={() => void pauseDiscovery()} type="button">Pause discovery</button>
+            <div className="discovery-live">
+              <span aria-hidden />
+              <div><small>Discovery status</small><strong>Actively watching</strong></div>
+            </div>
+            <div className="discover-status-facts">
+              <span><Target size={15} aria-hidden /><span><small>Direction</small><strong>{careerInterests.length} {careerInterests.length === 1 ? "field" : "fields"}</strong></span></span>
+              <span><BriefcaseBusiness size={15} aria-hidden /><span><small>Current feed</small><strong>{recommendations.length ? `${recommendations.length} ${recommendations.length === 1 ? "match" : "matches"} · ${sourceCount} ${sourceCount === 1 ? "source" : "sources"}` : "Watching for a match"}</strong></span></span>
+              <span><Clock3 size={15} aria-hidden /><span><small>Next checks</small><strong>Hourly + shared scans</strong></span></span>
+            </div>
+            <div className="discover-status-actions">
+              <button className="button quiet" disabled={loadingMatches} onClick={() => void reloadMatches()} type="button">
+                <RefreshCw className={loadingMatches ? "spin" : ""} size={15} /> {loadingMatches ? "Checking…" : "Check now"}
+              </button>
+              <button className="button quiet discover-pause" disabled={saving} onClick={() => void pauseDiscovery()} type="button">
+                <Power size={15} /> Pause
+              </button>
+            </div>
           </section>
 
           <RecommendedMatches
@@ -240,15 +261,26 @@ export function DiscoverClient() {
             showEmpty
           />
 
-          <section className="discover-settings-grid">
-            <div className="panel discover-direction-panel">
-              <div className="section-heading compact-heading">
-                <div><span className="section-kicker">Discovery direction</span><h2>Fields we watch</h2><p>Changing these fields immediately rechecks existing roles.</p></div>
-                <span className="review-count">{careerInterests.length} selected</span>
+          <section className="discover-settings-grid" aria-label="Discovery settings">
+            <details className="panel discover-direction-panel">
+              <summary className="discover-settings-summary">
+                <span className="discover-settings-icon"><Target size={18} aria-hidden /></span>
+                <span>
+                  <small>Discovery settings</small>
+                  <strong>Change the fields we watch</strong>
+                  <span>{careerInterests.length} selected · Changes are only applied when you save.</span>
+                </span>
+                <ChevronDown className="discover-settings-chevron" size={18} aria-hidden />
+              </summary>
+              <div className="discover-settings-body">
+                <div className="section-heading compact-heading">
+                  <div><span className="section-kicker">Your direction</span><h2>Which roles should enter your feed?</h2><p>Career fields are a hard filter. They never inflate a match score.</p></div>
+                  <span className="review-count">{careerInterests.length} selected</span>
+                </div>
+                <CareerInterestPicker disabled={saving} onChange={setCareerInterests} selected={careerInterests} />
+                <div className="form-actions"><button className="button primary" disabled={saving || !careerInterests.length} onClick={() => void saveDirection()} type="button"><Save size={15} /> {saving ? "Saving…" : "Save and recheck"}</button></div>
               </div>
-              <CareerInterestPicker disabled={saving} onChange={setCareerInterests} selected={careerInterests} />
-              <div className="form-actions"><button className="button primary" disabled={saving || !careerInterests.length} onClick={() => void saveDirection()} type="button"><Save size={15} /> Save and recheck</button></div>
-            </div>
+            </details>
           </section>
         </>
       )}

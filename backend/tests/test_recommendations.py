@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from uuid import UUID
 
@@ -73,6 +74,23 @@ class _ObservationScorer(_StrongScorer):
         result = super().score()
         result.score = 68.0
         result.fit_level = "Medium"
+        return result
+
+
+class _BelowThresholdScorer(_ObservationScorer):
+    def score(self, *_args, **_kwargs):
+        result = super().score()
+        result.score = 64.0
+        return result
+
+
+class _RoleAwareScorer(_StrongScorer):
+    def score(self, *_args, **_kwargs):
+        result = super().score()
+        role = str(_args[2])
+        if role.startswith("Weak"):
+            result.score = 30.0
+            result.fit_level = "Weak"
         return result
 
 
@@ -167,7 +185,7 @@ def test_candidate_who_already_saved_job_is_not_rescored(monkeypatch):
 def test_non_eligible_scores_are_kept_for_shadow_calibration(monkeypatch):
     engine = _engine()
     SQLModel.metadata.create_all(engine)
-    monkeypatch.setattr("app.services.recommendations.get_match_scorer", lambda: _ObservationScorer())
+    monkeypatch.setattr("app.services.recommendations.get_match_scorer", lambda: _BelowThresholdScorer())
 
     with Session(engine) as session:
         _profile(session, RELEVANT, "Software Engineering")
@@ -278,6 +296,34 @@ def test_goozali_suggestions_use_65_floor_and_explicit_beta_membership(monkeypat
     assert recommendations[0].user_id == RELEVANT
     assert recommendations[0].score == 68
     assert recommendations[0].status == "available"
+
+
+def test_community_suggestions_share_the_65_discovery_floor(monkeypatch):
+    engine = _engine()
+    SQLModel.metadata.create_all(engine)
+    monkeypatch.setattr("app.services.recommendations.get_match_scorer", lambda: _ObservationScorer())
+
+    with Session(engine) as session:
+        _profile(session, RELEVANT, "Software Engineering")
+        requirements = classify_requirements("Requirements: Python and SQL.", "Backend Intern")
+        catalog = SharedJobCatalog(
+            content_hash="community-unified-threshold",
+            source_name="community",
+            role="Backend Intern",
+            career_fields_json='["Software Engineering"]',
+            requirements_json=requirements.to_json(),
+            source_confidence=0.9,
+        )
+        session.add(catalog)
+        session.commit()
+        session.refresh(catalog)
+
+        run = generate_shadow_recommendations(session, catalog.id or 0, None)
+        recommendation = session.exec(select(JobRecommendation)).one()
+
+    assert run.strong_count == 1
+    assert recommendation.score == 68
+    assert recommendation.status == "available"
 
 
 def test_goozali_primary_field_is_a_hard_user_filter(monkeypatch):
@@ -412,6 +458,88 @@ def test_discovery_refresh_unifies_community_and_goozali_matches(monkeypatch):
         recommendations = refresh_user_recommendations(session, RELEVANT)
 
     assert {item.source_name for item in recommendations} == {"community", "goozali"}
+
+
+def test_discovery_refresh_pages_past_newer_secondary_field_jobs(monkeypatch):
+    engine = _engine()
+    SQLModel.metadata.create_all(engine)
+    monkeypatch.setattr("app.services.recommendations.get_match_scorer", lambda: _StrongScorer())
+    now = datetime(2026, 7, 25, tzinfo=timezone.utc)
+
+    with Session(engine) as session:
+        _profile(session, RELEVANT, "Software Engineering")
+        requirements = classify_requirements("Requirements: Python and SQL.", "Backend Intern")
+        session.add(
+            SharedJobCatalog(
+                content_hash="older-eligible-job",
+                company="Relevant",
+                role="Backend Intern",
+                career_fields_json='["Software Engineering"]',
+                requirements_json=requirements.to_json(),
+                source_confidence=0.9,
+                updated_at=now - timedelta(days=1),
+            )
+        )
+        session.add_all(
+            [
+                SharedJobCatalog(
+                    content_hash=f"newer-irrelevant-job-{index}",
+                    company="Irrelevant",
+                    role=f"Product Manager {index}",
+                    career_fields_json='["Product Management", "Software Engineering"]',
+                    requirements_json=requirements.to_json(),
+                    source_confidence=0.9,
+                    updated_at=now,
+                )
+                for index in range(260)
+            ]
+        )
+        session.commit()
+
+        recommendations = refresh_user_recommendations(session, RELEVANT)
+
+    assert [item.role for item in recommendations] == ["Backend Intern"]
+
+
+def test_discovery_refresh_continues_past_weak_scores_to_find_strong_match(monkeypatch):
+    engine = _engine()
+    SQLModel.metadata.create_all(engine)
+    monkeypatch.setattr("app.services.recommendations.get_match_scorer", lambda: _RoleAwareScorer())
+    now = datetime(2026, 7, 25, tzinfo=timezone.utc)
+
+    with Session(engine) as session:
+        _profile(session, RELEVANT, "Software Engineering")
+        requirements = classify_requirements("Requirements: Python and SQL.", "Backend Intern")
+        session.add(
+            SharedJobCatalog(
+                content_hash="older-strong-job",
+                company="Relevant",
+                role="Backend Intern",
+                career_fields_json='["Software Engineering"]',
+                requirements_json=requirements.to_json(),
+                source_confidence=0.9,
+                updated_at=now - timedelta(days=1),
+            )
+        )
+        session.add_all(
+            [
+                SharedJobCatalog(
+                    content_hash=f"newer-weak-job-{index}",
+                    company="Irrelevant",
+                    role=f"Weak Backend Role {index}",
+                    career_fields_json='["Software Engineering"]',
+                    requirements_json=requirements.to_json(),
+                    source_confidence=0.9,
+                    updated_at=now,
+                )
+                for index in range(40)
+            ]
+        )
+        session.commit()
+
+        recommendations = refresh_user_recommendations(session, RELEVANT)
+
+    assert [item.role for item in recommendations] == ["Backend Intern"]
 
 
 def test_discovery_refresh_keeps_goozali_limited_to_beta_members(monkeypatch):
