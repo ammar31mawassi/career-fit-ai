@@ -1,0 +1,13 @@
+[
+  {
+    "date": "2026-07-28",
+    "mode": "Architecture Audit",
+    "score": 38,
+    "findings": {
+      "critical": 2,
+      "warning": 6,
+      "suggestion": 2
+    },
+    "scope": "Full repository, deployment configuration, data model, tests, and read-only live product flows"
+  }
+]
