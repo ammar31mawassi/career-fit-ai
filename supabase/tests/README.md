@@ -1,6 +1,6 @@
 # PostgreSQL tenant-security regression harness
 
-This harness executes the canonical fresh-install schema and the v18-to-v22
+This harness executes the canonical fresh-install schema and the v18-to-v24
 upgrade path against an isolated stock PostgreSQL 16 container. It never reads
 the repository's `DATABASE_URL` and does not expose a database port.
 

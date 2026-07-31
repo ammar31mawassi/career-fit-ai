@@ -1,8 +1,8 @@
 # Environment and scheduler preflight
 
 Status: required checklist; environment evidence not yet attached
-Last reviewed: 2026-07-30
-Database contract: v22
+Last reviewed: 2026-07-31
+Database contract: v24
 
 Run this checklist in staging before production. Store pass/fail evidence with
 the release; never copy secret values into the evidence.
@@ -95,7 +95,7 @@ OCR worker variables and enforced ranges are documented in
 
 ## Database and Storage v21
 
-For a fresh project, apply `supabase/schema.sql`, currently through v22. For an
+For a fresh project, apply `supabase/schema.sql`, currently through v24. For an
 existing project, apply only unapplied migrations in the recorded release order and follow
 `supabase/migrations/README.md`.
 
@@ -157,6 +157,43 @@ After applying v22, run the repository PostgreSQL harness and one real staging
 job-analysis/scan/recommendation journey. Roll back application code only to a
 version that writes the same JSON shapes and workflow states; the schema change
 is forward-only.
+
+### Application-event v23 preflight
+
+Before applying v23, inspect `job_status_events` for statuses outside the
+current application-stage enum and notes longer than 500 characters. Rehearse
+the migration against a restored staging database: existing events must receive
+their previous status in audit order, `occurred_at` must backfill from
+`created_at`, and their source must be `legacy`. A failed constraint or
+unexpected row count is a release stop.
+
+After applying v23, record one synthetic backdated stage transition through the
+API. Confirm that the current match changes, the append-only event retains both
+the observed time and database creation time, another tenant cannot read it,
+and repeating the same target stage does not append a duplicate event. Roll
+back application code only to a version that tolerates the new non-null event
+columns; the migration itself is forward-only.
+
+Apply v23 and v24 before deploying this backend, then deploy the frontend only
+after the expanded backend contract is healthy. Minimize the interval between
+migration and backend deployment, or pause stage-change writes during it: the
+older backend remains schema-compatible, but it cannot populate the new
+`previous_status` context for events created in that interval.
+
+### Source-health v24 preflight
+
+Before applying v24, confirm existing `job_source_runs.status` values are within
+`running`, `completed`, `failed`, or `disabled`, and rehearse the constraint
+replacement on the same restored staging database used for v23. After applying
+v24, both `degraded` and `inconclusive` must be accepted while an unknown value
+must still be rejected.
+
+Run one synthetic zero-yield discovery and one low-valid-ratio discovery in
+staging. Confirm the corresponding health status and reason code are persisted,
+safe rows may still be ingested, and no previously active catalog job is
+deactivated. Then run a healthy positive control and confirm the existing
+48-hour stale rule still works. Record counts and identifiers only; do not put
+job bodies, URLs, or candidate data in release evidence.
 
 ## Non-secret health checks
 
@@ -238,7 +275,7 @@ Attach to the release record:
 
 - environment name and deployment/Git identifiers;
 - checklist results with timestamps;
-- migration versions through v22;
+- migration versions through v24, including application-event and source-health rehearsals;
 - redacted health/readiness and scheduler status;
 - Storage and application synthetic-smoke evidence;
 - unresolved exceptions, accountable approver, expiry, and rollback trigger.

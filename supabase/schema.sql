@@ -1,4 +1,4 @@
--- Career Fit AI fresh-install Supabase schema through database contract v20.
+-- Career Fit AI fresh-install Supabase schema through database contract v24.
 -- Run once in a new Supabase project. Existing databases must use the
 -- forward-only files and recorded release order in supabase/migrations/.
 
@@ -213,8 +213,18 @@ create table if not exists public.job_status_events (
   id bigint generated always as identity primary key,
   user_id uuid not null references auth.users(id) on delete cascade,
   match_id bigint not null,
+  previous_status text not null default '',
   status text not null check (status in ('Lead', 'Applied', 'Interview', 'Rejected', 'Withdrawn', 'Offer')),
+  occurred_at timestamptz not null default now(),
+  source text not null default 'system',
+  note text not null default '',
   created_at timestamptz not null default now(),
+  constraint job_status_events_previous_status_check
+    check (previous_status in ('', 'Lead', 'Applied', 'Interview', 'Rejected', 'Withdrawn', 'Offer')),
+  constraint job_status_events_source_check
+    check (source in ('system', 'user', 'correction', 'backfill', 'legacy')),
+  constraint job_status_events_note_length_check
+    check (char_length(note) <= 500),
   constraint job_status_events_match_owner_fkey
     foreign key (match_id, user_id)
     references public.job_matches(id, user_id) on delete cascade
@@ -431,7 +441,9 @@ create table if not exists public.job_source_runs (
   error_code text not null default '',
   error text not null default '',
   created_at timestamptz not null default now(),
-  completed_at timestamptz
+  completed_at timestamptz,
+  constraint job_source_runs_status_check
+    check (status in ('running', 'completed', 'failed', 'disabled', 'degraded', 'inconclusive'))
 );
 
 create table if not exists public.job_discovery_beta_members (
@@ -571,7 +583,8 @@ create index if not exists jobs_user_company_role_idx on public.jobs (user_id, c
 create index if not exists job_matches_user_job_idx on public.job_matches (user_id, job_id);
 create index if not exists job_matches_user_status_idx on public.job_matches (user_id, status, updated_at desc);
 create index if not exists resume_advice_user_match_idx on public.resume_advice (user_id, match_id);
-create index if not exists job_status_events_user_match_created_idx on public.job_status_events (user_id, match_id, created_at);
+create index if not exists job_status_events_user_match_occurred_idx on public.job_status_events (user_id, match_id, occurred_at, created_at, id);
+create index if not exists job_status_events_user_match_audit_idx on public.job_status_events (user_id, match_id, id);
 create index if not exists agent_runs_user_subject_created_idx on public.agent_runs (user_id, workflow_type, subject_type, subject_id, created_at desc);
 create index if not exists agent_runs_user_status_created_idx on public.agent_runs (user_id, status, created_at desc);
 create index if not exists agent_steps_user_run_started_idx on public.agent_steps (user_id, run_id, started_at);

@@ -560,7 +560,14 @@ def patch_job_status(
     session: Session = Depends(get_session),
 ) -> JobOut:
     try:
-        return update_job_status(session, user_id, job_id, payload.status)
+        return update_job_status(
+            session,
+            user_id,
+            job_id,
+            payload.status,
+            occurred_at=payload.occurred_at,
+            note=payload.note,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -652,6 +659,8 @@ def process_discovery_work(
         "jobs_created": outcome.created,
         "jobs_updated": outcome.updated,
         "jobs_deactivated": outcome.deactivated,
+        "source_health_reason": outcome.health_reason,
+        "deactivation_suppressed": outcome.deactivation_suppressed,
         "recommendations_processed": recommendations_processed,
         "emails_processed": emails_processed,
     }

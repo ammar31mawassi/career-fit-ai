@@ -1,7 +1,7 @@
 # Database migration order
 
 `supabase/schema.sql` is the current fresh-install snapshot. It includes the
-database contract through v22 and must not be rerun over an existing database.
+database contract through v24 and must not be rerun over an existing database.
 
 The historical migrations predate the current timestamp naming convention.
 Several have the same date prefix, so lexicographic filename order is **not**
@@ -32,6 +32,8 @@ already recorded, in this release order:
 19. `20260730190000_job_scan_claims_v20.sql`
 20. `20260730210000_backend_mediated_storage_v21.sql`
 21. `20260730220000_data_contract_constraints_v22.sql`
+22. `20260731190000_application_event_context_v23.sql`
+23. `20260731200000_job_source_health_status_v24.sql`
 
 All new migrations use a unique 14-digit UTC timestamp, are forward-only, and
 must update `supabase/schema.sql` in the same change. Production deployment

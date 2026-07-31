@@ -1,4 +1,4 @@
--- Executed against both a fresh schema and the v18 -> v22 upgrade result.
+-- Executed against both a fresh schema and the v18 -> v24 upgrade result.
 
 do $$
 begin
@@ -25,6 +25,79 @@ begin
         = '(status = ANY (ARRAY[''queued''::text, ''running''::text, ''cancel_requested''::text]))'
   ) then
     raise exception 'active-input partial unique index is missing or has the wrong predicate';
+  end if;
+
+  if not exists (
+    select 1
+    from pg_constraint
+    join pg_class on pg_class.oid = pg_constraint.conrelid
+    join pg_namespace on pg_namespace.oid = pg_class.relnamespace
+    where pg_namespace.nspname = 'public'
+      and pg_class.relname = 'job_source_runs'
+      and pg_constraint.conname = 'job_source_runs_status_check'
+      and pg_constraint.contype = 'c'
+      and position('degraded' in pg_get_constraintdef(pg_constraint.oid)) > 0
+      and position('inconclusive' in pg_get_constraintdef(pg_constraint.oid)) > 0
+  ) then
+    raise exception 'job source run status constraint is missing or incomplete';
+  end if;
+
+  if (
+    select count(*)
+    from information_schema.columns
+    where table_schema = 'public'
+      and table_name = 'job_status_events'
+      and column_name in ('previous_status', 'occurred_at', 'source', 'note')
+      and is_nullable = 'NO'
+  ) <> 4 then
+    raise exception 'application-event context columns are missing or nullable';
+  end if;
+
+  if not exists (
+    select 1
+    from information_schema.columns
+    where table_schema = 'public'
+      and table_name = 'job_status_events'
+      and column_name = 'source'
+      and position('system' in coalesce(column_default, '')) > 0
+  ) then
+    raise exception 'application-event source default is not system';
+  end if;
+
+  if not exists (
+    select 1
+    from pg_class
+    join pg_namespace on pg_namespace.oid = pg_class.relnamespace
+    where pg_namespace.nspname = 'public'
+      and pg_class.relname = 'job_status_events_user_match_occurred_idx'
+      and pg_class.relkind = 'i'
+  ) then
+    raise exception 'application-event occurred-time index is missing';
+  end if;
+
+  if not exists (
+    select 1
+    from pg_class
+    join pg_namespace on pg_namespace.oid = pg_class.relnamespace
+    where pg_namespace.nspname = 'public'
+      and pg_class.relname = 'job_status_events_user_match_audit_idx'
+      and pg_class.relkind = 'i'
+  ) then
+    raise exception 'application-event audit-order index is missing';
+  end if;
+
+  if exists (
+    select 1
+    from pg_class
+    join pg_namespace on pg_namespace.oid = pg_class.relnamespace
+    where pg_namespace.nspname = 'public'
+      and pg_class.relname in (
+        'job_status_events_user_match_created_idx',
+        'idx_job_status_events_user_match_created'
+      )
+      and pg_class.relkind = 'i'
+  ) then
+    raise exception 'obsolete application-event created-time index remains';
   end if;
 end
 $$;

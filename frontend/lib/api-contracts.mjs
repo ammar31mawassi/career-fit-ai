@@ -11,6 +11,8 @@ const JOB_STATUSES = new Set(["Lead", "Applied", "Interview", "Rejected", "Withd
 const FIT_LEVELS = new Set(["Strong", "Medium", "Weak"]);
 const SCAN_STATUSES = new Set(["queued", "running", "succeeded", "failed", "cancel_requested", "cancelled"]);
 const FACT_REVIEW_STATUSES = new Set(["pending", "approved", "rejected"]);
+const OUTPUT_QUALITY_SEVERITIES = new Set(["error", "warning"]);
+const STATUS_EVENT_SOURCES = new Set(["system", "user", "correction", "backfill", "legacy"]);
 
 function fail() {
   throw new ContractValidationError();
@@ -201,11 +203,27 @@ function resumeAdvice(value) {
   string(data.about_text);
   string(data.template_id);
   stringArray(data.evidence);
+  string(data.template_version);
+  string(data.quality_policy_version);
+  boolean(data.quality_checked);
+  boolean(data.quality_repaired);
+  array(data.quality_findings, outputQualityFinding);
+}
+
+function outputQualityFinding(value) {
+  const data = record(value);
+  string(data.code);
+  enumValue(data.severity, OUTPUT_QUALITY_SEVERITIES);
+  string(data.message);
 }
 
 function statusHistoryItem(value) {
   const data = record(value);
+  if (data.previous_status !== null) enumValue(data.previous_status, JOB_STATUSES);
   enumValue(data.status, JOB_STATUSES);
+  string(data.occurred_at);
+  enumValue(data.source, STATUS_EVENT_SOURCES);
+  string(data.note);
   string(data.created_at);
 }
 

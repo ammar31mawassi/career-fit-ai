@@ -1023,6 +1023,39 @@ def test_rejected_fact_is_excluded_from_matching_and_feedback_is_saved():
     assert feedback[-1].action == "rejected"
 
 
+def test_project_or_rejected_transition_language_cannot_label_candidate_career_changer():
+    engine = _engine()
+    SQLModel.metadata.create_all(engine)
+    with Session(engine) as session:
+        profile = Profile(user_id=USER_ID, status="ready", years_experience=6)
+        session.add(profile)
+        session.commit()
+        session.refresh(profile)
+        session.add_all(
+            [
+                ProfileFact(
+                    user_id=USER_ID,
+                    profile_id=profile.id or 0,
+                    fact_type="project",
+                    value="Built a career transition dashboard for university students",
+                    review_status="approved",
+                ),
+                ProfileFact(
+                    user_id=USER_ID,
+                    profile_id=profile.id or 0,
+                    fact_type="about_me",
+                    value="Planning a career transition into data engineering",
+                    review_status="rejected",
+                ),
+            ]
+        )
+        session.commit()
+
+        snapshot = candidate_snapshot(session, profile)
+
+    assert snapshot.career_stage == "experienced"
+
+
 def test_bulk_fact_review_updates_once_and_records_each_decision():
     engine = _engine()
     SQLModel.metadata.create_all(engine)

@@ -7,14 +7,23 @@ import time
 import base64
 from collections.abc import Callable
 from dataclasses import asdict, replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
 from sqlalchemy import and_, or_
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
-from ..models import Job, JobMatch, JobRequirementRevision, JobStatusEvent, Profile, ResumeAdvice
+from ..models import (
+    AgentRun,
+    AgentStep,
+    Job,
+    JobMatch,
+    JobRequirementRevision,
+    JobStatusEvent,
+    Profile,
+    ResumeAdvice,
+)
 from ..schemas import (
     JobCreateIn,
     JobMatchOut,
@@ -38,6 +47,8 @@ from .agent_workflows import (
     start_agent_run,
     start_step,
 )
+from .advice_quality import OUTPUT_POLICY_VERSION, enforce_resume_advice
+from .about_templates import TEMPLATE_VERSION
 from .job_research import (
     JOB_READER_VERSION,
     extract_job_from_input,
@@ -96,13 +107,33 @@ def create_or_analyze_job(
     existing = session.exec(
         select(Job).where(Job.user_id == user_id, Job.content_hash == content_hash)
     ).first()
-    if existing and _can_reuse(existing, payload):
+    if existing and _can_reuse(session, user_id, existing, payload):
+        extraction_provenance = _latest_extraction_provenance(
+            session,
+            user_id,
+            existing.id or 0,
+            fallback_reader_version=requirements_from_json(
+                existing.requirements_json
+            ).reader_version,
+        )
         attach_subject(session, run, "job", existing.id or 0)
         complete_step(
             session,
             dedupe_step,
             "Existing job analysis reused; no rescan needed.",
             {"job_id": existing.id or 0, "reader_version": JOB_READER_VERSION},
+        )
+        reuse_extraction_step = start_step(
+            session,
+            run,
+            "extract_job",
+            "Reuse stored job extraction",
+        )
+        complete_step(
+            session,
+            reuse_extraction_step,
+            "Stored extraction provenance reused; no remote page was fetched.",
+            extraction_provenance,
         )
         complete_run(session, run, "Existing saved job reused.", status="reused")
         session.commit()
@@ -133,6 +164,18 @@ def create_or_analyze_job(
         )
     except Exception as exc:
         error_code = safe_error_code("JOB_READ", exc)
+        fallback_provenance = (
+            _latest_extraction_provenance(
+                session,
+                user_id,
+                existing.id or 0,
+                fallback_reader_version=requirements_from_json(
+                    existing.requirements_json
+                ).reader_version,
+            )
+            if existing and existing.status == "analyzed"
+            else {}
+        )
         logger.exception(
             "job_extraction_failed trace_id=%s error_code=%s",
             current_trace_id(),
@@ -142,7 +185,15 @@ def create_or_analyze_job(
             session,
             extraction_step,
             error_code,
-            {"has_source_url": bool(payload.source_url.strip())},
+            {
+                "has_source_url": bool(payload.source_url.strip()),
+                **fallback_provenance,
+                **(
+                    {"provenance_origin": "stored_fallback"}
+                    if fallback_provenance
+                    else {}
+                ),
+            },
         )
         if existing and existing.status == "analyzed":
             attach_subject(session, run, "job", existing.id or 0)
@@ -186,6 +237,8 @@ def create_or_analyze_job(
             "role": extracted.role,
             "source_confidence": round(extracted.source_confidence, 3),
             "description_chars": len(extracted.description_text),
+            "reader_strategy": extracted.reader_strategy,
+            "reader_version": extracted.requirements.reader_version,
         },
     )
     _report_progress(progress_callback, "classify_requirements", 55)
@@ -269,8 +322,11 @@ def create_or_analyze_job(
     complete_step(
         session,
         advice_step,
-        "Resume advice stored from evidenced projects, skills, and about templates.",
-        {"match_id": match.id or 0},
+        "Resume advice passed the evidence and clarity postcondition.",
+        {
+            "match_id": match.id or 0,
+            **_resume_advice_quality_snapshot(match.feature_snapshot_json),
+        },
     )
     complete_run(session, run, "Job analyzed, matched, and saved.")
     session.commit()
@@ -300,7 +356,7 @@ def _catalog_for_discovery(
         session.rollback()
 
 
-def _can_reuse(job: Job, payload: JobCreateIn) -> bool:
+def _can_reuse(session: Session, user_id: UUID, job: Job, payload: JobCreateIn) -> bool:
     if job.status != "analyzed":
         return False
     requirements = requirements_from_json(job.requirements_json)
@@ -310,7 +366,21 @@ def _can_reuse(job: Job, payload: JobCreateIn) -> bool:
     stored = " ".join(job.description_text.lower().split())
     if pasted and pasted != stored:
         return False
-    return True
+    match = session.exec(
+        select(JobMatch).where(JobMatch.user_id == user_id, JobMatch.job_id == job.id)
+    ).first()
+    if match is None:
+        return False
+    snapshot = _load_json_object(match.feature_snapshot_json)
+    quality = snapshot.get("resume_advice_quality")
+    template = snapshot.get("resume_advice_template")
+    return bool(
+        isinstance(quality, dict)
+        and quality.get("policy_version") == OUTPUT_POLICY_VERSION
+        and quality.get("passed") is True
+        and isinstance(template, dict)
+        and template.get("version") == TEMPLATE_VERSION
+    )
 
 
 def list_jobs(session: Session, user_id: UUID, query: str = "", limit: int = 100) -> list[JobOut]:
@@ -350,7 +420,7 @@ def list_jobs(session: Session, user_id: UUID, query: str = "", limit: int = 100
         events = session.exec(
             select(JobStatusEvent)
             .where(JobStatusEvent.user_id == user_id, JobStatusEvent.match_id.in_(match_ids))
-            .order_by(JobStatusEvent.created_at)
+            .order_by(JobStatusEvent.id)
         ).all()
         for event in events:
             events_by_match.setdefault(event.match_id, []).append(event)
@@ -496,22 +566,61 @@ def job_output(session: Session, user_id: UUID, job_id: int) -> JobOut:
     return _job_to_out(session, user_id, job)
 
 
-def update_job_status(session: Session, user_id: UUID, job_id: int, status: str) -> JobOut:
+def update_job_status(
+    session: Session,
+    user_id: UUID,
+    job_id: int,
+    status: str,
+    *,
+    occurred_at: datetime | None = None,
+    note: str = "",
+    source: str = "user",
+) -> JobOut:
     job = session.get(Job, job_id)
     if not job or job.user_id != user_id:
         raise ValueError("Job not found.")
-    match = session.exec(select(JobMatch).where(JobMatch.user_id == user_id, JobMatch.job_id == job_id)).first()
+    match = session.exec(
+        select(JobMatch)
+        .where(JobMatch.user_id == user_id, JobMatch.job_id == job_id)
+        .with_for_update()
+    ).first()
     if not match:
         profile = get_or_create_profile(session, user_id)
-        match = save_match(session, user_id, profile, job)
+        save_match(session, user_id, profile, job)
+        # save_match commits its insert/race recovery path. Reacquire the row
+        # lock so a first transition cannot race another first transition.
+        match = session.exec(
+            select(JobMatch)
+            .where(JobMatch.user_id == user_id, JobMatch.job_id == job_id)
+            .with_for_update()
+        ).one()
     previous_status = match.status
+    if previous_status == status:
+        # Release the row lock without changing updated_at or validating metadata
+        # for an event that will not be written.
+        session.commit()
+        return job_output(session, user_id, job_id)
+    event_time = _status_event_time(occurred_at)
+    clean_note = _status_note(note)
+    if source not in {"system", "user", "correction", "backfill", "legacy"}:
+        raise ValueError("Invalid application stage event source.")
     match.status = status
     match.updated_at = _now()
     session.add(match)
-    if previous_status != status:
-        session.add(JobStatusEvent(user_id=user_id, match_id=match.id or 0, status=status, created_at=_now()))
-        if status == "Applied":
-            record_recommendation_application(session, user_id, job_id)
+    session.add(
+        JobStatusEvent(
+            user_id=user_id,
+            match_id=match.id or 0,
+            previous_status=previous_status,
+            status=status,
+            occurred_at=event_time,
+            source=source,
+            note=clean_note,
+            created_at=_now(),
+        )
+    )
+    if status == "Applied":
+        record_recommendation_application(session, user_id, job_id)
     session.commit()
     return job_output(session, user_id, job_id)
 
@@ -635,6 +744,29 @@ def save_match(
         requirements,
         job.source_confidence,
     )
+    checked_advice = enforce_resume_advice(
+        snapshot,
+        job.role,
+        requirements,
+        projects=result.projects,
+        skill_order=result.skill_order,
+        about_text=result.about_text,
+        evidence=result.about_evidence,
+    )
+    feature_snapshot = dict(result.feature_snapshot)
+    feature_snapshot["resume_advice_template"] = {
+        "id": result.about_template_id,
+        "version": TEMPLATE_VERSION,
+    }
+    feature_snapshot["resume_advice_quality"] = checked_advice.report.public_dict()
+    result = replace(
+        result,
+        projects=checked_advice.projects,
+        skill_order=checked_advice.skill_order,
+        about_text=checked_advice.about_text,
+        about_evidence=checked_advice.evidence,
+        feature_snapshot=feature_snapshot,
+    )
     now = _now()
     match_values = {
         "score": result.score,
@@ -701,7 +833,11 @@ def save_match(
                 JobStatusEvent(
                     user_id=user_id,
                     match_id=match.id or 0,
+                    previous_status="",
                     status=match.status,
+                    occurred_at=now,
+                    source="system",
+                    note="",
                     created_at=now,
                 )
             )
@@ -918,7 +1054,7 @@ def _match_out(session: Session, user_id: UUID, match: JobMatch) -> JobMatchOut:
         session.exec(
             select(JobStatusEvent)
             .where(JobStatusEvent.user_id == user_id, JobStatusEvent.match_id == match.id)
-            .order_by(JobStatusEvent.created_at)
+            .order_by(JobStatusEvent.id)
         ).all()
     )
     return _match_to_out(match, advice, events)
@@ -929,6 +1065,18 @@ def _match_to_out(
     advice: ResumeAdvice | None,
     events: list[JobStatusEvent],
 ) -> JobMatchOut:
+    snapshot = _load_json_object(match.feature_snapshot_json)
+    quality = snapshot.get("resume_advice_quality")
+    template = snapshot.get("resume_advice_template")
+    quality = quality if isinstance(quality, dict) else {}
+    template = template if isinstance(template, dict) else {}
+    raw_findings = quality.get("findings")
+    findings = raw_findings if isinstance(raw_findings, list) else []
+    quality_current = bool(
+        quality.get("passed") is True
+        and quality.get("policy_version") == OUTPUT_POLICY_VERSION
+        and template.get("version") == TEMPLATE_VERSION
+    )
     return JobMatchOut(
         id=match.id or 0,
         score=match.score,
@@ -943,7 +1091,14 @@ def _match_to_out(
         component_scores=_load_dict(match.component_scores_json),
         applied_caps=_load_list(match.applied_caps_json),
         status_history=[
-            JobStatusEventOut(status=event.status, created_at=event.created_at)  # type: ignore[arg-type]
+            JobStatusEventOut(
+                previous_status=(event.previous_status or None),  # type: ignore[arg-type]
+                status=event.status,  # type: ignore[arg-type]
+                occurred_at=event.occurred_at,
+                source=event.source,  # type: ignore[arg-type]
+                note=event.note,
+                created_at=event.created_at,
+            )
             for event in events
         ],
         resume_advice=ResumeAdviceOut(
@@ -952,6 +1107,18 @@ def _match_to_out(
             about_text=advice.about_text if advice else "",
             template_id=advice.template_id if advice else "",
             evidence=_load_list(advice.evidence_json) if advice else [],
+            template_version=str(template.get("version") or ""),
+            quality_policy_version=str(quality.get("policy_version") or ""),
+            quality_checked=quality_current,
+            quality_repaired=bool(quality.get("repaired")),
+            quality_findings=[
+                item
+                for item in findings
+                if isinstance(item, dict)
+                and isinstance(item.get("code"), str)
+                and item.get("severity") in {"error", "warning"}
+                and isinstance(item.get("message"), str)
+            ],
         ),
         analyzed_at=match.analyzed_at,
     )
@@ -964,6 +1131,86 @@ def _content_hash(source_url: str, description: str, company: str, role: str) ->
     normalized_text = " ".join(description.lower().split())
     payload = "|".join([normalized_text, company.strip().lower(), role.strip().lower()])
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _status_event_time(value: datetime | None) -> datetime:
+    now = _now()
+    if value is None:
+        return now
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError("Application stage date must include a timezone.")
+    normalized = value.astimezone(timezone.utc)
+    if normalized > now + timedelta(minutes=5):
+        raise ValueError("Application stage date cannot be in the future.")
+    return normalized
+
+
+def _status_note(value: str) -> str:
+    if any(ord(character) < 32 and character not in "\t\n\r" for character in value):
+        raise ValueError("Application stage note contains a control character.")
+    cleaned = " ".join(value.split())
+    if len(cleaned) > 500:
+        raise ValueError("Application stage note must be 500 characters or fewer.")
+    return cleaned
+
+
+def _latest_extraction_provenance(
+    session: Session,
+    user_id: UUID,
+    job_id: int,
+    *,
+    fallback_reader_version: str,
+) -> dict[str, object]:
+    step = session.exec(
+        select(AgentStep)
+        .join(AgentRun, AgentRun.id == AgentStep.run_id)
+        .where(
+            AgentRun.user_id == user_id,
+            AgentRun.workflow_type == "job_reader",
+            AgentRun.subject_type == "job",
+            AgentRun.subject_id == job_id,
+            AgentStep.user_id == user_id,
+            AgentStep.step_key == "extract_job",
+            AgentStep.status == "completed",
+        )
+        .order_by(AgentRun.id.desc(), AgentStep.id.desc())
+    ).first()
+    stored = _load_json_object(step.output_json) if step is not None else {}
+    output: dict[str, object] = {}
+    strategy = stored.get("reader_strategy")
+    version = stored.get("reader_version")
+    if isinstance(strategy, str) and strategy:
+        output["reader_strategy"] = strategy
+    output["reader_version"] = (
+        version if isinstance(version, str) and version else fallback_reader_version
+    )
+    return output
+
+
+def _resume_advice_quality_snapshot(value: str) -> dict[str, object]:
+    snapshot = _load_json_object(value)
+    quality = snapshot.get("resume_advice_quality")
+    if not isinstance(quality, dict):
+        return {
+            "policy_version": "",
+            "template_version": "",
+            "evidence_count": 0,
+            "hard_error_count": 1,
+            "warning_codes": ["missing_quality_metadata"],
+        }
+    template = snapshot.get("resume_advice_template")
+    return {
+        "policy_version": str(quality.get("policy_version") or ""),
+        "template_version": (
+            str(template.get("version") or "") if isinstance(template, dict) else ""
+        ),
+        "evidence_count": int(quality.get("evidence_count") or 0),
+        "hard_error_count": int(quality.get("hard_error_count") or 0),
+        "warning_codes": (
+            quality.get("warning_codes") if isinstance(quality.get("warning_codes"), list) else []
+        ),
+        "repaired": bool(quality.get("repaired")),
+    }
 
 
 def _load_list(value: str) -> list[str]:
@@ -992,6 +1239,16 @@ def _load_dict(value: str) -> dict[str, float]:
         except (TypeError, ValueError):
             continue
     return output
+
+
+def _load_json_object(value: str) -> dict[str, object]:
+    if not value:
+        return {}
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
 
 
 def _unique_limited(values: list[str], limit: int) -> list[str]:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import statistics
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from uuid import UUID
@@ -28,6 +29,16 @@ class DiscoveryOutcome:
     updated: int = 0
     ignored: int = 0
     deactivated: int = 0
+    health_reason: str = ""
+    deactivation_suppressed: bool = False
+
+
+@dataclass(frozen=True)
+class SourceHealth:
+    status: str
+    reason_code: str = ""
+    message: str = ""
+    allow_deactivation: bool = True
 
 
 def run_goozali_discovery(
@@ -52,14 +63,23 @@ def run_goozali_discovery(
         return DiscoveryOutcome(status="disabled")
     try:
         result: GoozaliFetchResult = fetcher(settings.goozali_embed_url)
-        outcome = _ingest_fetch_result(session, result, settings, now)
-        run.status = "completed"
+        health = _classify_source_health(session, result, current_run_id=run.id or 0)
+        outcome = _ingest_fetch_result(
+            session,
+            result,
+            settings,
+            now,
+            health=health,
+        )
+        run.status = health.status
         run.records_seen = outcome.records_seen
         run.records_valid = outcome.records_valid
         run.created_count = outcome.created
         run.updated_count = outcome.updated
         run.ignored_count = outcome.ignored
         run.deactivated_count = outcome.deactivated
+        run.error_code = health.reason_code
+        run.error = health.message
         run.completed_at = datetime.now(timezone.utc)
         session.add(run)
         session.commit()
@@ -82,7 +102,10 @@ def _ingest_fetch_result(
     result: GoozaliFetchResult,
     settings: Settings,
     now: datetime,
+    *,
+    health: SourceHealth | None = None,
 ) -> DiscoveryOutcome:
+    health = health or SourceHealth(status="completed")
     existing = {
         item.external_id: item
         for item in session.exec(
@@ -141,26 +164,100 @@ def _ingest_fetch_result(
             enqueue_catalog_job(session, catalog.id or 0, None)
 
     deactivated = 0
-    for external_id, catalog in existing.items():
-        if external_id in seen_ids or not catalog.active:
-            continue
-        last_seen = catalog.last_seen_at or catalog.updated_at
-        if last_seen <= now - STALE_AFTER:
-            catalog.active = False
-            catalog.updated_at = now
-            session.add(catalog)
-            deactivated += 1
-    session.commit()
+    if health.allow_deactivation:
+        for external_id, catalog in existing.items():
+            if external_id in seen_ids or not catalog.active:
+                continue
+            last_seen = catalog.last_seen_at or catalog.updated_at
+            if _as_utc(last_seen) <= _as_utc(now) - STALE_AFTER:
+                catalog.active = False
+                catalog.updated_at = now
+                session.add(catalog)
+                deactivated += 1
+    # Keep catalog mutations, queue sends, and the terminal source-run audit in
+    # one transaction; run_goozali_discovery owns the final commit.
+    session.flush()
     ignored = max(0, result.records_valid - len(selected))
     return DiscoveryOutcome(
-        status="completed",
+        status=health.status,
         records_seen=result.records_seen,
         records_valid=result.records_valid,
         created=created,
         updated=updated,
         ignored=ignored,
         deactivated=deactivated,
+        health_reason=health.reason_code,
+        deactivation_suppressed=not health.allow_deactivation,
     )
+
+
+def _classify_source_health(
+    session: Session,
+    result: GoozaliFetchResult,
+    *,
+    current_run_id: int,
+) -> SourceHealth:
+    if (
+        result.records_seen < 0
+        or result.records_valid < 0
+        or result.records_valid > result.records_seen
+        or result.records_valid != len(result.jobs)
+    ):
+        return SourceHealth(
+            status="degraded",
+            reason_code="invalid_record_counts",
+            message="The source returned internally inconsistent record counts.",
+            allow_deactivation=False,
+        )
+    if result.records_seen == 0:
+        return SourceHealth(
+            status="inconclusive",
+            reason_code="zero_yield",
+            message="The source returned no records; stale jobs were preserved pending a healthy run.",
+            allow_deactivation=False,
+        )
+    if result.records_valid == 0 or (result.records_valid > 0 and not result.jobs):
+        return SourceHealth(
+            status="degraded",
+            reason_code="no_usable_records",
+            message="The source response contained records but none could be used safely.",
+            allow_deactivation=False,
+        )
+    valid_ratio = result.records_valid / result.records_seen
+    if result.records_seen >= 4 and valid_ratio < 0.5:
+        return SourceHealth(
+            status="degraded",
+            reason_code="low_valid_ratio",
+            message="Fewer than half of the source records satisfied the expected contract.",
+            allow_deactivation=False,
+        )
+
+    previous = list(
+        session.exec(
+            select(JobSourceRun)
+            .where(
+                JobSourceRun.source_name == SOURCE_NAME,
+                JobSourceRun.id != current_run_id,
+                JobSourceRun.status == "completed",
+                JobSourceRun.records_valid > 0,
+            )
+            .order_by(JobSourceRun.id.desc())
+            .limit(5)
+        ).all()
+    )
+    if previous:
+        baseline = statistics.median(item.records_valid for item in previous)
+        # Use the ratio directly so a healthy baseline of five followed by one
+        # record is still recognized as an 80% collapse. Integer truncation
+        # would otherwise make the guard ineffective for small beta sources.
+        if baseline >= 5 and result.records_valid / baseline <= 0.2:
+            return SourceHealth(
+                status="degraded",
+                reason_code="yield_collapse",
+                message="The source yield dropped sharply below its recent healthy baseline.",
+                allow_deactivation=False,
+            )
+    return SourceHealth(status="completed")
 
 
 def _sync_beta_members(session: Session, user_ids: tuple[UUID, ...], now: datetime) -> None:
@@ -209,3 +306,9 @@ def _stable_hash(external_id: str) -> str:
 def _safe_error(exc: Exception) -> str:
     message = " ".join(str(exc).split())
     return (message or type(exc).__name__)[:500]
+
+
+def _as_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)

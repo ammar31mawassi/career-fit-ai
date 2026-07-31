@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+from uuid import UUID
+
 from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel, create_engine, select
-from uuid import UUID
 
 import pytest
 from app.models import (
@@ -18,7 +20,7 @@ from app.models import (
     ResumeAdvice,
     SharedJobCatalog,
 )
-from app.schemas import JobCreateIn
+from app.schemas import JobCreateIn, JobStatusPatchIn
 from app.api.routes import workspace_bootstrap
 from app.services import jobs as jobs_service
 from app.services.job_research import ExtractedJob, classify_requirements
@@ -353,7 +355,130 @@ def test_resume_advice_and_status_are_saved():
     assert "<" not in updated.match.resume_advice.about_text
     assert updated.match.model_version == "fit-v2.4.0"
     assert [event.status for event in updated.match.status_history] == ["Lead", "Applied"]
+    assert updated.match.status_history[0].previous_status is None
+    assert updated.match.status_history[0].source == "system"
+    assert updated.match.status_history[1].previous_status == "Lead"
+    assert updated.match.status_history[1].source == "user"
     assert [job.id for job in searched] == [job.id]
+
+
+def test_status_event_keeps_observed_time_note_and_is_idempotent():
+    engine = _engine()
+    SQLModel.metadata.create_all(engine)
+    occurred_at = datetime(2026, 7, 20, 12, tzinfo=timezone.utc)
+    with Session(engine) as session:
+        _ready_profile(session)
+        job = create_or_analyze_job(
+            session,
+            USER_ID,
+            JobCreateIn(
+                company="Timeline Co",
+                role="Backend Developer",
+                description_text=_complete_job_description(
+                    "Requirements: Python, FastAPI, SQL."
+                ),
+            ),
+        )
+        first = update_job_status(
+            session,
+            USER_ID,
+            job.id,
+            "Interview",
+            occurred_at=occurred_at,
+            note="  Recruiter screen completed.  ",
+        )
+        stored_match = session.get(JobMatch, first.match.id if first.match else 0)
+        assert stored_match is not None
+        unchanged_updated_at = stored_match.updated_at
+        repeated = update_job_status(
+            session,
+            USER_ID,
+            job.id,
+            "Interview",
+            occurred_at=datetime.now(timezone.utc) + timedelta(days=1),
+            note="x" * 501,
+        )
+        session.expire_all()
+        stored_match = session.get(JobMatch, first.match.id if first.match else 0)
+
+    assert first.match is not None
+    assert repeated.match is not None
+    assert len(repeated.match.status_history) == 2
+    event = repeated.match.status_history[-1]
+    assert event.previous_status == "Lead"
+    assert event.status == "Interview"
+    stored_occurred_at = (
+        event.occurred_at
+        if event.occurred_at.tzinfo is not None
+        else event.occurred_at.replace(tzinfo=timezone.utc)
+    )
+    stored_created_at = (
+        event.created_at
+        if event.created_at.tzinfo is not None
+        else event.created_at.replace(tzinfo=timezone.utc)
+    )
+    assert stored_occurred_at == occurred_at
+    assert stored_created_at >= stored_occurred_at
+    assert event.source == "user"
+    assert event.note == "Recruiter screen completed."
+    assert stored_match is not None
+    assert stored_match.updated_at == unchanged_updated_at
+
+
+def test_status_event_rejects_future_business_time():
+    engine = _engine()
+    SQLModel.metadata.create_all(engine)
+    with Session(engine) as session:
+        _ready_profile(session)
+        job = create_or_analyze_job(
+            session,
+            USER_ID,
+            JobCreateIn(
+                company="Future Co",
+                role="Backend Developer",
+                description_text=_complete_job_description("Requirements: Python, SQL."),
+            ),
+        )
+        with pytest.raises(ValueError, match="cannot be in the future"):
+            update_job_status(
+                session,
+                USER_ID,
+                job.id,
+                "Applied",
+                occurred_at=datetime.now(timezone.utc) + timedelta(days=1),
+            )
+
+
+def test_status_event_rejects_ambiguous_naive_business_time():
+    with pytest.raises(ValueError, match="must include a timezone"):
+        JobStatusPatchIn(
+            status="Applied",
+            occurred_at=datetime(2026, 7, 20, 12),
+        )
+
+    engine = _engine()
+    SQLModel.metadata.create_all(engine)
+    with Session(engine) as session:
+        _ready_profile(session)
+        job = create_or_analyze_job(
+            session,
+            USER_ID,
+            JobCreateIn(
+                company="Timezone Co",
+                role="Backend Developer",
+                description_text=_complete_job_description(
+                    "Requirements: Python, SQL."
+                ),
+            ),
+        )
+        with pytest.raises(ValueError, match="must include a timezone"):
+            update_job_status(
+                session,
+                USER_ID,
+                job.id,
+                "Applied",
+                occurred_at=datetime(2026, 7, 20, 12),
+            )
 
 
 def test_save_match_recovers_when_a_concurrent_match_wins_the_unique_race(monkeypatch):
@@ -656,3 +781,54 @@ def test_duplicate_job_records_reused_agent_run():
     assert runs[-1].status == "reused"
     assert second.agent_run is not None
     assert second.agent_run.status == "reused"
+    first_extraction = next(
+        step for step in first.agent_run.steps if step.step_key == "extract_job"
+    ) if first.agent_run is not None else None
+    reused_extraction = next(
+        step for step in second.agent_run.steps if step.step_key == "extract_job"
+    )
+    assert first_extraction is not None
+    assert reused_extraction.output == {
+        "reader_strategy": first_extraction.output["reader_strategy"],
+        "reader_version": first_extraction.output["reader_version"],
+    }
+
+
+def test_failed_rescan_reuses_only_stored_extraction_provenance(monkeypatch):
+    engine = _engine()
+    SQLModel.metadata.create_all(engine)
+    payload = JobCreateIn(
+        source_url="https://example.com/job/fallback-provenance",
+        company="Fallback Co",
+        role="Backend Developer",
+        description_text=_complete_job_description(
+            "Requirements: Python, FastAPI, SQL."
+        ),
+    )
+    with Session(engine) as session:
+        _ready_profile(session)
+        first = create_or_analyze_job(session, USER_ID, payload)
+        monkeypatch.setattr(jobs_service, "OUTPUT_POLICY_VERSION", "future-policy")
+
+        def fail_extraction(*_args):
+            raise RuntimeError("simulated extraction failure")
+
+        monkeypatch.setattr(jobs_service, "extract_job_from_input", fail_extraction)
+        fallback = create_or_analyze_job(session, USER_ID, payload)
+
+    assert first.agent_run is not None
+    assert fallback.agent_run is not None
+    assert fallback.agent_run.status == "reused"
+    original = next(
+        step for step in first.agent_run.steps if step.step_key == "extract_job"
+    )
+    failed = next(
+        step for step in fallback.agent_run.steps if step.step_key == "extract_job"
+    )
+    assert failed.status == "failed"
+    assert failed.output == {
+        "has_source_url": True,
+        "provenance_origin": "stored_fallback",
+        "reader_strategy": original.output["reader_strategy"],
+        "reader_version": original.output["reader_version"],
+    }

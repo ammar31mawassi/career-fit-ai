@@ -1,7 +1,7 @@
 -- Recreate the tested security and data-contract differences from database
 -- contract v18.
 -- The upgrade test first loads the current fresh schema, applies this fixture,
--- then executes the forward v19 through v22 migrations.
+-- then executes the forward v19 through v24 migrations.
 
 alter table public.profile_sources
   drop constraint if exists profile_sources_metadata_json_check;
@@ -28,6 +28,28 @@ alter table public.resume_advice
   drop constraint if exists resume_advice_projects_json_check,
   drop constraint if exists resume_advice_skill_order_json_check,
   drop constraint if exists resume_advice_evidence_json_check;
+
+alter table public.job_status_events
+  drop constraint if exists job_status_events_previous_status_check,
+  drop constraint if exists job_status_events_source_check,
+  drop constraint if exists job_status_events_note_length_check;
+drop index if exists public.job_status_events_user_match_occurred_idx;
+drop index if exists public.job_status_events_user_match_audit_idx;
+alter table public.job_status_events
+  drop column if exists previous_status,
+  drop column if exists occurred_at,
+  drop column if exists source,
+  drop column if exists note;
+create index if not exists job_status_events_user_match_created_idx
+  on public.job_status_events (user_id, match_id, created_at);
+create index if not exists idx_job_status_events_user_match_created
+  on public.job_status_events (user_id, match_id, created_at);
+
+alter table public.job_source_runs
+  drop constraint if exists job_source_runs_status_check;
+alter table public.job_source_runs
+  add constraint job_source_runs_status_check
+  check (status in ('running', 'completed', 'failed', 'disabled'));
 
 alter table public.agent_runs
   drop constraint if exists agent_runs_status_check;

@@ -86,13 +86,25 @@ const previewJob: TrackedJob = {
       responsibility_domain: 14
     },
     applied_caps: [],
-    status_history: [{ status: "Lead", created_at: "2026-07-17T09:00:00.000Z" }],
+    status_history: [{
+      previous_status: null,
+      status: "Lead",
+      occurred_at: "2026-07-17T09:00:00.000Z",
+      source: "system",
+      note: "",
+      created_at: "2026-07-17T09:00:00.000Z"
+    }],
     resume_advice: {
-      projects: ["Add a verified project or course example that demonstrates Go in a practical application."],
-      skill_order: ["Go", "English", "Automation", "Systems thinking"],
-      about_text: "Engineering student with practical automation and product-development experience.",
-      template_id: "evidence-first",
-      evidence: []
+      projects: ["Add one or two verified projects with concrete implementation details and outcomes."],
+      skill_order: ["English", "Automation", "Systems thinking"],
+      about_text: "Engineering student with verified profile evidence in English, automation, and systems thinking, seeking an application engineering opportunity where those documented skills match the role requirements.",
+      template_id: "T04",
+      evidence: ["The reviewed profile contains verified automation and systems-thinking project work."],
+      template_version: "about-v1.1.0",
+      quality_policy_version: "resume-output-v1.0.0",
+      quality_checked: true,
+      quality_repaired: false,
+      quality_findings: []
     },
     analyzed_at: "2026-07-17T09:00:00.000Z"
   },
@@ -108,7 +120,7 @@ const previewJob: TrackedJob = {
     created_at: "2026-07-17T08:55:00.000Z",
     completed_at: "2026-07-17T09:00:00.000Z",
     steps: [
-      { id: 1, step_key: "extract_job", title: "Read role", status: "completed", attempt: 1, progress: "Requirements captured", output: {}, error: "", started_at: "2026-07-17T08:55:00.000Z", completed_at: "2026-07-17T08:56:00.000Z" },
+      { id: 1, step_key: "extract_job", title: "Read role", status: "completed", attempt: 1, progress: "Requirements captured", output: { reader_strategy: "json_ld", reader_version: "reader-v2.4.0" }, error: "", started_at: "2026-07-17T08:55:00.000Z", completed_at: "2026-07-17T08:56:00.000Z" },
       { id: 2, step_key: "match_profile_evidence", title: "Compare evidence", status: "completed", attempt: 1, progress: "Evidence mapped", output: {}, error: "", started_at: "2026-07-17T08:56:00.000Z", completed_at: "2026-07-17T08:58:00.000Z" },
       { id: 3, step_key: "validate_resume_advice", title: "Build action plan", status: "completed", attempt: 1, progress: "Advice ready", output: {}, error: "", started_at: "2026-07-17T08:58:00.000Z", completed_at: "2026-07-17T09:00:00.000Z" }
     ]

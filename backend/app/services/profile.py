@@ -946,6 +946,7 @@ def _rebuild_profile_state(session: Session, profile: Profile) -> None:
 
 def candidate_snapshot(session: Session, profile: Profile) -> CandidateSnapshot:
     facts = list(session.exec(select(ProfileFact).where(ProfileFact.profile_id == profile.id)).all())
+    active_facts = [fact for fact in facts if fact.review_status != "rejected"]
     sources = {source.id: source for source in _sources(session, profile)}
     skill_evidence: dict[str, SkillEvidence] = {}
     projects: list[str] = []
@@ -955,9 +956,7 @@ def candidate_snapshot(session: Session, profile: Profile) -> CandidateSnapshot:
     years = max(0.0, profile.years_experience)
     internship_years = 0.0
 
-    for fact in facts:
-        if fact.review_status == "rejected":
-            continue
+    for fact in active_facts:
         source = sources.get(fact.source_id)
         metadata = _json_dict(fact.metadata_json)
         if fact.fact_type == "skill":
@@ -996,7 +995,22 @@ def candidate_snapshot(session: Session, profile: Profile) -> CandidateSnapshot:
 
     semesters = _optional_int(scalar.get("semesters_left", ""))
     education = scalar.get("education", "")
-    career_stage = _career_stage(years, internship_years, semesters, education, "\n".join(f.value for f in facts))
+    stage_text = "\n".join(
+        fact.value
+        for fact in active_facts
+        if fact.fact_type in {"about_me", "education", "experience"}
+    )
+    transition_text = "\n".join(
+        fact.value for fact in active_facts if fact.fact_type == "about_me"
+    )
+    career_stage = _career_stage(
+        years,
+        internship_years,
+        semesters,
+        education,
+        stage_text,
+        transition_text=transition_text,
+    )
     domain = scalar.get("domain") or infer_domain(set(skill_evidence))
     return CandidateSnapshot(
         skills=set(skill_evidence),
@@ -1576,12 +1590,23 @@ def _career_stage(
     semesters_left: int | None,
     education: str,
     text: str,
+    *,
+    transition_text: str = "",
 ) -> str:
     lower = text.lower()
-    if semesters_left is not None or "student" in lower or "currently pursuing" in lower:
+    if (
+        semesters_left is not None
+        or re.search(r"\bstudent\b", lower)
+        or "currently pursuing" in lower
+    ):
         return "student"
     if any(term in lower for term in ("new graduate", "new grad", "recent graduate")):
         return "new graduate"
+    if _explicit_career_transition(transition_text):
+        # Only explicit candidate language enables career-transition advice.
+        # Project names, a domain mismatch, and incidental uses of "career
+        # transition" are not evidence that the candidate is changing careers.
+        return "career changer"
     if years >= 5:
         return "experienced"
     if years >= 2:
@@ -1591,6 +1616,26 @@ def _career_stage(
     if education:
         return "new graduate"
     return "candidate"
+
+
+def _explicit_career_transition(value: str) -> bool:
+    lower = value.lower()
+    patterns = (
+        r"\bcareer changer\b",
+        r"\b(?:making|seeking|planning|pursuing|undergoing)\s+(?:a\s+)?career (?:change|transition)\b",
+        r"\bcareer (?:change|transition)\s+(?:from|into|to)\b",
+        r"\b(?:transition(?:ing)?|chang(?:e|ing))\s+(?:my\s+)?careers?\b",
+    )
+    for pattern in patterns:
+        for match in re.finditer(pattern, lower):
+            clause_prefix = re.split(r"[.!?;\n]", lower[: match.start()])[-1][-80:]
+            if re.search(
+                r"\b(?:not|never|no|without|cannot|do not|is not|am not|are not)\b|\b(?:don['’]t|isn['’]t|aren['’]t|can['’]t)\b",
+                clause_prefix,
+            ):
+                continue
+            return True
+    return False
 
 
 def _build_summary(snapshot: CandidateSnapshot) -> str:

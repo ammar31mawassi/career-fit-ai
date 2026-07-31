@@ -7,6 +7,7 @@ from pathlib import Path
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 SCHEMA_PATH = REPOSITORY_ROOT / "supabase" / "schema.sql"
 MIGRATIONS_PATH = REPOSITORY_ROOT / "supabase" / "migrations"
+POSTGRES_FIXTURES_PATH = REPOSITORY_ROOT / "supabase" / "tests" / "fixtures"
 
 
 def _sql(path: Path) -> str:
@@ -261,3 +262,64 @@ def test_durable_json_shapes_and_workflow_states_are_constrained() -> None:
             in normalized
         )
         assert "constraint agent_steps_attempt_check check (attempt >= 1)" in normalized
+
+
+def test_application_event_context_contract_is_pinned() -> None:
+    schema = _sql(SCHEMA_PATH)
+    migration = _sql(
+        MIGRATIONS_PATH / "20260731190000_application_event_context_v23.sql"
+    )
+    upgrade_fixture = _sql(POSTGRES_FIXTURES_PATH / "v18_security_state.sql")
+    for sql in (schema, migration):
+        normalized = re.sub(r"\s+", " ", sql)
+        for column in ("previous_status", "occurred_at", "source", "note"):
+            assert column in normalized
+        assert "job_status_events_previous_status_check" in normalized
+        assert "job_status_events_source_check" in normalized
+        assert "job_status_events_note_length_check" in normalized
+        assert "job_status_events_user_match_occurred_idx" in normalized
+        assert "job_status_events_user_match_audit_idx" in normalized
+    assert "partition by user_id, match_id order by id" in migration
+    normalized_schema = re.sub(r"\s+", " ", schema)
+    normalized_migration = re.sub(r"\s+", " ", migration)
+    assert "source text not null default 'system'" in normalized_schema
+    assert "alter column source set default 'system'" in normalized_migration
+    assert (
+        "drop index if exists public.job_status_events_user_match_created_idx"
+        in normalized_migration
+    )
+    assert (
+        "drop index if exists public.idx_job_status_events_user_match_created"
+        in normalized_migration
+    )
+    for constraint in (
+        "job_status_events_previous_status_check",
+        "job_status_events_source_check",
+        "job_status_events_note_length_check",
+    ):
+        assert f"drop constraint if exists {constraint}" in upgrade_fixture
+    for column in ("previous_status", "occurred_at", "source", "note"):
+        assert f"drop column if exists {column}" in upgrade_fixture
+
+
+def test_job_source_health_statuses_match_fresh_and_upgrade_contracts() -> None:
+    schema = _sql(SCHEMA_PATH)
+    migration = _sql(
+        MIGRATIONS_PATH / "20260731200000_job_source_health_status_v24.sql"
+    )
+    expected = {
+        "running",
+        "completed",
+        "failed",
+        "disabled",
+        "degraded",
+        "inconclusive",
+    }
+    for sql in (schema, migration):
+        match = re.search(
+            r"job_source_runs_status_check\s+check\s*\(status\s+in\s*\((.*?)\)\)",
+            sql,
+            re.DOTALL,
+        )
+        assert match is not None
+        assert set(re.findall(r"'([^']+)'", match.group(1))) == expected

@@ -129,7 +129,7 @@ def test_template_catalog_is_complete_and_never_leaks_tokens():
         "Cloud Intern",
         _requirements("cloud", ["python", "docker"]),
     )
-    assert cloud.template_id == "T15"
+    assert cloud.template_id == "T04"
     assert "built built" not in cloud.text.lower()
     assert "using fastapi" not in cloud.text.lower()
 

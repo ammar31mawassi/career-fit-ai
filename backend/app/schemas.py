@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -211,16 +211,31 @@ class RequirementModel(BaseModel):
     extraction_completeness: float = 0.0
 
 
+class OutputQualityFindingOut(BaseModel):
+    code: str
+    severity: Literal["error", "warning"]
+    message: str
+
+
 class ResumeAdviceOut(BaseModel):
     projects: list[str]
     skill_order: list[str]
     about_text: str
     template_id: str = ""
     evidence: list[str] = Field(default_factory=list)
+    template_version: str = ""
+    quality_policy_version: str = ""
+    quality_checked: bool = False
+    quality_repaired: bool = False
+    quality_findings: list[OutputQualityFindingOut] = Field(default_factory=list)
 
 
 class JobStatusEventOut(BaseModel):
+    previous_status: JobStatus | None = None
     status: JobStatus
+    occurred_at: datetime
+    source: Literal["system", "user", "correction", "backfill", "legacy"] = "legacy"
+    note: str = ""
     created_at: datetime
 
 
@@ -407,6 +422,27 @@ class JobCreateIn(BaseModel):
 
 class JobStatusPatchIn(BaseModel):
     status: JobStatus
+    occurred_at: datetime | None = None
+    note: str = Field(default="", max_length=500)
+
+    @field_validator("occurred_at")
+    @classmethod
+    def reject_future_status_date(cls, value: datetime | None):
+        if value is None:
+            return None
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("Application stage date must include a timezone.")
+        normalized = value.astimezone(timezone.utc)
+        if normalized > datetime.now(timezone.utc) + timedelta(minutes=5):
+            raise ValueError("Application stage date cannot be in the future.")
+        return normalized
+
+    @field_validator("note")
+    @classmethod
+    def clean_status_note(cls, value: str):
+        if any(ord(character) < 32 and character not in "\t\n\r" for character in value):
+            raise ValueError("Application stage note contains a control character.")
+        return " ".join(value.split())
 
 
 class JobRequirementsReviewIn(BaseModel):

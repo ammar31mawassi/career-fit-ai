@@ -1,9 +1,10 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent, type ReactNode } from "react";
 import {
   ArrowRight,
   BriefcaseBusiness,
+  CalendarClock,
   Check,
   CheckCircle2,
   CircleAlert,
@@ -14,12 +15,14 @@ import {
   MapPin,
   Radar,
   RefreshCw,
+  ShieldCheck,
   Sparkles,
   Target,
   Waypoints,
   Zap
 } from "lucide-react";
 import { RequirementReviewPanel } from "@/components/home/RequirementReviewPanel";
+import { localDateInput, occurredAtForLocalDate } from "@/lib/application-event-policy.mjs";
 import { safeExternalWebUrl } from "@/lib/url-policy.mjs";
 import {
   formatDate,
@@ -65,7 +68,9 @@ export function OpportunityInspector({
   const tabRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const match = job?.match ?? null;
   const externalJobUrl = safeExternalWebUrl(job?.application_link || job?.source_url || "");
-  const matchStale = Boolean(match && profileUpdatedAt && new Date(profileUpdatedAt).getTime() > new Date(match.analyzed_at).getTime());
+  const profileMatchStale = Boolean(match && profileUpdatedAt && new Date(profileUpdatedAt).getTime() > new Date(match.analyzed_at).getTime());
+  const adviceStale = Boolean(match && !match.resume_advice.quality_checked);
+  const matchStale = profileMatchStale || adviceStale;
 
   useEffect(() => setActiveTab("evidence"), [job?.id]);
 
@@ -82,25 +87,38 @@ export function OpportunityInspector({
     tabRefs.current[nextIndex]?.focus();
   }
 
-  async function setStatus(status: JobStatus) {
-    if (!job?.match || job.match.status === status) return;
+  async function setStatus(
+    status: JobStatus,
+    context: { occurred_at?: string; note?: string } = {}
+  ): Promise<boolean> {
+    if (!job?.match || job.match.status === status) return false;
     const previous = job;
+    const eventTime = context.occurred_at || new Date().toISOString();
     const optimistic: TrackedJob = {
       ...job,
       match: {
         ...job.match,
         status,
-        status_history: [...job.match.status_history, { status, created_at: new Date().toISOString() }]
+        status_history: [...job.match.status_history, {
+          previous_status: job.match.status,
+          status,
+          occurred_at: eventTime,
+          source: "user",
+          note: context.note?.trim() || "",
+          created_at: new Date().toISOString()
+        }]
       }
     };
     onJobChanged(optimistic);
     setStatusError("");
     setSaving(true);
     try {
-      onJobChanged(await updateJobStatus(job.id, status));
+      onJobChanged(await updateJobStatus(job.id, status, context));
+      return true;
     } catch (caught) {
       onJobChanged(previous);
       setStatusError(caught instanceof Error ? `Stage change was rolled back: ${caught.message}` : "Stage change was rolled back.");
+      return false;
     } finally {
       setSaving(false);
     }
@@ -166,7 +184,18 @@ export function OpportunityInspector({
         </div>
       </div>
 
-      {matchStale ? <div className="stale-match-note"><CircleAlert size={14} /><span>Your profile changed after this score. Refresh when you want to recalculate it.</span></div> : null}
+      {matchStale ? (
+        <div className="stale-match-note">
+          <CircleAlert size={14} />
+          <span>
+            {profileMatchStale && adviceStale
+              ? "Your profile changed and this advice predates the current evidence policy. Refresh to recalculate both."
+              : adviceStale
+                ? "This advice predates the current evidence policy. Refresh it before using the suggestion."
+                : "Your profile changed after this score. Refresh when you want to recalculate it."}
+          </span>
+        </div>
+      ) : null}
       {statusError ? <div className="notice error compact-notice" role="alert">{statusError}</div> : null}
 
       <div aria-label="Opportunity details" className="inspector-tabs" role="tablist">
@@ -204,7 +233,7 @@ export function OpportunityInspector({
         ) : activeTab === "requirements" ? (
           <Requirements job={job} onJobChanged={onJobChanged} />
         ) : (
-          <JobDetails job={job} match={match} />
+          <JobDetails job={job} match={match} onStatusChange={setStatus} saving={saving} />
         )}
       </div>
     </aside>
@@ -349,6 +378,7 @@ function EvidenceMap({ job, match, onReviewAdvice }: { job: TrackedJob; match: J
 }
 
 function Overview({ job, match }: { job: TrackedJob; match: JobMatch }) {
+  const advice = match.resume_advice;
   return (
     <>
       <div className="detail-grid inspector-metrics">
@@ -362,13 +392,35 @@ function Overview({ job, match }: { job: TrackedJob; match: JobMatch }) {
         <AnalysisList title="Gaps to address" items={[...match.missing_blockers, ...match.gaps]} />
       </div>
       <section className="analysis-section resume-advice">
-        <span className="analysis-kicker">Resume action</span>
+        <div className="advice-heading">
+          <span className="analysis-kicker">Resume action</span>
+          <span
+            className={`advice-quality ${advice.quality_checked ? "checked" : "legacy"}`}
+            title={advice.quality_policy_version || "This advice predates the current output policy."}
+          >
+            <ShieldCheck size={13} aria-hidden />
+            {advice.quality_checked
+              ? advice.quality_repaired ? "Evidence checked · repaired" : "Evidence checked"
+              : "Legacy advice · refresh match"}
+          </span>
+        </div>
         <h3>Shape the first impression around your strongest proof</h3>
         <div className="resume-grid">
-          <div><span>Projects</span><ul>{match.resume_advice.projects.map((item) => <li key={item}>{item}</li>)}</ul></div>
-          <div><span>Skill order</span><p>{match.resume_advice.skill_order.join(" · ") || "Add more profile skills first."}</p></div>
+          <div><span>Projects</span><ul>{advice.projects.map((item) => <li key={item}>{item}</li>)}</ul></div>
+          <div><span>Skill order</span><p>{advice.skill_order.join(" · ") || "Add more profile skills first."}</p></div>
         </div>
-        <div><span>Suggested summary · {match.resume_advice.template_id || "evidence summary"}</span><p>{match.resume_advice.about_text}</p></div>
+        <div><span>Suggested summary · {advice.template_id || "evidence summary"}</span><p>{advice.about_text}</p></div>
+        <EvidenceSource
+          title="Based on these profile facts"
+          items={advice.evidence}
+          empty="No evidence anchors were stored for this older suggestion. Refresh the match before using it."
+        />
+        {advice.quality_findings.length ? (
+          <div className="advice-findings">
+            <strong>Clarity notes</strong>
+            <ul>{advice.quality_findings.map((item) => <li key={`${item.code}-${item.message}`}>{item.message}</li>)}</ul>
+          </div>
+        ) : null}
       </section>
     </>
   );
@@ -387,9 +439,20 @@ function Requirements({ job, onJobChanged }: { job: TrackedJob; onJobChanged: (j
   );
 }
 
-function JobDetails({ job, match }: { job: TrackedJob; match: JobMatch }) {
+function JobDetails({
+  job,
+  match,
+  onStatusChange,
+  saving
+}: {
+  job: TrackedJob;
+  match: JobMatch;
+  onStatusChange: (status: JobStatus, context?: { occurred_at?: string; note?: string }) => Promise<boolean>;
+  saving: boolean;
+}) {
   return (
     <>
+      <ExtractionProvenance job={job} />
       <AgentWorkflowTrace run={job.agent_run} />
       <section className="analysis-section">
         <h3>Score components</h3>
@@ -403,8 +466,105 @@ function JobDetails({ job, match }: { job: TrackedJob; match: JobMatch }) {
         </div>
       </section>
       {match.applied_caps.length ? <AnalysisList title="Score caps applied" items={match.applied_caps} /> : null}
-      <AnalysisList title="Application history" items={match.status_history.map((event) => `${event.status} · ${formatDate(event.created_at)}`)} />
+      <ApplicationTimeline events={match.status_history} />
+      <DetailedStageUpdate currentStatus={match.status} onSave={onStatusChange} saving={saving} />
     </>
+  );
+}
+
+function ExtractionProvenance({ job }: { job: TrackedJob }) {
+  const extraction = job.agent_run?.steps.find((step) => step.step_key === "extract_job");
+  const rawStrategy = extraction?.output.reader_strategy;
+  const rawVersion = extraction?.output.reader_version;
+  const rawOrigin = extraction?.output.provenance_origin;
+  const strategy = typeof rawStrategy === "string" ? rawStrategy : "";
+  const version = typeof rawVersion === "string" ? rawVersion : job.requirements.reader_version;
+  const labels: Record<string, string> = {
+    json_ld: "Structured job posting (JSON-LD)",
+    workday: "Workday structured endpoint",
+    scoped_html: "Focused page content",
+    page_text: "Visible page text",
+    pasted: "Pasted job description",
+    manual: "Pasted job description"
+  };
+  const method = labels[strategy] || (strategy ? titleCase(strategy) : "Legacy scan · method not recorded");
+  const origin = rawOrigin === "stored_fallback"
+    ? "Stored fallback"
+    : job.agent_run?.status === "reused"
+      ? "Stored reuse"
+      : "";
+  return (
+    <section className="analysis-section extraction-provenance">
+      <div><h3>Extraction provenance</h3><p>{origin ? `${origin} · ${method}` : method}</p></div>
+      <dl>
+        <div><dt>Source title</dt><dd>{job.source_title || job.company}</dd></div>
+        <div><dt>Reader version</dt><dd>{version || "Not recorded"}</dd></div>
+        <div><dt>Reader confidence</dt><dd>{Math.round(job.source_confidence * 100)}%</dd></div>
+        <div><dt>Requirements captured</dt><dd>{Math.round(job.requirements.extraction_completeness * 100)}%</dd></div>
+      </dl>
+    </section>
+  );
+}
+
+function ApplicationTimeline({ events }: { events: JobMatch["status_history"] }) {
+  return (
+    <section className="analysis-section application-timeline">
+      <h3>Application history</h3>
+      {events.length ? (
+        <ol>
+          {events.map((event, index) => (
+            <li key={`${event.created_at}-${index}`}>
+              <span aria-hidden />
+              <div>
+                <strong>{event.previous_status ? `${event.previous_status} → ${event.status}` : event.status}</strong>
+                <time dateTime={event.occurred_at}>{formatDate(event.occurred_at)}</time>
+                {event.note ? <p>{event.note}</p> : null}
+                <small>{event.source === "system" ? "Initial CareerFit stage" : event.source === "legacy" ? "Imported history" : titleCase(event.source)}</small>
+              </div>
+            </li>
+          ))}
+        </ol>
+      ) : <p>No stage events have been recorded.</p>}
+    </section>
+  );
+}
+
+function DetailedStageUpdate({
+  currentStatus,
+  onSave,
+  saving
+}: {
+  currentStatus: JobStatus;
+  onSave: (status: JobStatus, context?: { occurred_at?: string; note?: string }) => Promise<boolean>;
+  saving: boolean;
+}) {
+  const [status, setStatus] = useState<JobStatus>(currentStatus);
+  const [occurredDate, setOccurredDate] = useState("");
+  const [note, setNote] = useState("");
+  useEffect(() => setStatus(currentStatus), [currentStatus]);
+
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const occurred_at = occurredDate
+      ? occurredAtForLocalDate(occurredDate)
+      : undefined;
+    const saved = await onSave(status, { occurred_at, note });
+    if (saved) {
+      setNote("");
+      setOccurredDate("");
+    }
+  }
+
+  return (
+    <form className="analysis-section stage-update-form" onSubmit={(event) => void submit(event)}>
+      <div className="stage-update-heading"><CalendarClock size={17} aria-hidden /><div><h3>Record a detailed stage change</h3><p>Add the real date and optional context without rewriting history.</p></div></div>
+      <div className="stage-update-grid">
+        <label><span>New stage</span><select disabled={saving} onChange={(event) => setStatus(event.target.value as JobStatus)} value={status}>{(["Lead", "Applied", "Interview", "Rejected", "Withdrawn", "Offer"] as JobStatus[]).map((item) => <option key={item}>{item}</option>)}</select></label>
+        <label><span>Occurred on</span><input disabled={saving} max={localDateInput()} onChange={(event) => setOccurredDate(event.target.value)} type="date" value={occurredDate} /></label>
+      </div>
+      <label><span>Optional note</span><textarea disabled={saving} maxLength={500} onChange={(event) => setNote(event.target.value)} placeholder="Recruiter call, interview round, outcome context…" rows={2} value={note} /></label>
+      <button className="button compact" disabled={saving || status === currentStatus} type="submit">{saving ? "Saving…" : "Save stage event"}</button>
+    </form>
   );
 }
 

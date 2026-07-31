@@ -144,7 +144,11 @@ function validTrackedJob() {
       component_scores: { skills: 90 },
       applied_caps: [],
       status_history: [{
+        previous_status: null,
         status: "Lead",
+        occurred_at: "2026-07-30T10:00:00Z",
+        source: "system",
+        note: "",
         created_at: "2026-07-30T10:00:00Z"
       }],
       resume_advice: {
@@ -152,7 +156,12 @@ function validTrackedJob() {
         skill_order: ["TypeScript"],
         about_text: "Backend engineer",
         template_id: "default",
-        evidence: ["TypeScript"]
+        evidence: ["TypeScript"],
+        template_version: "about-v1.1.0",
+        quality_policy_version: "resume-output-v1.0.0",
+        quality_checked: true,
+        quality_repaired: false,
+        quality_findings: []
       },
       analyzed_at: "2026-07-30T10:00:00Z"
     },

@@ -8,7 +8,7 @@ from .ontology import extract_skills
 from .profile import CandidateSnapshot
 
 
-TEMPLATE_VERSION = "about-v1.0.0"
+TEMPLATE_VERSION = "about-v1.1.0"
 
 
 @dataclass(frozen=True)
@@ -30,141 +30,141 @@ class AboutResult:
 TEMPLATES: tuple[TemplateSpec, ...] = (
     TemplateSpec(
         "T01",
-        "<ABOUT_ME>. <EDUCATION_STATUS> with <SEMESTERS_LEFT> remaining and hands-on project experience in <SKILLS>. Built <PROJECT_HIGHLIGHT>, demonstrating <STRENGTHS>, and seeking a <ROLE_TITLE> opportunity focused on <DOMAIN>.",
+        "<ABOUT_ME>. Currently completing <EDUCATION_STATUS> with <SEMESTERS_LEFT> remaining. Verified profile evidence covers <SKILLS> and includes <PROJECT_HIGHLIGHT>. Seeking a <ROLE_TITLE> opportunity focused on <DOMAIN>.",
         ("student",),
         required=("ABOUT_ME", "EDUCATION_STATUS", "SEMESTERS_LEFT", "SKILLS", "PROJECT_HIGHLIGHT", "ROLE_TITLE", "DOMAIN"),
     ),
     TemplateSpec(
         "T02",
-        "<CAREER_STAGE> developer with evidence-backed knowledge of <SKILLS> and a focus on <DOMAIN>. Seeking a <ROLE_TITLE> position where practical engineering fundamentals and <STRENGTHS> can support reliable software delivery.",
+        "<CAREER_STAGE> developer with verified profile evidence in <SKILLS> and a focus on <DOMAIN>. Seeking a <ROLE_TITLE> position where these documented skills align with the requirements listed in the posting.",
     ),
     TemplateSpec(
         "T03",
-        "<ABOUT_ME>, currently completing <EDUCATION_STATUS> with <SEMESTERS_LEFT> remaining. Available <AVAILABILITY> and experienced in building projects with <SKILLS>, including <PROJECT_HIGHLIGHT>. Interested in contributing these skills as a <ROLE_TITLE>.",
+        "<ABOUT_ME>, currently completing <EDUCATION_STATUS> with <SEMESTERS_LEFT> remaining. Verified project evidence covers <SKILLS> and includes <PROJECT_HIGHLIGHT>. Availability: <AVAILABILITY>. Interested in contributing these skills as a <ROLE_TITLE>.",
         ("student",),
         required=("ABOUT_ME", "EDUCATION_STATUS", "SEMESTERS_LEFT", "AVAILABILITY", "SKILLS", "PROJECT_HIGHLIGHT", "ROLE_TITLE"),
     ),
     TemplateSpec(
         "T04",
-        "<EDUCATION_STATUS> candidate seeking a <ROLE_TITLE> internship, with applied experience in <SKILLS>. Through <PROJECT_HIGHLIGHT>, developed <STRENGTHS> and practical familiarity with <TOOLS>, with a focus on learning and contributing in <DOMAIN>.",
+        "<EDUCATION_STATUS> candidate targeting <ROLE_TITLE> opportunities. Verified profile evidence includes <SKILLS>, <PROJECT_HIGHLIGHT>, and practical use of <TOOLS>. Interested in learning and contributing in <DOMAIN>.",
         ("student", "new graduate"),
         ("internship", "student"),
         ("EDUCATION_STATUS", "ROLE_TITLE", "SKILLS", "PROJECT_HIGHLIGHT", "TOOLS", "DOMAIN"),
     ),
     TemplateSpec(
         "T05",
-        "New graduate in <EDUCATION_STATUS> with project-based experience in <SKILLS>. Delivered <PROJECT_HIGHLIGHT><PROJECT_IMPACT> and developed strengths in <STRENGTHS>. Seeking a <ROLE_TITLE> role in <DOMAIN> where this foundation can translate into production impact.",
+        "New graduate in <EDUCATION_STATUS> with verified project evidence in <SKILLS>. The profile includes <PROJECT_HIGHLIGHT><PROJECT_IMPACT> and supporting evidence for <STRENGTHS>. Seeking a <ROLE_TITLE> role in <DOMAIN> that lists these skills.",
         ("new graduate",),
         required=("EDUCATION_STATUS", "SKILLS", "PROJECT_HIGHLIGHT", "ROLE_TITLE", "DOMAIN"),
     ),
     TemplateSpec(
         "T06",
-        "Junior software developer with evidence-backed experience in <SKILLS> and a focus on <DOMAIN>. Built <PROJECT_HIGHLIGHT><PROJECT_IMPACT>, demonstrating <STRENGTHS>. Looking to contribute as a <ROLE_TITLE> while continuing to deepen production engineering experience.",
+        "Junior software developer with verified evidence in <SKILLS> and a focus on <DOMAIN>. The profile includes <PROJECT_HIGHLIGHT><PROJECT_IMPACT> and supporting evidence for <STRENGTHS>. Looking to contribute as a <ROLE_TITLE> while continuing to learn.",
         ("junior", "new graduate"),
         required=("SKILLS", "DOMAIN", "PROJECT_HIGHLIGHT", "ROLE_TITLE"),
     ),
     TemplateSpec(
         "T07",
-        "<ABOUT_ME> with strong project-based experience in <SKILLS>. Designed and implemented <PROJECT_HIGHLIGHT><PROJECT_IMPACT>, providing practical evidence of <STRENGTHS>. Seeking a <ROLE_TITLE> role where demonstrated ability can grow into professional experience.",
+        "<ABOUT_ME> with verified project evidence in <SKILLS>. The profile includes <PROJECT_HIGHLIGHT><PROJECT_IMPACT> and supporting evidence for <STRENGTHS>. Seeking a <ROLE_TITLE> role where this project work is relevant.",
         ("student", "new graduate", "candidate"),
         required=("ABOUT_ME", "SKILLS", "PROJECT_HIGHLIGHT", "ROLE_TITLE"),
     ),
     TemplateSpec(
         "T08",
-        "Backend-focused <CAREER_STAGE> developer experienced with <SKILLS>. Built <PROJECT_HIGHLIGHT> using <TOOLS><PROJECT_IMPACT>, with emphasis on <STRENGTHS>. Targeting a <ROLE_TITLE> position involving reliable APIs, data systems, and <DOMAIN>.",
+        "<CAREER_STAGE> developer targeting backend work, with verified evidence in <SKILLS>. The profile includes <PROJECT_HIGHLIGHT>, practical use of <TOOLS><PROJECT_IMPACT>, and evidence for <STRENGTHS>. Targeting a <ROLE_TITLE> position involving APIs, data systems, and <DOMAIN>.",
         roles=("backend",),
         required=("CAREER_STAGE", "SKILLS", "PROJECT_HIGHLIGHT", "TOOLS", "ROLE_TITLE", "DOMAIN"),
     ),
     TemplateSpec(
         "T09",
-        "Frontend-focused <CAREER_STAGE> developer working with <SKILLS>. Created <PROJECT_HIGHLIGHT><PROJECT_IMPACT>, demonstrating <STRENGTHS> across interface implementation and application behavior. Seeking a <ROLE_TITLE> role building clear, reliable user experiences in <DOMAIN>.",
+        "<CAREER_STAGE> developer targeting frontend work, with verified evidence in <SKILLS>. The profile includes <PROJECT_HIGHLIGHT><PROJECT_IMPACT> and supporting evidence for <STRENGTHS>. Seeking a <ROLE_TITLE> role focused on user-facing work in <DOMAIN>.",
         roles=("frontend",),
         required=("CAREER_STAGE", "SKILLS", "PROJECT_HIGHLIGHT", "ROLE_TITLE", "DOMAIN"),
     ),
     TemplateSpec(
         "T10",
-        "Full-stack <CAREER_STAGE> developer with practical experience across <SKILLS>. Delivered <PROJECT_HIGHLIGHT> using <TOOLS><PROJECT_IMPACT>, showing <STRENGTHS> from data and API design through user-facing implementation. Interested in a <ROLE_TITLE> role with end-to-end ownership.",
+        "<CAREER_STAGE> developer targeting full-stack work, with verified evidence across <SKILLS>. The profile includes <PROJECT_HIGHLIGHT>, practical use of <TOOLS><PROJECT_IMPACT>, and evidence for <STRENGTHS>. Interested in a <ROLE_TITLE> role spanning data, APIs, and user-facing implementation.",
         roles=("full-stack", "software"),
         required=("CAREER_STAGE", "SKILLS", "PROJECT_HIGHLIGHT", "TOOLS", "ROLE_TITLE"),
     ),
     TemplateSpec(
         "T11",
-        "Embedded-software <CAREER_STAGE> developer with experience in <SKILLS>. Built <PROJECT_HIGHLIGHT><PROJECT_IMPACT>, demonstrating <STRENGTHS> in low-level development, debugging, and system behavior. Seeking a <ROLE_TITLE> role focused on dependable <DOMAIN> products.",
+        "<CAREER_STAGE> developer targeting embedded software, with verified evidence in <SKILLS>. The profile includes <PROJECT_HIGHLIGHT><PROJECT_IMPACT> and supporting evidence for <STRENGTHS>. Seeking a <ROLE_TITLE> role focused on <DOMAIN> products.",
         roles=("embedded", "embedded/systems", "systems"),
         required=("CAREER_STAGE", "SKILLS", "PROJECT_HIGHLIGHT", "ROLE_TITLE", "DOMAIN"),
     ),
     TemplateSpec(
         "T12",
-        "Mobile-focused <CAREER_STAGE> developer experienced in <SKILLS>. Developed <PROJECT_HIGHLIGHT> with <TOOLS><PROJECT_IMPACT>, building strengths in <STRENGTHS>. Targeting a <ROLE_TITLE> position delivering stable, user-centered mobile applications.",
+        "<CAREER_STAGE> developer targeting mobile work, with verified evidence in <SKILLS>. The profile includes <PROJECT_HIGHLIGHT>, practical use of <TOOLS><PROJECT_IMPACT>, and evidence for <STRENGTHS>. Targeting a <ROLE_TITLE> position focused on mobile applications.",
         roles=("mobile",),
         required=("CAREER_STAGE", "SKILLS", "PROJECT_HIGHLIGHT", "TOOLS", "ROLE_TITLE"),
     ),
     TemplateSpec(
         "T13",
-        "Data-focused <CAREER_STAGE> developer with hands-on experience in <SKILLS>. Implemented <PROJECT_HIGHLIGHT><PROJECT_IMPACT>, demonstrating <STRENGTHS> in data processing, storage, and reliability. Seeking a <ROLE_TITLE> role supporting trustworthy data systems in <DOMAIN>.",
+        "<CAREER_STAGE> developer targeting data work, with verified evidence in <SKILLS>. The profile includes <PROJECT_HIGHLIGHT><PROJECT_IMPACT> and supporting evidence for <STRENGTHS>. Seeking a <ROLE_TITLE> role focused on data systems in <DOMAIN>.",
         roles=("data",),
         required=("CAREER_STAGE", "SKILLS", "PROJECT_HIGHLIGHT", "ROLE_TITLE", "DOMAIN"),
     ),
     TemplateSpec(
         "T14",
-        "Machine-learning <CAREER_STAGE> candidate with applied experience in <SKILLS>. Developed <PROJECT_HIGHLIGHT><PROJECT_IMPACT>, showing strengths in <STRENGTHS> and responsible evaluation. Interested in a <ROLE_TITLE> role applying ML methods to practical <DOMAIN> problems.",
+        "<CAREER_STAGE> candidate targeting machine-learning work, with verified evidence in <SKILLS>. The profile includes <PROJECT_HIGHLIGHT><PROJECT_IMPACT> and supporting evidence for <STRENGTHS>. Interested in a <ROLE_TITLE> role applying ML methods to <DOMAIN> problems.",
         roles=("ml", "ai/data"),
         required=("CAREER_STAGE", "SKILLS", "PROJECT_HIGHLIGHT", "ROLE_TITLE", "DOMAIN"),
     ),
     TemplateSpec(
         "T15",
-        "Cloud and automation-focused <CAREER_STAGE> engineer with evidence in <SKILLS>. Built <PROJECT_HIGHLIGHT><PROJECT_IMPACT>, with attention to <STRENGTHS>. Seeking a <ROLE_TITLE> position improving delivery and reliability.",
+        "<CAREER_STAGE> engineer targeting cloud and automation work, with verified evidence in <SKILLS>. The profile includes <PROJECT_HIGHLIGHT><PROJECT_IMPACT> and supporting evidence for <STRENGTHS>. Seeking a <ROLE_TITLE> position focused on delivery and operations.",
         roles=("cloud", "devops"),
         required=("CAREER_STAGE", "SKILLS", "PROJECT_HIGHLIGHT", "ROLE_TITLE"),
     ),
     TemplateSpec(
         "T16",
-        "Quality-focused <CAREER_STAGE> engineer with experience in <SKILLS>. Created <PROJECT_HIGHLIGHT><PROJECT_IMPACT>, demonstrating <STRENGTHS> in test design, automation, and defect prevention. Targeting a <ROLE_TITLE> role that values reliable software and measurable quality.",
+        "<CAREER_STAGE> engineer targeting quality work, with verified evidence in <SKILLS>. The profile includes <PROJECT_HIGHLIGHT><PROJECT_IMPACT> and supporting evidence for <STRENGTHS>. Targeting a <ROLE_TITLE> role focused on test design and automation.",
         roles=("qa", "testing"),
         required=("CAREER_STAGE", "SKILLS", "PROJECT_HIGHLIGHT", "ROLE_TITLE"),
     ),
     TemplateSpec(
         "T17",
-        "Security-focused <CAREER_STAGE> candidate experienced in <SKILLS>. Completed <PROJECT_HIGHLIGHT><PROJECT_IMPACT>, providing evidence of <STRENGTHS> in secure implementation and technical investigation. Seeking a <ROLE_TITLE> role protecting systems in <DOMAIN>.",
+        "<CAREER_STAGE> candidate targeting security work, with verified evidence in <SKILLS>. The profile includes <PROJECT_HIGHLIGHT><PROJECT_IMPACT> and supporting evidence for <STRENGTHS>. Seeking a <ROLE_TITLE> role focused on systems in <DOMAIN>.",
         roles=("security",),
         required=("CAREER_STAGE", "SKILLS", "PROJECT_HIGHLIGHT", "ROLE_TITLE", "DOMAIN"),
     ),
     TemplateSpec(
         "T18",
-        "<EDUCATION_STATUS> candidate focused on <DOMAIN>, with experience in <SKILLS>. Through <PROJECT_HIGHLIGHT><PROJECT_IMPACT>, demonstrated <STRENGTHS> in analytical problem-solving, experimentation, and implementation. Interested in a <ROLE_TITLE> role connecting rigorous analysis with working software.",
+        "<EDUCATION_STATUS> candidate targeting <DOMAIN> work, with verified evidence in <SKILLS>. The profile includes <PROJECT_HIGHLIGHT><PROJECT_IMPACT> and supporting evidence for <STRENGTHS>. Interested in a <ROLE_TITLE> role connecting analysis with software implementation.",
         roles=("research", "engineering"),
         required=("EDUCATION_STATUS", "DOMAIN", "SKILLS", "PROJECT_HIGHLIGHT", "ROLE_TITLE"),
     ),
     TemplateSpec(
         "T19",
-        "<CAREER_STAGE> developer with practical experience in <SKILLS> and public work through <OPEN_SOURCE_HIGHLIGHT>. Contributions demonstrate <STRENGTHS> and familiarity with collaborative engineering workflows. Seeking a <ROLE_TITLE> role in <DOMAIN>.",
+        "<CAREER_STAGE> developer with verified evidence in <SKILLS> and a public project reference for <OPEN_SOURCE_HIGHLIGHT>. The profile also contains supporting evidence for <STRENGTHS>. Seeking a <ROLE_TITLE> role in <DOMAIN>.",
         required=("CAREER_STAGE", "SKILLS", "OPEN_SOURCE_HIGHLIGHT", "ROLE_TITLE", "DOMAIN"),
     ),
     TemplateSpec(
         "T20",
-        "Product-minded <CAREER_STAGE> engineer experienced in <SKILLS>. Delivered <PROJECT_HIGHLIGHT><PROJECT_IMPACT>, balancing implementation with <STRENGTHS>. Seeking a <ROLE_TITLE> role where technical decisions connect directly to useful and reliable product outcomes.",
+        "<CAREER_STAGE> engineer targeting product or platform work, with verified evidence in <SKILLS>. The profile includes <PROJECT_HIGHLIGHT><PROJECT_IMPACT> and supporting evidence for <STRENGTHS>. Seeking a <ROLE_TITLE> role where these skills support product outcomes.",
         required=("CAREER_STAGE", "SKILLS", "PROJECT_HIGHLIGHT", "ROLE_TITLE"),
     ),
     TemplateSpec(
         "T21",
-        "Adaptable <CAREER_STAGE> engineer with hands-on experience across <SKILLS>. Took ownership of <PROJECT_HIGHLIGHT><PROJECT_IMPACT>, demonstrating <STRENGTHS> from problem definition through delivery. Interested in a <ROLE_TITLE> role requiring broad contribution and fast iteration.",
+        "<CAREER_STAGE> engineer with verified profile evidence across <SKILLS>. The profile includes <PROJECT_HIGHLIGHT><PROJECT_IMPACT> and supporting evidence for <STRENGTHS>. Interested in a <ROLE_TITLE> role where this combination of skills is relevant.",
         required=("CAREER_STAGE", "SKILLS", "PROJECT_HIGHLIGHT", "ROLE_TITLE"),
     ),
     TemplateSpec(
         "T22",
-        "Software engineer with <YEARS_EXPERIENCE> of confirmed experience in <SKILLS>. Contributed to <PROJECT_HIGHLIGHT><PROJECT_IMPACT>, with strengths in <STRENGTHS>, maintainability, and dependable delivery. Targeting a <ROLE_TITLE> position supporting reliable systems in <INDUSTRY>.",
+        "Software engineer with <YEARS_EXPERIENCE> of recorded experience and verified evidence in <SKILLS>. The profile includes <PROJECT_HIGHLIGHT><PROJECT_IMPACT> and supporting evidence for <STRENGTHS>. Targeting a <ROLE_TITLE> position working on systems in <INDUSTRY>.",
         ("mid-level", "experienced"),
         required=("YEARS_EXPERIENCE", "SKILLS", "PROJECT_HIGHLIGHT", "ROLE_TITLE", "INDUSTRY"),
     ),
     TemplateSpec(
         "T23",
-        "<ROLE_TITLE> candidate with <YEARS_EXPERIENCE> of professional experience focused on <DOMAIN> and <SKILLS>. Delivered <PROJECT_HIGHLIGHT><PROJECT_IMPACT>, demonstrating <STRENGTHS>. Brings relevant <INDUSTRY> context and a record of evidence-backed technical contribution.",
+        "<ROLE_TITLE> candidate with <YEARS_EXPERIENCE> of recorded professional experience and verified evidence in <DOMAIN> and <SKILLS>. The profile includes <PROJECT_HIGHLIGHT><PROJECT_IMPACT> and supporting evidence for <STRENGTHS>.",
         ("mid-level", "experienced"),
         required=("ROLE_TITLE", "YEARS_EXPERIENCE", "DOMAIN", "SKILLS", "PROJECT_HIGHLIGHT", "INDUSTRY"),
     ),
     TemplateSpec(
         "T24",
-        "<ABOUT_ME> transitioning into <DOMAIN> with focused experience in <SKILLS>. Built <PROJECT_HIGHLIGHT><PROJECT_IMPACT> and developed <STRENGTHS> through practical work and <EDUCATION_STATUS>. Seeking a <ROLE_TITLE> opportunity where transferable experience and demonstrated technical ability are relevant.",
+        "<ABOUT_ME> transitioning into <DOMAIN>, with verified evidence in <SKILLS>. The profile includes <PROJECT_HIGHLIGHT><PROJECT_IMPACT>, <EDUCATION_STATUS>, and supporting evidence for <STRENGTHS>. Seeking a <ROLE_TITLE> opportunity where these documented skills are relevant.",
         ("career changer",),
         required=("ABOUT_ME", "DOMAIN", "SKILLS", "PROJECT_HIGHLIGHT", "EDUCATION_STATUS", "ROLE_TITLE"),
     ),
@@ -179,10 +179,18 @@ def build_about(
     ordered_skills = _ordered_skills(candidate, requirements)
     project = _best_project(candidate, requirements)
     values = _values(candidate, role_title, requirements, ordered_skills, project)
-    eligible = [template for template in TEMPLATES if all(values.get(key) for key in template.required)]
+    eligible = [
+        template
+        for template in TEMPLATES
+        if all(values.get(key) for key in template.required)
+        and _template_applicable(template, candidate, requirements, role_title, values)
+    ]
     ranked = sorted(
         eligible or [TEMPLATES[1]],
-        key=lambda template: (-_selection_score(template, candidate, requirements), template.template_id),
+        key=lambda template: (
+            -_selection_score(template, candidate, requirements, role_title, values),
+            template.template_id,
+        ),
     )
     for template in ranked:
         rendered = _render(template.text, values)
@@ -233,18 +241,95 @@ def _values(
     }
 
 
-def _selection_score(template: TemplateSpec, candidate: CandidateSnapshot, requirements: JobRequirements) -> int:
+def _selection_score(
+    template: TemplateSpec,
+    candidate: CandidateSnapshot,
+    requirements: JobRequirements,
+    role_title: str,
+    values: dict[str, str],
+) -> int:
     score = 0
     role = _normalize_domain(requirements.domain)
+    role_lower = role_title.casefold()
+    internship_role = re.search(r"\b(?:intern(?:ship)?|student)\b", role_lower) is not None
     if template.stages:
         score += 5 if candidate.career_stage in template.stages else -4
     if template.roles:
-        score += 7 if role in template.roles else -5
+        role_matches = role in template.roles
+        if template.template_id == "T04":
+            # Internship is a seniority signal in the title, not a technical
+            # domain. A Backend Intern should not need a fake `internship`
+            # domain for the student-specific template to be reachable.
+            role_matches = role_matches or internship_role
+        score += 7 if role_matches else -5
     if "PROJECT_HIGHLIGHT" in template.required and candidate.projects:
         score += 2
     if template.template_id == "T02":
         score += 1
+    if template.template_id == "T03" and candidate.availability and requirements.availability:
+        score += 8
+    if template.template_id == "T19" and values.get("OPEN_SOURCE_HIGHLIGHT"):
+        score += 10
+    if template.template_id == "T20" and re.search(r"\b(?:product|platform)\b", role_lower):
+        score += 9
+    if (
+        template.template_id == "T21"
+        and len(candidate.skills) >= 7
+        and any(term in role_lower for term in ("generalist", "versatile", "multidisciplinary"))
+    ):
+        score += 8
+    if (
+        template.template_id == "T23"
+        and candidate.years_experience >= 5
+        and _normalize_domain(candidate.domain) == _normalize_domain(requirements.domain)
+    ):
+        score += 3
+    if (
+        template.template_id == "T24"
+        and candidate.career_stage == "career changer"
+        and candidate.domain
+        and requirements.domain
+        and _normalize_domain(candidate.domain) != _normalize_domain(requirements.domain)
+    ):
+        score += 10
     return score
+
+
+def _template_applicable(
+    template: TemplateSpec,
+    candidate: CandidateSnapshot,
+    requirements: JobRequirements,
+    role_title: str,
+    values: dict[str, str],
+) -> bool:
+    """Keep claim-bearing specialty templates behind their evidence signals."""
+
+    role_lower = role_title.casefold()
+    if template.template_id == "T03":
+        return bool(candidate.availability and requirements.availability)
+    if template.template_id == "T19":
+        return bool(values.get("OPEN_SOURCE_HIGHLIGHT"))
+    if template.template_id == "T20":
+        return re.search(r"\b(?:product|platform)\b", role_lower) is not None
+    if template.template_id == "T21":
+        return len(candidate.skills) >= 7 and any(
+            term in role_lower for term in ("generalist", "versatile", "multidisciplinary")
+        )
+    if template.template_id == "T23":
+        return bool(
+            candidate.years_experience >= 5
+            and candidate.domain
+            and requirements.domain
+            and _normalize_domain(candidate.domain) == _normalize_domain(requirements.domain)
+        )
+    if template.template_id == "T24":
+        return bool(
+            candidate.career_stage == "career changer"
+            and candidate.domain
+            and requirements.domain
+            and _normalize_domain(candidate.domain) != _normalize_domain(requirements.domain)
+        )
+    return True
 
 
 def _ordered_skills(candidate: CandidateSnapshot, requirements: JobRequirements) -> list[str]:
@@ -275,18 +360,11 @@ def _best_project(candidate: CandidateSnapshot, requirements: JobRequirements) -
 
 
 def _strengths(candidate: CandidateSnapshot, requirements: JobRequirements) -> str:
-    domain = _normalize_domain(requirements.domain or candidate.domain)
-    return {
-        "embedded": "implementation, debugging, and systems thinking",
-        "backend": "API implementation and data handling",
-        "frontend": "interface implementation and application behavior",
-        "data": "data processing and reliable pipelines",
-        "ml": "experimentation, evaluation, and implementation",
-        "cloud": "automation, deployment, and reliability",
-        "qa": "test design and defect prevention",
-        "security": "secure implementation and technical investigation",
-        "mobile": "application implementation and user-focused delivery",
-    }.get(domain, "implementation, testing, and problem-solving")
+    ordered = _ordered_skills(candidate, requirements)
+    # Strength statements must be backed by approved skill evidence. Do not
+    # infer traits such as ownership, reliability, or leadership from a domain.
+    evidenced = [skill for skill in ordered if skill in candidate.skill_evidence]
+    return _join(evidenced[:4]) or "reviewed project work"
 
 
 def _render(template: str, values: dict[str, str]) -> str:
@@ -297,7 +375,7 @@ def _render(template: str, values: dict[str, str]) -> str:
     rendered = re.sub(r"\s+([,.;:])", r"\1", rendered)
     rendered = re.sub(r"([,;])\s*([,.;])", r"\2", rendered)
     rendered = rendered.replace("..", ".").strip(" ,;")
-    return rendered
+    return rendered[:1].upper() + rendered[1:] if rendered else ""
 
 
 def _normalize_domain(value: str) -> str:

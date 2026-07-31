@@ -1,8 +1,8 @@
 # Release, promotion, and rollback runbook
 
 Status: process defined; owners and production evidence unassigned
-Last reviewed: 2026-07-30
-Database contract: v22
+Last reviewed: 2026-07-31
+Database contract: v24
 
 This is the living release process. Dated release reports are historical
 evidence and must not be used as a substitute.
@@ -14,7 +14,8 @@ Every release record must bind:
 - immutable Git commit SHA;
 - frontend and backend deployment IDs/URLs;
 - OCR image digest (tag alone is insufficient);
-- ordered database migrations applied, including v22 state;
+- ordered database migrations applied, including v23 application-event context
+  and v24 source-health statuses;
 - frontend SBOM and Python dependency inventories;
 - configuration/preflight evidence;
 - approvers and rollback commander;
@@ -90,6 +91,15 @@ safe against real production state.
 For v21 Storage privilege hardening, the backend service-role path must exist
 and pass staging smoke before browser DML is revoked. See the rollback caveat in
 the environment preflight.
+
+For this v23/v24 change set, use the compatible schema-first sequence: apply
+v23 and then v24, verify both, deploy the backend, and deploy the frontend last.
+The pre-change backend tolerates the additive event columns and wider source-run
+status constraint, while the new backend requires those columns/statuses and the
+new frontend requires the expanded backend response. Keep the migration-to-
+backend window short (or pause application-stage writes) because events written
+by the old backend during that window receive safe defaults but cannot record an
+accurate `previous_status`.
 
 ### 4. Production canary
 
@@ -199,6 +209,8 @@ SBOM/inventories:
 Staging evidence:
 Storage v21 evidence:
 Data-contract v22 evidence:
+Application-event v23 evidence:
+Source-health v24 evidence:
 Canary cohort and duration:
 Success/rollback thresholds:
 Known exceptions and expiry:

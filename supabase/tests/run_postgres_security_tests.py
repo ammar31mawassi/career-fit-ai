@@ -24,7 +24,76 @@ UPGRADE_MIGRATIONS = (
     SUPABASE_ROOT
     / "migrations"
     / "20260730220000_data_contract_constraints_v22.sql",
+    SUPABASE_ROOT
+    / "migrations"
+    / "20260731190000_application_event_context_v23.sql",
+    SUPABASE_ROOT
+    / "migrations"
+    / "20260731200000_job_source_health_status_v24.sql",
 )
+
+LEGACY_APPLICATION_EVENT_SEED = """
+insert into auth.users (id)
+values ('00000000-0000-0000-0000-000000000199');
+
+with inserted_job as (
+  insert into public.jobs (user_id, content_hash, company, role)
+  values (
+    '00000000-0000-0000-0000-000000000199',
+    'v23-backfill-fixture',
+    'Migration Fixture',
+    'Backend Engineer'
+  )
+  returning id, user_id
+), inserted_match as (
+  insert into public.job_matches (user_id, job_id, status)
+  select user_id, id, 'Applied' from inserted_job
+  returning id, user_id
+)
+insert into public.job_status_events (user_id, match_id, status, created_at)
+select
+  inserted_match.user_id,
+  inserted_match.id,
+  event.status,
+  case event.ordinal
+    when 1 then '2026-07-01 11:00:00+00'::timestamptz
+    else '2026-07-01 10:00:00+00'::timestamptz
+  end
+from inserted_match
+cross join (
+  values (1, 'Lead'::text), (2, 'Applied'::text)
+) as event(ordinal, status)
+order by event.ordinal;
+"""
+
+APPLICATION_EVENT_BACKFILL_ASSERTIONS = """
+do $$
+declare
+  observed_previous text[];
+begin
+  select array_agg(previous_status order by id)
+    into observed_previous
+  from public.job_status_events
+  where user_id = '00000000-0000-0000-0000-000000000199';
+
+  if observed_previous is distinct from array['', 'Lead']::text[] then
+    raise exception 'v23 previous-status backfill is not in stable audit order: %', observed_previous;
+  end if;
+
+  if exists (
+    select 1
+    from public.job_status_events
+    where user_id = '00000000-0000-0000-0000-000000000199'
+      and (occurred_at is distinct from created_at or source <> 'legacy' or note <> '')
+  ) then
+    raise exception 'v23 application-event context backfill is incorrect';
+  end if;
+end
+$$;
+
+delete from auth.users
+where id = '00000000-0000-0000-0000-000000000199';
+"""
 
 
 class HarnessError(RuntimeError):
@@ -158,7 +227,7 @@ def main() -> int:
             if not migration.exists():
                 raise HarnessError(f"Missing migration: {migration}")
 
-        print("Checking the v18-to-v22 upgrade path...")
+        print("Checking the v18-to-v24 upgrade path...")
         _prepare_database(container, "careerfit_upgrade")
         _psql(
             container,
@@ -167,12 +236,18 @@ def main() -> int:
                 encoding="utf-8"
             ),
         )
+        _psql(container, "careerfit_upgrade", LEGACY_APPLICATION_EVENT_SEED)
         for migration in UPGRADE_MIGRATIONS:
             _psql(
                 container,
                 "careerfit_upgrade",
                 migration.read_text(encoding="utf-8"),
             )
+        _psql(
+            container,
+            "careerfit_upgrade",
+            APPLICATION_EVENT_BACKFILL_ASSERTIONS,
+        )
         _psql(container, "careerfit_upgrade", assertions)
     finally:
         _run(["docker", "stop", container], check=False)

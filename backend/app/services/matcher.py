@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from .advice_quality import PROJECT_EVIDENCE_PROMPT
 from .about_templates import AboutResult, build_about
 from .job_research import JobRequirements, RequirementGroup
 from .ontology import ONTOLOGY_VERSION, extract_skills, skill_match_strength
@@ -536,7 +537,7 @@ def _confidence(
 
 def _recommended_projects(candidate: CandidateSnapshot, job_skills: list[str]) -> list[str]:
     if not candidate.projects:
-        return ["Add one or two relevant projects with concrete implementation details and verified outcomes."]
+        return [PROJECT_EVIDENCE_PROMPT]
     scored: list[tuple[int, int, str]] = []
     for project in candidate.projects:
         project_skills = set(extract_skills(project))

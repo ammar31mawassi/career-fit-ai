@@ -51,6 +51,7 @@ Out of scope for v1: broad Goozali rollout, Gmail, WhatsApp, automatic applicati
 - [Data retention inventory](docs/DATA_RETENTION_INVENTORY.md)
 - [Dependency and build policy](docs/DEPENDENCY_POLICY.md)
 - [Ownership register](docs/OWNERSHIP.md)
+- [Reference repository review and adaptations](docs/REFERENCE_REPOSITORY_ADAPTATION_2026-07-31.md)
 
 ## Local development
 
@@ -80,7 +81,7 @@ Open `http://localhost:3000`.
 
 1. Create a Supabase project.
 2. Run `supabase/schema.sql` in the Supabase SQL editor. This is the current
-   fresh-install snapshot through database contract v22.
+   fresh-install snapshot through database contract v24.
 3. Create a private Storage bucket named `profile-documents`.
 4. Keep email/password Auth enabled. The app signup route creates confirmed beta users and applies signup rate limits.
 5. Put the project URL, anon key, service role key, backend API key, and allowed origins in Vercel/local env.

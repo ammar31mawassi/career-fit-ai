@@ -64,9 +64,27 @@ export type ResumeAdvice = {
   about_text: string;
   template_id: string;
   evidence: string[];
+  template_version: string;
+  quality_policy_version: string;
+  quality_checked: boolean;
+  quality_repaired: boolean;
+  quality_findings: Array<{
+    code: string;
+    severity: "error" | "warning";
+    message: string;
+  }>;
 };
 
 export type JobStatus = "Lead" | "Applied" | "Interview" | "Rejected" | "Withdrawn" | "Offer";
+
+export type JobStatusEvent = {
+  previous_status: JobStatus | null;
+  status: JobStatus;
+  occurred_at: string;
+  source: "system" | "user" | "correction" | "backfill" | "legacy";
+  note: string;
+  created_at: string;
+};
 
 export type JobMatch = {
   id: number;
@@ -81,7 +99,7 @@ export type JobMatch = {
   ontology_version: string;
   component_scores: Record<string, number>;
   applied_caps: string[];
-  status_history: Array<{ status: JobStatus; created_at: string }>;
+  status_history: JobStatusEvent[];
   resume_advice: ResumeAdvice;
   analyzed_at: string;
 };
@@ -568,10 +586,14 @@ export function saveNotificationPreference(emailEnabled: boolean) {
   });
 }
 
-export function updateJobStatus(jobId: number, status: JobStatus) {
+export function updateJobStatus(
+  jobId: number,
+  status: JobStatus,
+  context: { occurred_at?: string; note?: string } = {}
+) {
   return request<TrackedJob>(`/api/jobs/${jobId}/status`, {
     method: "PATCH",
-    body: JSON.stringify({ status })
+    body: JSON.stringify({ status, ...context })
   });
 }
 

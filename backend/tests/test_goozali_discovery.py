@@ -191,6 +191,270 @@ def test_discovery_is_recent_bounded_idempotent_and_enrolls_only_configured_user
     assert [run.status for run in runs] == ["completed", "completed"]
 
 
+def test_zero_yield_is_inconclusive_and_never_deactivates_stale_catalog_jobs():
+    engine = _engine()
+    SQLModel.metadata.create_all(engine)
+    now = datetime(2026, 7, 31, 12, tzinfo=timezone.utc)
+    settings = SimpleNamespace(
+        goozali_enabled=True,
+        goozali_embed_url="https://example.invalid/embed",
+        goozali_initial_lookback_hours=72,
+        goozali_max_jobs_per_run=10,
+        goozali_beta_user_ids=(),
+    )
+    with Session(engine) as session:
+        catalog = SharedJobCatalog(
+            content_hash="stale-zero-yield",
+            source_name="goozali",
+            external_id="existing",
+            company="Existing Co",
+            role="Backend Engineer",
+            active=True,
+            last_seen_at=now - timedelta(days=5),
+            updated_at=now - timedelta(days=5),
+        )
+        session.add(catalog)
+        session.add(
+            JobSourceRun(
+                source_name="goozali",
+                status="completed",
+                records_seen=20,
+                records_valid=18,
+                completed_at=now - timedelta(hours=1),
+            )
+        )
+        session.commit()
+
+        outcome = run_goozali_discovery(
+            session,
+            settings=settings,
+            fetcher=lambda _url: GoozaliFetchResult(jobs=[], records_seen=0, records_valid=0),
+            now=now,
+        )
+        session.refresh(catalog)
+        run = session.exec(select(JobSourceRun).order_by(JobSourceRun.id.desc())).first()
+
+    assert outcome.status == "inconclusive"
+    assert outcome.health_reason == "zero_yield"
+    assert outcome.deactivation_suppressed
+    assert outcome.deactivated == 0
+    assert catalog.active
+    assert run is not None and run.status == "inconclusive"
+    assert run.error_code == "zero_yield"
+
+
+def test_low_valid_ratio_ingests_safe_rows_but_suppresses_deactivation():
+    engine = _engine()
+    SQLModel.metadata.create_all(engine)
+    now = datetime(2026, 7, 31, 12, tzinfo=timezone.utc)
+    valid_job = _job("valid-one", now)
+    settings = SimpleNamespace(
+        goozali_enabled=True,
+        goozali_embed_url="https://example.invalid/embed",
+        goozali_initial_lookback_hours=72,
+        goozali_max_jobs_per_run=10,
+        goozali_beta_user_ids=(),
+    )
+    with Session(engine) as session:
+        outcome = run_goozali_discovery(
+            session,
+            settings=settings,
+            fetcher=lambda _url: GoozaliFetchResult(
+                jobs=[valid_job],
+                records_seen=10,
+                records_valid=1,
+            ),
+            now=now,
+        )
+        catalogs = list(session.exec(select(SharedJobCatalog)).all())
+
+    assert outcome.status == "degraded"
+    assert outcome.health_reason == "low_valid_ratio"
+    assert outcome.deactivation_suppressed
+    assert outcome.created == 1
+    assert [item.external_id for item in catalogs] == ["valid-one"]
+
+
+@pytest.mark.parametrize(
+    ("result", "reason_code"),
+    [
+        (GoozaliFetchResult(jobs=[], records_seen=3, records_valid=0), "no_usable_records"),
+        (GoozaliFetchResult(jobs=[], records_seen=1, records_valid=2), "invalid_record_counts"),
+    ],
+)
+def test_invalid_or_unusable_source_contract_is_degraded(result, reason_code):
+    engine = _engine()
+    SQLModel.metadata.create_all(engine)
+    settings = SimpleNamespace(
+        goozali_enabled=True,
+        goozali_embed_url="https://example.invalid/embed",
+        goozali_initial_lookback_hours=72,
+        goozali_max_jobs_per_run=10,
+        goozali_beta_user_ids=(),
+    )
+
+    with Session(engine) as session:
+        outcome = run_goozali_discovery(
+            session,
+            settings=settings,
+            fetcher=lambda _url: result,
+            now=datetime(2026, 7, 31, 12, tzinfo=timezone.utc),
+        )
+
+    assert outcome.status == "degraded"
+    assert outcome.health_reason == reason_code
+    assert outcome.deactivation_suppressed
+
+
+def test_yield_collapse_uses_recent_healthy_baseline_and_preserves_catalog():
+    engine = _engine()
+    SQLModel.metadata.create_all(engine)
+    now = datetime(2026, 7, 31, 12, tzinfo=timezone.utc)
+    settings = SimpleNamespace(
+        goozali_enabled=True,
+        goozali_embed_url="https://example.invalid/embed",
+        goozali_initial_lookback_hours=72,
+        goozali_max_jobs_per_run=10,
+        goozali_beta_user_ids=(),
+    )
+    with Session(engine) as session:
+        stale = SharedJobCatalog(
+            content_hash="stale-yield-collapse",
+            source_name="goozali",
+            external_id="stale",
+            company="Stale Co",
+            role="Backend Engineer",
+            active=True,
+            last_seen_at=now - timedelta(days=5),
+            updated_at=now - timedelta(days=5),
+        )
+        session.add(stale)
+        # Exercise the smallest guarded baseline. Integer threshold truncation
+        # must not allow a five-to-one collapse to deactivate catalog rows.
+        for hours_ago, count in enumerate((5, 5, 5, 5, 5), start=1):
+            session.add(
+                JobSourceRun(
+                    source_name="goozali",
+                    status="completed",
+                    records_seen=count,
+                    records_valid=count,
+                    completed_at=now - timedelta(hours=hours_ago),
+                )
+            )
+        session.commit()
+
+        outcome = run_goozali_discovery(
+            session,
+            settings=settings,
+            fetcher=lambda _url: GoozaliFetchResult(
+                jobs=[_job("single-safe-row", now)],
+                records_seen=1,
+                records_valid=1,
+            ),
+            now=now,
+        )
+        session.refresh(stale)
+
+    assert outcome.status == "degraded"
+    assert outcome.health_reason == "yield_collapse"
+    assert outcome.created == 1
+    assert outcome.deactivated == 0
+    assert stale.active
+
+
+def test_healthy_source_run_can_deactivate_a_stale_missing_job():
+    engine = _engine()
+    SQLModel.metadata.create_all(engine)
+    now = datetime(2026, 7, 31, 12, tzinfo=timezone.utc)
+    settings = SimpleNamespace(
+        goozali_enabled=True,
+        goozali_embed_url="https://example.invalid/embed",
+        goozali_initial_lookback_hours=72,
+        goozali_max_jobs_per_run=10,
+        goozali_beta_user_ids=(),
+    )
+    with Session(engine) as session:
+        stale = SharedJobCatalog(
+            content_hash="stale-healthy-run",
+            source_name="goozali",
+            external_id="stale",
+            company="Stale Co",
+            role="Backend Engineer",
+            active=True,
+            last_seen_at=now - timedelta(days=5),
+            updated_at=now - timedelta(days=5),
+        )
+        session.add(stale)
+        session.commit()
+
+        outcome = run_goozali_discovery(
+            session,
+            settings=settings,
+            fetcher=lambda _url: GoozaliFetchResult(
+                jobs=[_job("healthy-row", now)],
+                records_seen=1,
+                records_valid=1,
+            ),
+            now=now,
+        )
+        session.refresh(stale)
+
+    assert outcome.status == "completed"
+    assert not outcome.deactivation_suppressed
+    assert outcome.deactivated == 1
+    assert not stale.active
+
+
+def test_terminal_run_commit_failure_rolls_back_catalog_and_marks_run_failed(monkeypatch):
+    engine = _engine()
+    SQLModel.metadata.create_all(engine)
+    now = datetime(2026, 7, 31, 12, tzinfo=timezone.utc)
+    settings = SimpleNamespace(
+        goozali_enabled=True,
+        goozali_embed_url="https://example.invalid/embed",
+        goozali_initial_lookback_hours=72,
+        goozali_max_jobs_per_run=10,
+        goozali_beta_user_ids=(),
+    )
+    result = GoozaliFetchResult(
+        jobs=[_job("atomic-run", now)],
+        records_seen=1,
+        records_valid=1,
+    )
+
+    with Session(engine) as session:
+        original_commit = session.commit
+        terminal_commit_failed = False
+
+        def fail_terminal_commit_once():
+            nonlocal terminal_commit_failed
+            terminal = any(
+                isinstance(item, JobSourceRun) and item.status == "completed"
+                for item in session.identity_map.values()
+            )
+            if terminal and not terminal_commit_failed:
+                terminal_commit_failed = True
+                raise RuntimeError("simulated terminal audit commit failure")
+            original_commit()
+
+        monkeypatch.setattr(session, "commit", fail_terminal_commit_once)
+        with pytest.raises(RuntimeError, match="terminal audit commit failure"):
+            run_goozali_discovery(
+                session,
+                settings=settings,
+                fetcher=lambda _url: result,
+                now=now,
+            )
+        session.expire_all()
+        catalogs = list(session.exec(select(SharedJobCatalog)).all())
+        runs = list(session.exec(select(JobSourceRun)).all())
+
+    assert terminal_commit_failed
+    assert catalogs == []
+    assert len(runs) == 1
+    assert runs[0].status == "failed"
+
+
 def test_discovery_persists_goozali_reader_output_and_primary_field():
     engine = _engine()
     SQLModel.metadata.create_all(engine)
@@ -274,3 +538,32 @@ def _job(external_id: str, discovered_at: datetime) -> GoozaliJob:
         discovered_at=discovered_at,
         source_confidence=0.92,
     )
+
+
+def test_source_health_rejects_valid_count_that_does_not_match_returned_jobs():
+    engine = _engine()
+    SQLModel.metadata.create_all(engine)
+    now = datetime(2026, 7, 31, 12, tzinfo=timezone.utc)
+    settings = SimpleNamespace(
+        goozali_enabled=True,
+        goozali_embed_url="https://example.invalid/embed",
+        goozali_initial_lookback_hours=72,
+        goozali_max_jobs_per_run=10,
+        goozali_beta_user_ids=(),
+    )
+
+    with Session(engine) as session:
+        outcome = run_goozali_discovery(
+            session,
+            settings=settings,
+            fetcher=lambda _url: GoozaliFetchResult(
+                jobs=[_job("only-returned-row", now)],
+                records_seen=3,
+                records_valid=2,
+            ),
+            now=now,
+        )
+
+    assert outcome.status == "degraded"
+    assert outcome.health_reason == "invalid_record_counts"
+    assert outcome.deactivation_suppressed

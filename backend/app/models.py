@@ -176,7 +176,11 @@ class JobStatusEvent(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     user_id: UUID = Field(index=True)
     match_id: int = Field(foreign_key="job_matches.id", index=True)
+    previous_status: str = ""
     status: str = Field(index=True)
+    occurred_at: datetime = Field(default_factory=utc_now)
+    source: str = Field(default="system", index=True)
+    note: str = ""
     created_at: datetime = Field(default_factory=utc_now)
 
 
