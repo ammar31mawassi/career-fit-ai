@@ -1,7 +1,6 @@
 import type { Metadata } from "next";
 import { Manrope, Newsreader } from "next/font/google";
 import type { ReactNode } from "react";
-import { AppDataProvider } from "@/components/AppDataProvider";
 import "./globals.css";
 
 const manrope = Manrope({
@@ -25,7 +24,7 @@ export const metadata: Metadata = {
 export default function RootLayout({ children }: { children: ReactNode }) {
   return (
     <html data-scroll-behavior="smooth" lang="en">
-      <body className={`${manrope.variable} ${newsreader.variable}`}><AppDataProvider>{children}</AppDataProvider></body>
+      <body className={`${manrope.variable} ${newsreader.variable}`}>{children}</body>
     </html>
   );
 }

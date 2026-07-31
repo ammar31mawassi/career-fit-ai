@@ -20,14 +20,19 @@ export function RecoveryClient() {
     }
     setLoading(true);
     setMessage("");
-    const { error } = await createClient().auth.updateUser({ password });
-    if (error) {
-      setMessage("This recovery link is invalid or expired. Request a new link from the sign-in page.");
-    } else {
-      setSuccess(true);
-      setMessage("Password updated. You can return to CareerFit.");
+    try {
+      const { error } = await createClient().auth.updateUser({ password });
+      if (error) {
+        setMessage("This recovery link is invalid or expired. Request a new link from the sign-in page.");
+      } else {
+        setSuccess(true);
+        setMessage("Password updated. You can return to CareerFit.");
+      }
+    } catch {
+      setMessage("Password recovery is temporarily unavailable. Check your connection and try again.");
+    } finally {
+      setLoading(false);
     }
-    setLoading(false);
   }
 
   return (
@@ -37,8 +42,12 @@ export function RecoveryClient() {
         <div><span className="section-kicker"><KeyRound size={12} /> Account recovery</span><h1>Choose a new password</h1><p>Use at least eight characters and do not reuse an important password.</p></div>
         {message ? <div className={`notice ${success ? "success" : "error"}`} role="status">{message}</div> : null}
         {!success ? <>
-          <label className="field"><span>New password</span><input autoComplete="new-password" minLength={8} onChange={(event) => setPassword(event.target.value)} required type="password" value={password} /></label>
-          <label className="field"><span>Confirm new password</span><input autoComplete="new-password" minLength={8} onChange={(event) => setConfirmation(event.target.value)} required type="password" value={confirmation} /></label>
+          <label className="sr-only">
+            Account email
+            <input autoComplete="username" name="username" readOnly tabIndex={-1} value="" />
+          </label>
+          <label className="field"><span>New password</span><input autoComplete="new-password" maxLength={128} minLength={8} onChange={(event) => setPassword(event.target.value)} required type="password" value={password} /></label>
+          <label className="field"><span>Confirm new password</span><input autoComplete="new-password" maxLength={128} minLength={8} onChange={(event) => setConfirmation(event.target.value)} required type="password" value={confirmation} /></label>
           <button className="button primary" disabled={loading} type="submit">{loading ? "Updating…" : "Update password"}</button>
         </> : <Link className="button primary" href="/">Return to CareerFit</Link>}
         <Link className="auth-text-link" href="/login">Back to sign in</Link>

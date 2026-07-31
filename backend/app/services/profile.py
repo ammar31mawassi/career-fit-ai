@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import time
 import urllib.parse
@@ -8,8 +9,10 @@ import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from functools import lru_cache
-from uuid import UUID
+from pathlib import Path
+from uuid import UUID, uuid4
 
+from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
 from ..models import (
@@ -33,7 +36,7 @@ from ..schemas import (
 )
 from ..config import get_settings
 from .ontology import canonical_skill, extract_skills, infer_domain, skill_domain
-from .document_reader import PDF_PARSER_VERSION, read_pdf_document
+from .document_reader import DocumentReadResult, PDF_PARSER_VERSION, read_pdf_document
 from .experience_normalization import professional_experience
 from .profile_extraction import (
     EXTRACTOR_VERSION,
@@ -42,7 +45,7 @@ from .profile_extraction import (
     extracted_fact_key,
     fact_key,
 )
-from .storage import load_private_file, save_private_file
+from .storage import delete_private_file, load_private_file, save_private_file
 from .telemetry import record_evaluation_example, record_extraction_metric, record_onboarding_event
 from .text import safe_filename
 
@@ -57,6 +60,9 @@ PROJECT_HINTS = (
     "delivered",
     "engineered",
 )
+logger = logging.getLogger("careerfit.profile")
+MATCHABLE_PROFILE_REQUIRED = "Upload and analyze a readable, current CV before matching jobs."
+MIN_READABLE_PROFILE_CHARACTERS = 80
 LOCATION_TERMS = (
     "israel",
     "jerusalem",
@@ -109,39 +115,77 @@ def get_or_create_profile(session: Session, user_id: UUID) -> Profile:
         return profile
     profile = Profile(user_id=user_id)
     session.add(profile)
-    session.commit()
+    try:
+        session.commit()
+    except IntegrityError:
+        # Another request may have inserted the same unique user profile after
+        # our initial read. Reset the failed transaction and return that winner.
+        session.rollback()
+        concurrent = session.exec(select(Profile).where(Profile.user_id == user_id)).first()
+        if concurrent is None:
+            raise
+        return concurrent
     session.refresh(profile)
     return profile
 
 
+def profile_is_matchable(session: Session, profile: Profile | None) -> bool:
+    """Require a ready profile backed by readable sources analyzed at their current versions."""
+    if profile is None or profile.status != "ready" or profile.last_analyzed_at is None:
+        return False
+    sources = _sources(session, profile)
+    cv_sources = [source for source in sources if source.source_type == "cv"]
+    if not any(
+        _meaningful_character_count(source.content_text) >= MIN_READABLE_PROFILE_CHARACTERS
+        for source in cv_sources
+    ):
+        return False
+    analyzed_at = _aware_utc(profile.last_analyzed_at)
+    return all(_aware_utc(source.updated_at) <= analyzed_at for source in sources)
+
+
 def upload_cv_source(session: Session, user_id: UUID, filename: str, data: bytes) -> ProfileOut:
+    cleaned_filename, read_result = _validate_and_read_pdf(filename, data)
     profile = get_or_create_profile(session, user_id)
-    cleaned_filename = safe_filename(filename)
-    storage_path = save_private_file(user_id, f"cv-{cleaned_filename}", data, "application/pdf")
-    read_result = read_pdf_document(data)
     existing = _source_by_type(session, profile, "cv")
-    source = existing or ProfileSource(user_id=user_id, profile_id=profile.id or 0, source_type="cv")
-    source.title = cleaned_filename
-    source.storage_path = storage_path
-    source.content_text = read_result.text
-    source.metadata_json = json.dumps({"filename": cleaned_filename, **read_result.metadata()}, sort_keys=True)
-    source.updated_at = _now()
-    profile.status = "needs_analysis"
-    profile.updated_at = _now()
-    session.add(source)
-    session.add(profile)
-    if not profile.onboarding_completed:
-        record_onboarding_event(
-            session,
-            user_id,
-            profile.id,
-            "cv_uploaded",
-            counts={
-                "readable": int(bool(read_result.text.strip())),
-                "scanned_pdf": int(bool(read_result.metadata().get("scanned_pdf_detected"))),
-            },
-        )
-    session.commit()
+    previous_storage_path = existing.storage_path if existing else ""
+    storage_path = save_private_file(
+        user_id,
+        _replacement_storage_name("cv", cleaned_filename),
+        data,
+        "application/pdf",
+    )
+    try:
+        source = existing or ProfileSource(user_id=user_id, profile_id=profile.id or 0, source_type="cv")
+        source.title = cleaned_filename
+        source.storage_path = storage_path
+        source.content_text = read_result.text
+        source.metadata_json = json.dumps({"filename": cleaned_filename, **read_result.metadata()}, sort_keys=True)
+        source.updated_at = _now()
+        profile.status = "needs_analysis"
+        profile.updated_at = _now()
+        session.add(source)
+        session.add(profile)
+        if not profile.onboarding_completed:
+            record_onboarding_event(
+                session,
+                user_id,
+                profile.id,
+                "cv_uploaded",
+                counts={
+                    "readable": int(bool(read_result.text.strip())),
+                    "scanned_pdf": int(bool(read_result.metadata().get("scanned_pdf_detected"))),
+                },
+            )
+    except Exception:
+        _compensate_failed_pdf_replacement(session, user_id, storage_path)
+        raise
+    _commit_pdf_replacement(
+        session,
+        user_id,
+        new_storage_path=storage_path,
+        previous_storage_path=previous_storage_path,
+    )
     return profile_output(session, user_id)
 
 
@@ -189,27 +233,96 @@ def apply_browser_ocr(session: Session, user_id: UUID, payload: BrowserOcrIn) ->
 
 
 def upload_linkedin_pdf_source(session: Session, user_id: UUID, filename: str, data: bytes) -> ProfileOut:
+    cleaned_filename, read_result = _validate_and_read_pdf(filename, data)
     profile = get_or_create_profile(session, user_id)
-    cleaned_filename = safe_filename(filename)
-    storage_path = save_private_file(user_id, f"linkedin-{cleaned_filename}", data, "application/pdf")
-    read_result = read_pdf_document(data)
-    source = _source_by_type(session, profile, "linkedin_pdf") or ProfileSource(
-        user_id=user_id,
-        profile_id=profile.id or 0,
-        source_type="linkedin_pdf",
+    existing = _source_by_type(session, profile, "linkedin_pdf")
+    previous_storage_path = existing.storage_path if existing else ""
+    storage_path = save_private_file(
+        user_id,
+        _replacement_storage_name("linkedin", cleaned_filename),
+        data,
+        "application/pdf",
     )
-    source.title = cleaned_filename
-    source.storage_path = storage_path
-    source.content_text = read_result.text
-    source.metadata_json = json.dumps({"filename": cleaned_filename, **read_result.metadata()}, sort_keys=True)
-    source.updated_at = _now()
-    profile.linkedin_text = read_result.text[:50000]
-    profile.status = "needs_analysis"
-    profile.updated_at = _now()
-    session.add(source)
-    session.add(profile)
-    session.commit()
+    try:
+        source = existing or ProfileSource(
+            user_id=user_id,
+            profile_id=profile.id or 0,
+            source_type="linkedin_pdf",
+        )
+        source.title = cleaned_filename
+        source.storage_path = storage_path
+        source.content_text = read_result.text
+        source.metadata_json = json.dumps({"filename": cleaned_filename, **read_result.metadata()}, sort_keys=True)
+        source.updated_at = _now()
+        profile.linkedin_text = read_result.text[:50000]
+        profile.status = "needs_analysis"
+        profile.updated_at = _now()
+        session.add(source)
+        session.add(profile)
+    except Exception:
+        _compensate_failed_pdf_replacement(session, user_id, storage_path)
+        raise
+    _commit_pdf_replacement(
+        session,
+        user_id,
+        new_storage_path=storage_path,
+        previous_storage_path=previous_storage_path,
+    )
     return profile_output(session, user_id)
+
+
+def _validate_and_read_pdf(filename: str, data: bytes) -> tuple[str, DocumentReadResult]:
+    cleaned_filename = safe_filename(filename)
+    if not data:
+        raise ValueError("Uploaded PDF is empty.")
+    if len(data) > get_settings().max_upload_bytes:
+        raise ValueError("Uploaded PDF is too large.")
+    if Path(cleaned_filename).suffix.lower() != ".pdf" or not data.startswith(b"%PDF-"):
+        raise ValueError("Uploaded file is not a valid PDF.")
+    try:
+        return cleaned_filename, read_pdf_document(data)
+    except Exception as exc:
+        raise ValueError("Uploaded PDF could not be parsed.") from exc
+
+
+def _replacement_storage_name(source_type: str, cleaned_filename: str) -> str:
+    return f"{source_type}-{uuid4().hex}-{cleaned_filename}"
+
+
+def _commit_pdf_replacement(
+    session: Session,
+    user_id: UUID,
+    *,
+    new_storage_path: str,
+    previous_storage_path: str,
+) -> None:
+    try:
+        session.commit()
+    except Exception:
+        _compensate_failed_pdf_replacement(session, user_id, new_storage_path)
+        raise
+
+    if previous_storage_path and previous_storage_path != new_storage_path:
+        try:
+            delete_private_file(previous_storage_path, expected_user_id=user_id)
+        except RuntimeError:
+            # The committed source points to the new object, so retaining the
+            # old object is safer than rolling back or deleting the new upload.
+            logger.exception("pdf_replacement_old_object_cleanup_failed")
+
+
+def _compensate_failed_pdf_replacement(
+    session: Session,
+    user_id: UUID,
+    new_storage_path: str,
+) -> None:
+    session.rollback()
+    try:
+        delete_private_file(new_storage_path, expected_user_id=user_id)
+    except RuntimeError:
+        # Keep the original database/staging failure visible. Prefix-based
+        # account deletion can still remove this unreferenced object.
+        logger.exception("pdf_replacement_compensation_failed")
 
 
 def update_profile_sources(session: Session, user_id: UUID, payload: ProfileSourcesIn) -> ProfileOut:
@@ -913,7 +1026,7 @@ def _refresh_pdf_sources(session: Session, sources: list[ProfileSource]) -> None
         metadata = _json_dict(source.metadata_json)
         if metadata.get("parser_version") == PDF_PARSER_VERSION:
             continue
-        data = load_private_file(source.storage_path)
+        data = load_private_file(source.storage_path, expected_user_id=source.user_id)
         if not data:
             continue
         read_result = read_pdf_document(data)
@@ -1553,3 +1666,7 @@ def _dedupe(values: list[str]) -> list[str]:
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _aware_utc(value: datetime) -> datetime:
+    return value.astimezone(timezone.utc) if value.tzinfo else value.replace(tzinfo=timezone.utc)

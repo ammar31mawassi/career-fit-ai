@@ -3,13 +3,19 @@ from __future__ import annotations
 import json
 from uuid import UUID
 
+import pytest
 from sqlalchemy.pool import StaticPool
-from sqlmodel import Session, SQLModel, create_engine
+from sqlmodel import Session, SQLModel, create_engine, select
 
-from app.models import Profile, ProfileSource
+from app.models import AgentRun, Job, Profile, ProfileSource
 from app.schemas import JobCreateIn
 from app.services import job_research
-from app.services.job_research import JOB_READER_VERSION, classify_requirements, extract_job_from_input
+from app.services.job_research import (
+    JOB_READER_VERSION,
+    classify_requirements,
+    extract_job_from_input,
+    validate_pasted_job_description,
+)
 from app.services.ontology import extract_skills
 from app.services.jobs import create_or_analyze_job
 from app.services.profile import analyze_profile
@@ -463,7 +469,9 @@ def test_failed_url_can_be_upgraded_with_pasted_description(monkeypatch):
                 role="Backend Developer",
                 description_text=(
                     "Requirements: Python and PostgreSQL. Responsibilities: Build backend APIs "
-                    "and maintain production services."
+                    "and maintain production services. Review changes, investigate failures, "
+                    "document technical decisions, and collaborate with product and engineering "
+                    "partners to deliver reliable customer-facing software."
                 ),
             ),
         )
@@ -473,3 +481,71 @@ def test_failed_url_can_be_upgraded_with_pasted_description(monkeypatch):
     assert upgraded.status == "analyzed"
     assert upgraded.company == "Example"
     assert upgraded.requirements.reader_version == JOB_READER_VERSION
+
+
+@pytest.mark.parametrize(
+    "description",
+    [
+        "Click here to apply.",
+        "This is an exciting opportunity with a great team and excellent culture. " * 5,
+        "<div>Requirements</div><script>" + ("x" * 500) + "</script>",
+    ],
+)
+def test_pasted_job_description_rejects_short_or_non_job_noise(description):
+    with pytest.raises(ValueError, match="complete job description"):
+        validate_pasted_job_description(description)
+
+
+def test_pasted_job_description_accepts_complete_readable_content():
+    validate_pasted_job_description(
+        "Requirements: Python, PostgreSQL, testing, and API design. Responsibilities include "
+        "building reliable services, reviewing changes, documenting technical decisions, "
+        "investigating production failures, and collaborating with product and engineering."
+    )
+
+
+def test_invalid_structured_application_link_falls_back_to_safe_source_url(monkeypatch):
+    description = (
+        "Requirements: Python and SQL experience. Responsibilities include building reliable "
+        "backend services, reviewing changes, documenting decisions, investigating failures, "
+        "and collaborating with product and engineering partners."
+    )
+    html = f"""
+    <html><head><script type="application/ld+json">
+    {json.dumps({
+        "@context": "https://schema.org",
+        "@type": "JobPosting",
+        "title": "Backend Engineer",
+        "description": description,
+        "hiringOrganization": {"name": "Safe Jobs"},
+        "url": "javascript:alert(1)",
+    })}
+    </script></head><body></body></html>
+    """
+    monkeypatch.setattr(job_research, "validate_public_job_url", lambda _: None)
+    monkeypatch.setattr(job_research, "_fetch", lambda _: html)
+
+    job = extract_job_from_input("https://jobs.example/openings/7#details", "", "", "")
+
+    assert job.application_link == "https://jobs.example/openings/7"
+
+
+def test_rejected_pasted_job_is_not_persisted_or_started():
+    engine = _engine()
+    SQLModel.metadata.create_all(engine)
+    with Session(engine) as session:
+        _ready_profile(session)
+
+        with pytest.raises(ValueError, match="complete job description"):
+            create_or_analyze_job(
+                session,
+                USER_ID,
+                JobCreateIn(
+                    company="Noise Inc",
+                    role="Developer",
+                    description_text="Click here to learn more about our amazing company.",
+                ),
+            )
+
+        assert list(session.exec(select(Job)).all()) == []
+        assert list(session.exec(select(AgentRun)).all()) == []

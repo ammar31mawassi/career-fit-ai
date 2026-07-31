@@ -396,7 +396,10 @@ def test_abandoned_onboarding_cleanup_removes_preview_data(monkeypatch):
     engine = _engine()
     SQLModel.metadata.create_all(engine)
     deleted_paths: list[str] = []
-    monkeypatch.setattr("app.services.onboarding.delete_private_file", deleted_paths.append)
+    monkeypatch.setattr(
+        "app.services.onboarding.delete_private_file",
+        lambda path, **_kwargs: deleted_paths.append(path),
+    )
     now = datetime.now(timezone.utc)
     with Session(engine) as session:
         abandoned = Profile(
@@ -460,7 +463,7 @@ def test_abandoned_cleanup_preserves_rows_when_storage_delete_fails(monkeypatch)
     SQLModel.metadata.create_all(engine)
     monkeypatch.setattr(
         "app.services.onboarding.delete_private_file",
-        lambda _path: (_ for _ in ()).throw(RuntimeError("storage unavailable")),
+        lambda _path, **_kwargs: (_ for _ in ()).throw(RuntimeError("storage unavailable")),
     )
     now = datetime.now(timezone.utc)
     with Session(engine) as session:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import time
 from dataclasses import dataclass
 from threading import Lock
@@ -51,6 +52,27 @@ POLICIES: tuple[RateLimitPolicy, ...] = (
         paths=frozenset({"/api/profile/cv", "/api/profile/cv/browser-ocr", "/api/profile/linkedin-pdf"}),
     ),
     RateLimitPolicy(
+        key="account-export",
+        limit=5,
+        window_seconds=60 * 60,
+        methods=frozenset({"GET"}),
+        paths=frozenset({"/api/account/export"}),
+    ),
+    RateLimitPolicy(
+        key="heavy-read",
+        limit=60,
+        window_seconds=10 * 60,
+        methods=frozenset({"GET"}),
+        paths=frozenset(
+            {
+                "/api/workspace/bootstrap",
+                "/api/jobs",
+                "/api/jobs/summary-page",
+                "/api/recommendations",
+            }
+        ),
+    ),
+    RateLimitPolicy(
         key="general-write",
         limit=180,
         window_seconds=10 * 60,
@@ -65,8 +87,18 @@ _lock = Lock()
 
 def rate_limit_keys(request: Request, policy: RateLimitPolicy) -> list[str]:
     authorization = request.headers.get("authorization", "")
-    forwarded = request.headers.get("x-forwarded-for", "").split(",", 1)[0].strip()
-    address = forwarded or request.headers.get("x-real-ip") or (request.client.host if request.client else "unknown")
+    if os.getenv("VERCEL") == "1":
+        address = (
+            request.headers.get("x-vercel-forwarded-for", "")
+            .split(",", 1)[0]
+            .strip()
+            or "unknown"
+        )
+    else:
+        # Direct ASGI deployments must use the socket peer unless they add an
+        # explicit trusted-proxy adapter. Inbound forwarding headers are
+        # attacker-controlled at this boundary.
+        address = request.client.host if request.client else "unknown"
     keys = [f"{policy.key}:ip:{hashlib.sha256(address.encode('utf-8')).hexdigest()[:24]}"]
     if authorization.lower().startswith("bearer "):
         token_digest = hashlib.sha256(authorization.encode("utf-8")).hexdigest()[:24]
@@ -77,7 +109,7 @@ def rate_limit_keys(request: Request, policy: RateLimitPolicy) -> list[str]:
 def matching_policies(request: Request) -> list[RateLimitPolicy]:
     method = request.method.upper()
     path = request.url.path.rstrip("/") or "/"
-    if method in {"GET", "HEAD", "OPTIONS"} or path == "/api/health":
+    if method in {"HEAD", "OPTIONS"} or path == "/api/health":
         return []
     policies: list[RateLimitPolicy] = []
     for policy in POLICIES:
@@ -94,7 +126,7 @@ def check_rate_limit(request: Request) -> JSONResponse | None:
     if not policies:
         return None
     settings = get_settings()
-    if settings.app_env == "production":
+    if settings.app_env in {"staging", "production"}:
         try:
             checks = [
                 (policy, key)

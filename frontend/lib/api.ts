@@ -1,3 +1,11 @@
+import {
+  decodeJobScan,
+  decodeJobSummaryPage,
+  decodeNullableJobScan,
+  decodeWorkspaceBootstrap
+} from "@/lib/api-contracts.mjs";
+import { jobSummaryPageParameters } from "@/lib/pagination-policy.mjs";
+
 export type ProfileSource = {
   id: number;
   source_type: string;
@@ -187,6 +195,7 @@ export type JobCreate = {
   company: string;
   role: string;
   description_text: string;
+  contribute_public_posting: boolean;
 };
 
 export type ProfileAnalyzeResult = {
@@ -285,7 +294,22 @@ export class ApiError extends Error {
   }
 }
 
-async function request<T>(path: string, options?: RequestInit): Promise<T> {
+type ResponseDecoder<T> = (value: unknown) => T;
+
+function invalidResponseContractError(response: Response) {
+  return new ApiError(
+    "CareerFit received an invalid server response. Refresh and try again.",
+    502,
+    "INVALID_RESPONSE_CONTRACT",
+    response.headers.get("x-trace-id") ?? ""
+  );
+}
+
+async function request<T>(
+  path: string,
+  options?: RequestInit,
+  decoder?: ResponseDecoder<T>
+): Promise<T> {
   const response = await fetch(`${API_BASE}${path}`, {
     ...options,
     headers: {
@@ -306,10 +330,15 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
     } catch {
       // Keep generic error.
     }
-    if (traceId && response.status >= 500) message = `${message} Support code: ${traceId.slice(0, 12)}.`;
+    if (traceId && response.status >= 500) message = `${message} Reference code: ${traceId.slice(0, 12)}.`;
     throw new ApiError(message, response.status, code, traceId);
   }
-  return response.json() as Promise<T>;
+  if (!decoder) return response.json() as Promise<T>;
+  try {
+    return decoder(await response.json());
+  } catch {
+    throw invalidResponseContractError(response);
+  }
 }
 
 async function requestEmpty(path: string, options?: RequestInit): Promise<void> {
@@ -332,7 +361,7 @@ export function getProfile() {
 }
 
 export function getWorkspaceBootstrap() {
-  return request<WorkspaceBootstrap>("/api/workspace/bootstrap");
+  return request<WorkspaceBootstrap>("/api/workspace/bootstrap", undefined, decodeWorkspaceBootstrap);
 }
 
 export function getAccountExport() {
@@ -450,15 +479,18 @@ export function getJobs(query = "") {
   return request<TrackedJob[]>(`/api/jobs${suffix}`);
 }
 
-export function getJobSummaries(query = "") {
+export function getJobSummaries(query = "", signal?: AbortSignal) {
   const suffix = query.trim() ? `?query=${encodeURIComponent(query.trim())}` : "";
-  return request<TrackedJobSummary[]>(`/api/jobs/summary${suffix}`);
+  return request<TrackedJobSummary[]>(`/api/jobs/summary${suffix}`, { signal });
 }
 
-export function getJobSummaryPage(cursor = "", limit = 30) {
-  const parameters = new URLSearchParams({ limit: String(limit) });
-  if (cursor) parameters.set("cursor", cursor);
-  return request<JobSummaryPage>(`/api/jobs/summary-page?${parameters.toString()}`);
+export function getJobSummaryPage(cursor = "", limit = 30, watermark: string | null = null) {
+  const parameters = jobSummaryPageParameters({ cursor, limit, watermark });
+  return request<JobSummaryPage>(
+    `/api/jobs/summary-page?${parameters.toString()}`,
+    undefined,
+    decodeJobSummaryPage
+  );
 }
 
 export function getJob(jobId: number) {
@@ -470,27 +502,38 @@ export function createJobScan(payload: JobCreate, signal?: AbortSignal) {
     method: "POST",
     body: JSON.stringify(payload),
     signal
-  });
+  }, decodeJobScan);
+}
+
+export function getActiveJobScan() {
+  return request<JobScan | null>("/api/job-scans/active", undefined, decodeNullableJobScan);
 }
 
 export function processJobScan(scanId: number, signal?: AbortSignal) {
-  return request<JobScan>(`/api/job-scans/${scanId}/process`, { method: "POST", signal });
+  return request<JobScan>(
+    `/api/job-scans/${scanId}/process`,
+    { method: "POST", signal },
+    decodeJobScan
+  );
 }
 
 export function getJobScan(scanId: number) {
-  return request<JobScan>(`/api/job-scans/${scanId}`);
+  return request<JobScan>(`/api/job-scans/${scanId}`, undefined, decodeJobScan);
 }
 
 export function cancelJobScan(scanId: number) {
-  return request<JobScan>(`/api/job-scans/${scanId}`, { method: "DELETE" });
+  return request<JobScan>(`/api/job-scans/${scanId}`, { method: "DELETE" }, decodeJobScan);
 }
 
-export function getRecommendations(limit = 12) {
-  return request<JobRecommendation[]>(`/api/recommendations?limit=${encodeURIComponent(String(limit))}`);
+export function getRecommendations(limit = 12, signal?: AbortSignal) {
+  return request<JobRecommendation[]>(
+    `/api/recommendations?limit=${encodeURIComponent(String(limit))}`,
+    { signal }
+  );
 }
 
-export function refreshRecommendations() {
-  return request<JobRecommendation[]>("/api/recommendations/refresh", { method: "POST" });
+export function refreshRecommendations(signal?: AbortSignal) {
+  return request<JobRecommendation[]>("/api/recommendations/refresh", { method: "POST", signal });
 }
 
 export function updateRecommendation(
@@ -514,8 +557,8 @@ export function recordRecommendationView(recommendationId: number) {
   });
 }
 
-export function getNotificationPreference() {
-  return request<NotificationPreference>("/api/notifications/preferences");
+export function getNotificationPreference(signal?: AbortSignal) {
+  return request<NotificationPreference>("/api/notifications/preferences", { signal });
 }
 
 export function saveNotificationPreference(emailEnabled: boolean) {
@@ -582,5 +625,7 @@ export function toJobSummary(job: TrackedJob): TrackedJobSummary {
 
 export function formatDate(value: string | null) {
   if (!value) return "Not yet";
-  return new Date(value).toLocaleDateString();
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "Date unavailable";
+  return new Intl.DateTimeFormat("en-IL", { dateStyle: "medium" }).format(date);
 }

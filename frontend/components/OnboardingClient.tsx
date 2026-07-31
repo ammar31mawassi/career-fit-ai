@@ -14,11 +14,7 @@ import {
   type QuestionReviewDecision
 } from "@/components/onboarding/OnboardingReview";
 import { useCvPreview } from "@/components/onboarding/useCvPreview";
-import {
-  clearOnboardingSyncing,
-  markOnboardingSyncing,
-  useAppData
-} from "@/components/AppDataProvider";
+import { useAppData } from "@/components/AppDataProvider";
 import {
   analyzeOnboardingProfile,
   completeOnboarding,
@@ -27,7 +23,7 @@ import {
 
 export function OnboardingClient() {
   const router = useRouter();
-  const { profile, profileLoading, dataError, setProfile, refreshAll, reportDataError } = useAppData();
+  const { profile, profileLoading, dataError, setProfile, reportDataError } = useAppData();
   const [linkedinFile, setLinkedinFile] = useState<File | null>(null);
   const [githubUrl, setGithubUrl] = useState("");
   const [linkedinText, setLinkedinText] = useState("");
@@ -96,7 +92,7 @@ export function OnboardingClient() {
     selectSkills([]);
     skillReviewSkippedRef.current = false;
     setSkillReviewSkipped(false);
-    cvPreview.start(file);
+    return cvPreview.start(file);
   }
 
   async function buildProfile(event: FormEvent<HTMLFormElement>) {
@@ -206,7 +202,6 @@ export function OnboardingClient() {
       ? pendingFacts.filter((fact) => !selectedFactIds.has(fact.id)).map((fact) => fact.id)
       : [];
     setFinishing(true);
-    markOnboardingSyncing();
     setError("");
     try {
       const completed = await completeOnboarding({
@@ -217,12 +212,9 @@ export function OnboardingClient() {
         question_id: questionReviewDecision === "no_question" ? null : question?.id ?? null,
         question_answer: questionReviewDecision === "answered" ? questionAnswer.trim() : ""
       });
-      clearOnboardingSyncing();
       setProfile(completed);
       router.replace("/");
-      void refreshAll().catch(() => undefined);
     } catch (err) {
-      clearOnboardingSyncing();
       const message = err instanceof Error ? err.message : "Could not finish onboarding.";
       setError(message);
       reportDataError(message);
@@ -237,6 +229,7 @@ export function OnboardingClient() {
         activeStep={activeStep}
         detail={progress || "Preparing your evidence"}
         mode="page"
+        onCancel={cvPreview.canCancelOcr ? cvPreview.cancelOcr : undefined}
         progress={progressValue}
         steps={[
           { label: "Secure upload", detail: "Store the selected sources" },
@@ -301,15 +294,36 @@ export function OnboardingClient() {
         </section>
 
         <div className="onboarding-form-panel">
-          {error || dataError ? <div className="notice error">{error || dataError}</div> : null}
+          {error || dataError ? <div className="notice error" role="alert">{error || dataError}</div> : null}
           <section className="onboarding-section">
             <div className="onboarding-section-heading"><span>01</span><div><h2>Your CV</h2><p>The required source for profile analysis.</p></div></div>
             <label className="onboarding-upload">
               <FileCheck2 size={22} />
-              <span><strong>{cvPreview.file?.name || (hasCv ? "CV already uploaded" : "Choose a CV PDF")}</strong><small>{hasCv ? "Choose another file to replace it." : "PDF, up to your configured upload limit."}</small></span>
-              <input accept="application/pdf" disabled={cvPreview.active} onChange={(event) => startCvPreview(event.target.files?.[0] ?? null)} type="file" />
+              <span>
+                <strong>{cvPreview.file?.name || (hasCv ? "CV already uploaded" : "Choose a CV PDF")}</strong>
+                <small>
+                  {hasCv
+                    ? "Choose another file to replace it."
+                    : "PDF, up to 5 MB. CareerFit stores the CV and extracted text; scanned pages render locally when needed."}
+                </small>
+              </span>
+              <input
+                accept="application/pdf"
+                disabled={cvPreview.active}
+                onChange={(event) => {
+                  if (!startCvPreview(event.target.files?.[0] ?? null)) {
+                    event.currentTarget.value = "";
+                  }
+                }}
+                type="file"
+              />
             </label>
-            <CvDiscoveryPanel preview={cvPreview.preview} skills={cvPreview.skills} />
+            <CvDiscoveryPanel
+              canCancelOcr={cvPreview.canCancelOcr}
+              onCancelOcr={cvPreview.cancelOcr}
+              preview={cvPreview.preview}
+              skills={cvPreview.skills}
+            />
           </section>
 
           <section className="onboarding-section">

@@ -2,11 +2,15 @@ from __future__ import annotations
 
 import secrets
 import hashlib
+import logging
 import time
+from datetime import datetime
 from html import escape as html_escape
+from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, Header, HTTPException, Query, Response, UploadFile
 from fastapi.encoders import jsonable_encoder
+from sqlalchemy import text
 from starlette.responses import HTMLResponse, JSONResponse
 from sqlmodel import Session
 from uuid import UUID
@@ -47,6 +51,7 @@ from ..services.auth import current_user_id
 from ..services.job_scans import (
     cancel_job_scan,
     create_job_scan,
+    latest_active_scan,
     process_one_queued_scan,
     process_user_scan,
     scan_output,
@@ -93,6 +98,9 @@ from ..services.job_discovery import run_goozali_discovery
 
 
 router = APIRouter(prefix="/api")
+logger = logging.getLogger("careerfit.api")
+UPLOAD_READ_CHUNK_BYTES = 64 * 1024
+PDF_UPLOAD_CONTENT_TYPES = frozenset({"application/pdf", "application/octet-stream"})
 
 
 @router.get("/health")
@@ -100,11 +108,26 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
+@router.get("/ready")
+def readiness(session: Session = Depends(get_session)) -> dict[str, str]:
+    try:
+        session.exec(text("select 1")).one()
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Database readiness check failed.",
+        ) from exc
+    return {"status": "ready"}
+
+
 @router.get("/account/export", response_model=AccountExportOut)
 def download_account_export(
+    response: Response,
     user_id: UUID = Depends(current_user_id),
     session: Session = Depends(get_session),
 ) -> AccountExportOut:
+    response.headers["Cache-Control"] = "private, no-store"
+    response.headers["Content-Disposition"] = 'attachment; filename="careerfit-export.json"'
     return export_account(session, user_id)
 
 
@@ -118,7 +141,11 @@ def remove_account(
     try:
         delete_account(session, user_id)
     except RuntimeError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+        logger.exception("account_deletion_failed user_id=%s", user_id)
+        raise HTTPException(
+            status_code=503,
+            detail="Account deletion could not be completed. Try again.",
+        ) from exc
     return Response(status_code=204)
 
 
@@ -147,19 +174,16 @@ def get_profile(
 
 
 @router.post("/profile/cv", response_model=ProfileOut)
-async def upload_cv(
+def upload_cv(
     file: UploadFile = File(...),
     user_id: UUID = Depends(current_user_id),
     session: Session = Depends(get_session),
 ) -> ProfileOut:
-    if file.content_type not in {"application/pdf", "application/octet-stream"}:
-        raise HTTPException(status_code=400, detail="Upload a PDF CV.")
-    data = await file.read()
-    if not data:
-        raise HTTPException(status_code=400, detail="Uploaded CV is empty.")
-    if len(data) > get_settings().max_upload_bytes:
-        raise HTTPException(status_code=413, detail="Uploaded CV is too large. Use a PDF under 5 MB.")
-    return upload_cv_source(session, user_id, file.filename or "cv.pdf", data)
+    filename, data = _read_pdf_upload(file, default_filename="cv.pdf")
+    try:
+        return upload_cv_source(session, user_id, filename, data)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.post("/profile/cv/browser-ocr", response_model=ProfileOut)
@@ -172,27 +196,44 @@ def save_browser_ocr(
         return apply_browser_ocr(session, user_id, payload)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    signature = "|".join(
-        [str(user_id), query.strip().lower(), cursor, page.watermark.isoformat() if page.watermark else "empty"]
-    )
-    etag = f'"{hashlib.sha256(signature.encode("utf-8")).hexdigest()[:24]}"'
-    if if_none_match == etag:
-        return Response(status_code=304, headers={"ETag": etag})
-    return JSONResponse(content=jsonable_encoder(page), headers={"ETag": etag})
 
 
 @router.post("/profile/linkedin-pdf", response_model=ProfileOut)
-async def upload_linkedin_pdf(
+def upload_linkedin_pdf(
     file: UploadFile = File(...),
     user_id: UUID = Depends(current_user_id),
     session: Session = Depends(get_session),
 ) -> ProfileOut:
-    data = await file.read()
-    if not data:
-        raise HTTPException(status_code=400, detail="Uploaded LinkedIn PDF is empty.")
-    if len(data) > get_settings().max_upload_bytes:
-        raise HTTPException(status_code=413, detail="Uploaded LinkedIn PDF is too large. Use a PDF under 5 MB.")
-    return upload_linkedin_pdf_source(session, user_id, file.filename or "linkedin.pdf", data)
+    filename, data = _read_pdf_upload(file, default_filename="linkedin.pdf")
+    try:
+        return upload_linkedin_pdf_source(session, user_id, filename, data)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+def _read_pdf_upload(file: UploadFile, *, default_filename: str) -> tuple[str, bytes]:
+    """Read at most the configured limit plus one byte inside FastAPI's sync worker pool."""
+    filename = file.filename or default_filename
+    if file.content_type not in PDF_UPLOAD_CONTENT_TYPES or Path(filename).suffix.lower() != ".pdf":
+        raise HTTPException(status_code=400, detail="Upload a PDF document.")
+
+    limit = get_settings().max_upload_bytes
+    buffered = bytearray()
+    while len(buffered) <= limit:
+        remaining = limit + 1 - len(buffered)
+        chunk = file.file.read(min(UPLOAD_READ_CHUNK_BYTES, remaining))
+        if not chunk:
+            break
+        buffered.extend(chunk)
+
+    if not buffered:
+        raise HTTPException(status_code=400, detail="Uploaded PDF is empty.")
+    if len(buffered) > limit:
+        raise HTTPException(status_code=413, detail="Uploaded PDF is too large.")
+    data = bytes(buffered)
+    if not data.startswith(b"%PDF-"):
+        raise HTTPException(status_code=400, detail="Uploaded file does not contain a valid PDF header.")
+    return filename, data
 
 
 @router.put("/profile/sources", response_model=ProfileOut)
@@ -313,6 +354,14 @@ def queue_job_scan(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+@router.get("/job-scans/active", response_model=JobScanOut | None)
+def active_job_scan(
+    user_id: UUID = Depends(current_user_id),
+    session: Session = Depends(get_session),
+) -> JobScanOut | None:
+    return latest_active_scan(session, user_id)
+
+
 @router.get("/job-scans/{scan_id}", response_model=JobScanOut)
 def job_scan_status(
     scan_id: int,
@@ -426,14 +475,28 @@ def job_summary_page(
     query: str = Query(default="", max_length=200),
     limit: int = Query(default=30, ge=1, le=100),
     cursor: str = Query(default="", max_length=500),
+    watermark: datetime | None = Query(default=None),
     if_none_match: str = Header(default="", alias="If-None-Match"),
     user_id: UUID = Depends(current_user_id),
     session: Session = Depends(get_session),
 ):
     try:
-        page = list_job_summary_page(session, user_id, query=query, limit=limit, cursor=cursor)
+        page = list_job_summary_page(
+            session,
+            user_id,
+            query=query,
+            limit=limit,
+            cursor=cursor,
+            watermark=watermark,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    page_response = JSONResponse(content=jsonable_encoder(page))
+    etag = f'"{hashlib.sha256(page_response.body).hexdigest()[:24]}"'
+    if if_none_match == etag:
+        return Response(status_code=304, headers={"ETag": etag})
+    page_response.headers["ETag"] = etag
+    return page_response
 
 
 @router.get("/notifications/preferences", response_model=NotificationPreferenceOut)

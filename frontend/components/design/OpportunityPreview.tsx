@@ -116,7 +116,13 @@ const previewJob: TrackedJob = {
 };
 
 export function OpportunityPreview() {
-  const [form, setForm] = useState<JobCreate>({ source_url: "", company: "", role: "", description_text: "" });
+  const [form, setForm] = useState<JobCreate>({
+    source_url: "",
+    company: "",
+    role: "",
+    description_text: "",
+    contribute_public_posting: false
+  });
   const [selectedId, setSelectedId] = useState(1);
   const [query, setQuery] = useState("");
   const visibleJobs = useMemo(() => {

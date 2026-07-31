@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { AuthError, createClient } from "@supabase/supabase-js";
 import { NextResponse } from "next/server";
+import { isAllowedSameOriginRequest } from "@/lib/auth-policy.mjs";
 
 const SIGNUP_WINDOW_SECONDS = 60 * 60;
 const SIGNUP_IP_LIMIT = 5;
@@ -20,8 +21,13 @@ type RateLimitClient = {
 };
 
 function clientAddress(request: Request) {
-  const forwarded = request.headers.get("x-forwarded-for")?.split(",")[0]?.trim();
-  return forwarded || request.headers.get("x-real-ip") || "unknown";
+  if (process.env.VERCEL === "1") {
+    return (
+      request.headers.get("x-vercel-forwarded-for")?.split(",")[0]?.trim() ||
+      "unknown"
+    );
+  }
+  return request.headers.get("x-real-ip") || "local";
 }
 
 function privateBucketKey(scope: string, value: string) {
@@ -55,6 +61,19 @@ async function consumeLimit(
 }
 
 export async function POST(request: Request) {
+  if (
+    !isAllowedSameOriginRequest(
+      request.url,
+      request.headers.get("origin"),
+      process.env.NEXT_PUBLIC_SITE_URL
+    )
+  ) {
+    return NextResponse.json(
+      { detail: "Cross-site signup requests are not allowed." },
+      { status: 403, headers: { "Cache-Control": "no-store" } }
+    );
+  }
+
   const form = await request.formData();
   const email = String(form.get("email") ?? "").trim().toLowerCase();
   const password = String(form.get("password") ?? "");
@@ -100,7 +119,7 @@ export async function POST(request: Request) {
   if (error) {
     const response = NextResponse.json(
       { detail: signupErrorMessage(error) },
-      { status: error.status === 429 ? 429 : error.status === 422 ? 503 : 400 }
+      { status: error.status === 429 ? 429 : 400 }
     );
     response.headers.set("Cache-Control", "no-store");
     return response;

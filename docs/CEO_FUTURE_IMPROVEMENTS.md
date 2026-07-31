@@ -1,6 +1,9 @@
 # CareerFit CEO roadmap
 
 Updated: 2026-07-13
+Status: historical roadmap snapshot. Current operational requirements and
+unresolved gates are maintained in `OPERATIONS_RUNBOOK.md`,
+`DATA_RETENTION_INVENTORY.md`, and `RELEASE_AND_ROLLBACK.md`.
 
 The CEO approved the original next-step, model, and recommendation strategy. The first block is now implemented. The remaining roadmap is ordered by evidence and product trigger so CareerFit does not add infrastructure or model complexity before it is useful.
 

@@ -1,5 +1,6 @@
--- Career Fit AI Supabase schema
--- Run in the Supabase SQL editor.
+-- Career Fit AI fresh-install Supabase schema through database contract v20.
+-- Run once in a new Supabase project. Existing databases must use the
+-- forward-only files and recorded release order in supabase/migrations/.
 
 create schema if not exists private;
 revoke all on schema private from public, anon, authenticated;
@@ -18,41 +19,55 @@ create table if not exists public.profiles (
   last_analyzed_at timestamptz,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
-  constraint profiles_user_id_unique unique (user_id)
+  constraint profiles_user_id_unique unique (user_id),
+  constraint profiles_owner_key unique (id, user_id)
 );
 
 create table if not exists public.profile_interests (
   id bigint generated always as identity primary key,
   user_id uuid not null references auth.users(id) on delete cascade,
-  profile_id bigint not null references public.profiles(id) on delete cascade,
+  profile_id bigint not null,
   interest text not null,
   created_at timestamptz not null default now(),
-  constraint profile_interests_profile_interest_unique unique (profile_id, interest)
+  constraint profile_interests_profile_interest_unique unique (profile_id, interest),
+  constraint profile_interests_profile_owner_fkey
+    foreign key (profile_id, user_id)
+    references public.profiles(id, user_id) on delete cascade
 );
 
 create table if not exists public.profile_sources (
   id bigint generated always as identity primary key,
   user_id uuid not null references auth.users(id) on delete cascade,
-  profile_id bigint not null references public.profiles(id) on delete cascade,
+  profile_id bigint not null,
   source_type text not null,
   title text not null default '',
   storage_path text not null default '',
   content_text text not null default '',
-  metadata_json text not null default '{}',
+  metadata_json text not null default '{}'
+    constraint profile_sources_metadata_json_check
+    check (jsonb_typeof(metadata_json::jsonb) = 'object'),
   created_at timestamptz not null default now(),
-  updated_at timestamptz not null default now()
+  updated_at timestamptz not null default now(),
+  constraint profile_sources_owner_key unique (id, profile_id, user_id),
+  constraint profile_sources_profile_owner_fkey
+    foreign key (profile_id, user_id)
+    references public.profiles(id, user_id) on delete cascade
 );
 
 create table if not exists public.profile_facts (
   id bigint generated always as identity primary key,
   user_id uuid not null references auth.users(id) on delete cascade,
-  profile_id bigint not null references public.profiles(id) on delete cascade,
-  source_id bigint references public.profile_sources(id) on delete set null,
+  profile_id bigint not null,
+  source_id bigint,
   fact_type text not null,
   value text not null,
   evidence text not null default '',
-  metadata_json text not null default '{}',
-  source_ids_json text not null default '[]',
+  metadata_json text not null default '{}'
+    constraint profile_facts_metadata_json_check
+    check (jsonb_typeof(metadata_json::jsonb) = 'object'),
+  source_ids_json text not null default '[]'
+    constraint profile_facts_source_ids_json_check
+    check (jsonb_typeof(source_ids_json::jsonb) = 'array'),
   support_count integer not null default 1 check (support_count >= 1),
   extraction_key text not null default '',
   confidence numeric not null default 0 check (confidence >= 0 and confidence <= 1),
@@ -60,34 +75,56 @@ create table if not exists public.profile_facts (
   review_status text not null default 'pending' check (review_status in ('pending', 'approved', 'rejected')),
   reviewed_at timestamptz,
   created_at timestamptz not null default now(),
-  updated_at timestamptz not null default now()
+  updated_at timestamptz not null default now(),
+  constraint profile_facts_owner_key unique (id, profile_id, user_id),
+  constraint profile_facts_profile_owner_fkey
+    foreign key (profile_id, user_id)
+    references public.profiles(id, user_id) on delete cascade,
+  constraint profile_facts_source_owner_fkey
+    foreign key (source_id, profile_id, user_id)
+    references public.profile_sources(id, profile_id, user_id)
+    on delete set null (source_id)
 );
 
 create table if not exists public.profile_fact_feedback (
   id bigint generated always as identity primary key,
   user_id uuid not null references auth.users(id) on delete cascade,
-  profile_id bigint not null references public.profiles(id) on delete cascade,
-  fact_id bigint references public.profile_facts(id) on delete set null,
+  profile_id bigint not null,
+  fact_id bigint,
   fact_type text not null,
   extraction_key text not null default '',
   action text not null check (action in ('pending', 'approved', 'rejected', 'edited_and_approved', 'manually_added')),
   original_value text not null default '',
   corrected_value text not null default '',
-  source_ids_json text not null default '[]',
+  source_ids_json text not null default '[]'
+    constraint profile_fact_feedback_source_ids_json_check
+    check (jsonb_typeof(source_ids_json::jsonb) = 'array'),
   extractor_version text not null default '',
-  created_at timestamptz not null default now()
+  created_at timestamptz not null default now(),
+  constraint profile_fact_feedback_profile_owner_fkey
+    foreign key (profile_id, user_id)
+    references public.profiles(id, user_id) on delete cascade,
+  constraint profile_fact_feedback_fact_owner_fkey
+    foreign key (fact_id, profile_id, user_id)
+    references public.profile_facts(id, profile_id, user_id)
+    on delete set null (fact_id)
 );
 
 create table if not exists public.clarification_questions (
   id bigint generated always as identity primary key,
   user_id uuid not null references auth.users(id) on delete cascade,
-  profile_id bigint not null references public.profiles(id) on delete cascade,
+  profile_id bigint not null,
   field_key text not null,
   question text not null,
   answer text not null default '',
-  status text not null default 'open' check (status in ('open', 'answered')),
+  status text not null default 'open',
   created_at timestamptz not null default now(),
-  updated_at timestamptz not null default now()
+  updated_at timestamptz not null default now(),
+  constraint clarification_questions_status_check
+    check (status in ('open', 'answered', 'skipped')),
+  constraint clarification_questions_profile_owner_fkey
+    foreign key (profile_id, user_id)
+    references public.profiles(id, user_id) on delete cascade
 );
 
 create table if not exists public.jobs (
@@ -102,54 +139,85 @@ create table if not exists public.jobs (
   source_title text not null default '',
   source_confidence numeric not null default 0,
   application_link text not null default '',
-  requirements_json text not null default '{}',
+  requirements_json text not null default '{}'
+    constraint jobs_requirements_json_check
+    check (jsonb_typeof(requirements_json::jsonb) = 'object'),
   status text not null default 'analyzed',
   error text not null default '',
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
-  constraint jobs_user_content_hash_unique unique (user_id, content_hash)
+  constraint jobs_user_content_hash_unique unique (user_id, content_hash),
+  constraint jobs_owner_key unique (id, user_id)
 );
 
 create table if not exists public.job_matches (
   id bigint generated always as identity primary key,
   user_id uuid not null references auth.users(id) on delete cascade,
-  job_id bigint not null references public.jobs(id) on delete cascade,
+  job_id bigint not null,
   score numeric not null default 0 check (score >= 0 and score <= 100),
   fit_level text not null default 'Weak' check (fit_level in ('Strong', 'Medium', 'Weak')),
   confidence numeric not null default 0 check (confidence >= 0 and confidence <= 1),
   status text not null default 'Lead' check (status in ('Lead', 'Applied', 'Interview', 'Rejected', 'Withdrawn', 'Offer')),
-  matched_evidence_json text not null default '[]',
-  missing_blockers_json text not null default '[]',
-  gaps_json text not null default '[]',
+  matched_evidence_json text not null default '[]'
+    constraint job_matches_matched_evidence_json_check
+    check (jsonb_typeof(matched_evidence_json::jsonb) = 'array'),
+  missing_blockers_json text not null default '[]'
+    constraint job_matches_missing_blockers_json_check
+    check (jsonb_typeof(missing_blockers_json::jsonb) = 'array'),
+  gaps_json text not null default '[]'
+    constraint job_matches_gaps_json_check
+    check (jsonb_typeof(gaps_json::jsonb) = 'array'),
   model_version text not null default 'fit-v1.0.0',
   ontology_version text not null default 'skills-v1.0.0',
-  component_scores_json text not null default '{}',
-  applied_caps_json text not null default '[]',
-  feature_snapshot_json text not null default '{}',
+  component_scores_json text not null default '{}'
+    constraint job_matches_component_scores_json_check
+    check (jsonb_typeof(component_scores_json::jsonb) = 'object'),
+  applied_caps_json text not null default '[]'
+    constraint job_matches_applied_caps_json_check
+    check (jsonb_typeof(applied_caps_json::jsonb) = 'array'),
+  feature_snapshot_json text not null default '{}'
+    constraint job_matches_feature_snapshot_json_check
+    check (jsonb_typeof(feature_snapshot_json::jsonb) = 'object'),
   analyzed_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
-  constraint job_matches_user_job_unique unique (user_id, job_id)
+  constraint job_matches_user_job_unique unique (user_id, job_id),
+  constraint job_matches_owner_key unique (id, user_id),
+  constraint job_matches_job_owner_fkey
+    foreign key (job_id, user_id)
+    references public.jobs(id, user_id) on delete cascade
 );
 
 create table if not exists public.resume_advice (
   id bigint generated always as identity primary key,
   user_id uuid not null references auth.users(id) on delete cascade,
-  match_id bigint not null references public.job_matches(id) on delete cascade,
-  projects_json text not null default '[]',
-  skill_order_json text not null default '[]',
+  match_id bigint not null,
+  projects_json text not null default '[]'
+    constraint resume_advice_projects_json_check
+    check (jsonb_typeof(projects_json::jsonb) = 'array'),
+  skill_order_json text not null default '[]'
+    constraint resume_advice_skill_order_json_check
+    check (jsonb_typeof(skill_order_json::jsonb) = 'array'),
   about_text text not null default '',
   template_id text not null default '',
-  evidence_json text not null default '[]',
+  evidence_json text not null default '[]'
+    constraint resume_advice_evidence_json_check
+    check (jsonb_typeof(evidence_json::jsonb) = 'array'),
   generated_at timestamptz not null default now(),
-  constraint resume_advice_user_match_unique unique (user_id, match_id)
+  constraint resume_advice_user_match_unique unique (user_id, match_id),
+  constraint resume_advice_match_owner_fkey
+    foreign key (match_id, user_id)
+    references public.job_matches(id, user_id) on delete cascade
 );
 
 create table if not exists public.job_status_events (
   id bigint generated always as identity primary key,
   user_id uuid not null references auth.users(id) on delete cascade,
-  match_id bigint not null references public.job_matches(id) on delete cascade,
+  match_id bigint not null,
   status text not null check (status in ('Lead', 'Applied', 'Interview', 'Rejected', 'Withdrawn', 'Offer')),
-  created_at timestamptz not null default now()
+  created_at timestamptz not null default now(),
+  constraint job_status_events_match_owner_fkey
+    foreign key (match_id, user_id)
+    references public.job_matches(id, user_id) on delete cascade
 );
 
 create table if not exists public.agent_runs (
@@ -159,28 +227,40 @@ create table if not exists public.agent_runs (
   subject_type text not null default '',
   subject_id bigint,
   input_hash text not null default '',
-  status text not null default 'running',
+  status text not null default 'running'
+    constraint agent_runs_status_check
+    check (status in ('running', 'completed', 'failed', 'reused')),
   version text not null default '',
   summary text not null default '',
   error text not null default '',
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
-  completed_at timestamptz
+  completed_at timestamptz,
+  constraint agent_runs_owner_key unique (id, user_id)
 );
 
 create table if not exists public.agent_steps (
   id bigint generated always as identity primary key,
   user_id uuid not null references auth.users(id) on delete cascade,
-  run_id bigint not null references public.agent_runs(id) on delete cascade,
+  run_id bigint not null,
   step_key text not null,
   title text not null,
-  status text not null default 'running',
-  attempt integer not null default 1,
+  status text not null default 'running'
+    constraint agent_steps_status_check
+    check (status in ('running', 'completed', 'failed')),
+  attempt integer not null default 1
+    constraint agent_steps_attempt_check
+    check (attempt >= 1),
   progress text not null default '',
-  output_json text not null default '{}',
+  output_json text not null default '{}'
+    constraint agent_steps_output_json_check
+    check (jsonb_typeof(output_json::jsonb) = 'object'),
   error text not null default '',
   started_at timestamptz not null default now(),
-  completed_at timestamptz
+  completed_at timestamptz,
+  constraint agent_steps_run_owner_fkey
+    foreign key (run_id, user_id)
+    references public.agent_runs(id, user_id) on delete cascade
 );
 
 create extension if not exists pgmq;
@@ -208,9 +288,13 @@ create table if not exists public.shared_job_catalog (
   role text not null default 'Unknown Role',
   location text not null default '',
   description_text text not null default '',
-  requirements_json text not null default '{}',
+  requirements_json text not null default '{}'
+    constraint shared_job_catalog_requirements_json_check
+    check (jsonb_typeof(requirements_json::jsonb) = 'object'),
   domain text not null default '',
-  career_fields_json text not null default '[]',
+  career_fields_json text not null default '[]'
+    constraint shared_job_catalog_career_fields_json_check
+    check (jsonb_typeof(career_fields_json::jsonb) = 'array'),
   source_confidence double precision not null default 0,
   first_seen_by uuid references auth.users(id) on delete set null,
   source_name text not null default 'community',
@@ -239,17 +323,99 @@ create table if not exists public.job_recommendations (
   id bigint generated by default as identity primary key,
   user_id uuid not null references auth.users(id) on delete cascade,
   catalog_job_id bigint not null references public.shared_job_catalog(id) on delete cascade,
+  materialized_job_id bigint,
   score double precision not null default 0,
   fit_level text not null default 'Weak',
   confidence double precision not null default 0,
-  career_fields_json text not null default '[]',
-  reasons_json text not null default '[]',
-  match_snapshot_json text not null default '{}',
+  career_fields_json text not null default '[]'
+    constraint job_recommendations_career_fields_json_check
+    check (jsonb_typeof(career_fields_json::jsonb) = 'array'),
+  reasons_json text not null default '[]'
+    constraint job_recommendations_reasons_json_check
+    check (jsonb_typeof(reasons_json::jsonb) = 'array'),
+  match_snapshot_json text not null default '{}'
+    constraint job_recommendations_match_snapshot_json_check
+    check (jsonb_typeof(match_snapshot_json::jsonb) = 'object'),
   model_version text not null default '',
   status text not null default 'shadow_observation',
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
-  constraint uq_job_recommendation_version unique (user_id, catalog_job_id, model_version)
+  constraint uq_job_recommendation_version unique (user_id, catalog_job_id, model_version),
+  constraint job_recommendations_owner_key unique (id, user_id),
+  constraint job_recommendations_materialized_job_owner_fkey
+    foreign key (materialized_job_id, user_id)
+    references public.jobs(id, user_id) on delete set null (materialized_job_id)
+);
+
+create table if not exists public.recommendation_events (
+  id bigint generated by default as identity primary key,
+  user_id uuid not null references auth.users(id) on delete cascade,
+  recommendation_id bigint not null,
+  catalog_job_id bigint not null references public.shared_job_catalog(id) on delete cascade,
+  materialized_job_id bigint,
+  event_type text not null,
+  dismiss_reason text not null default '',
+  score double precision not null default 0,
+  score_band text not null,
+  career_field text not null default 'unknown',
+  source_name text not null default 'community',
+  model_version text not null default '',
+  created_at timestamptz not null default now(),
+  constraint uq_recommendation_event_type
+    unique (user_id, recommendation_id, event_type),
+  constraint recommendation_events_type_check
+    check (event_type in ('viewed', 'saved', 'applied', 'dismissed')),
+  constraint recommendation_events_band_check
+    check (score_band in ('possible', 'medium', 'strong')),
+  constraint recommendation_events_reason_check
+    check (
+      (
+        event_type = 'dismissed'
+        and dismiss_reason in (
+          'too_senior',
+          'wrong_field',
+          'wrong_location',
+          'missing_skills',
+          'employment_type',
+          'not_interested',
+          'other'
+        )
+      )
+      or (event_type <> 'dismissed' and dismiss_reason = '')
+    ),
+  constraint recommendation_events_recommendation_owner_fkey
+    foreign key (recommendation_id, user_id)
+    references public.job_recommendations(id, user_id) on delete cascade,
+  constraint recommendation_events_materialized_job_owner_fkey
+    foreign key (materialized_job_id, user_id)
+    references public.jobs(id, user_id) on delete set null (materialized_job_id)
+);
+
+create table if not exists public.recommendation_field_calibrations (
+  career_field text primary key,
+  minimum_score double precision not null default 40,
+  sample_size integer not null default 0,
+  positive_count integer not null default 0,
+  negative_count integer not null default 0,
+  possible_sample_size integer not null default 0,
+  possible_positive_count integer not null default 0,
+  medium_sample_size integer not null default 0,
+  medium_positive_count integer not null default 0,
+  window_days integer not null default 90,
+  updated_at timestamptz not null default now(),
+  constraint recommendation_field_threshold_check
+    check (minimum_score in (40, 50, 65)),
+  constraint recommendation_field_counts_check
+    check (
+      sample_size >= 0
+      and positive_count >= 0
+      and negative_count >= 0
+      and positive_count + negative_count = sample_size
+      and possible_sample_size >= 0
+      and possible_positive_count between 0 and possible_sample_size
+      and medium_sample_size >= 0
+      and medium_positive_count between 0 and medium_sample_size
+    )
 );
 
 create table if not exists public.job_source_runs (
@@ -287,7 +453,7 @@ create table if not exists public.job_notification_preferences (
 create table if not exists public.notification_deliveries (
   id bigint generated by default as identity primary key,
   user_id uuid not null references auth.users(id) on delete cascade,
-  recommendation_id bigint not null references public.job_recommendations(id) on delete cascade,
+  recommendation_id bigint not null,
   channel text not null default 'email',
   status text not null default 'queued',
   attempts integer not null default 0,
@@ -297,37 +463,55 @@ create table if not exists public.notification_deliveries (
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
   sent_at timestamptz,
-  constraint uq_notification_delivery_channel unique (recommendation_id, channel)
+  constraint uq_notification_delivery_channel unique (recommendation_id, channel),
+  constraint notification_deliveries_recommendation_owner_fkey
+    foreign key (recommendation_id, user_id)
+    references public.job_recommendations(id, user_id) on delete cascade
 );
 
 create table if not exists public.job_requirement_revisions (
   id bigint generated by default as identity primary key,
   user_id uuid not null references auth.users(id) on delete cascade,
-  job_id bigint not null references public.jobs(id) on delete cascade,
-  original_requirements_json text not null default '{}',
-  corrected_requirements_json text not null default '{}',
-  changed_fields_json text not null default '[]',
+  job_id bigint not null,
+  original_requirements_json text not null default '{}'
+    constraint job_requirement_revisions_original_requirements_json_check
+    check (jsonb_typeof(original_requirements_json::jsonb) = 'object'),
+  corrected_requirements_json text not null default '{}'
+    constraint job_requirement_revisions_corrected_requirements_json_check
+    check (jsonb_typeof(corrected_requirements_json::jsonb) = 'object'),
+  changed_fields_json text not null default '[]'
+    constraint job_requirement_revisions_changed_fields_json_check
+    check (jsonb_typeof(changed_fields_json::jsonb) = 'array'),
   matcher_version text not null default '',
-  created_at timestamptz not null default now()
+  created_at timestamptz not null default now(),
+  constraint job_requirement_revisions_job_owner_fkey
+    foreign key (job_id, user_id)
+    references public.jobs(id, user_id) on delete cascade
 );
 
 create table if not exists public.job_scans (
   id bigint generated by default as identity primary key,
   user_id uuid not null references auth.users(id) on delete cascade,
   input_hash text not null default '',
-  payload_json text not null default '{}',
+  payload_json text not null default '{}'
+    constraint job_scans_payload_json_check
+    check (jsonb_typeof(payload_json::jsonb) = 'object'),
   status text not null default 'queued' check (status in ('queued', 'running', 'succeeded', 'failed', 'cancel_requested', 'cancelled')),
   current_step text not null default 'queued',
   progress integer not null default 0 check (progress between 0 and 100),
-  result_job_id bigint references public.jobs(id) on delete set null,
+  result_job_id bigint,
   trace_id text not null default '',
   attempts integer not null default 0,
+  lease_token text not null default '',
   error_code text not null default '',
   error_message text not null default '',
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
   started_at timestamptz,
-  completed_at timestamptz
+  completed_at timestamptz,
+  constraint job_scans_result_job_owner_fkey
+    foreign key (result_job_id, user_id)
+    references public.jobs(id, user_id) on delete set null (result_job_id)
 );
 
 create table if not exists public.extraction_metrics (
@@ -342,7 +526,9 @@ create table if not exists public.extraction_metrics (
   input_length integer not null default 0,
   output_length integer not null default 0,
   fallback_reason text not null default '',
-  counts_json text not null default '{}',
+  counts_json text not null default '{}'
+    constraint extraction_metrics_counts_json_check
+    check (jsonb_typeof(counts_json::jsonb) = 'object'),
   error_code text not null default '',
   trace_id text not null default '',
   created_at timestamptz not null default now()
@@ -355,7 +541,9 @@ create table if not exists public.evaluation_examples (
   subject_id bigint,
   split text not null default 'train' check (split in ('train', 'validation', 'test')),
   label text not null,
-  features_json text not null default '{}',
+  features_json text not null default '{}'
+    constraint evaluation_examples_features_json_check
+    check (jsonb_typeof(features_json::jsonb) = 'object'),
   model_version text not null default '',
   trace_id text not null default '',
   created_at timestamptz not null default now()
@@ -405,6 +593,13 @@ create index if not exists recommendation_runs_catalog_idx on public.recommendat
 create index if not exists recommendation_runs_source_user_idx on public.recommendation_runs (source_user_id, created_at desc);
 create index if not exists job_recommendations_user_status_score_idx on public.job_recommendations (user_id, status, score desc);
 create index if not exists job_recommendations_catalog_idx on public.job_recommendations (catalog_job_id);
+create index if not exists job_recommendations_materialized_job_idx on public.job_recommendations (materialized_job_id) where materialized_job_id is not null;
+create index if not exists recommendation_events_recommendation_idx on public.recommendation_events (recommendation_id);
+create index if not exists recommendation_events_catalog_idx on public.recommendation_events (catalog_job_id);
+create index if not exists recommendation_events_materialized_job_idx on public.recommendation_events (materialized_job_id) where materialized_job_id is not null;
+create index if not exists recommendation_events_user_created_idx on public.recommendation_events (user_id, created_at desc);
+create index if not exists recommendation_events_field_type_created_idx on public.recommendation_events (career_field, event_type, created_at desc);
+create index if not exists recommendation_events_band_type_idx on public.recommendation_events (score_band, event_type);
 create index if not exists job_source_runs_source_created_idx on public.job_source_runs (source_name, created_at desc);
 create index if not exists job_discovery_beta_market_active_idx on public.job_discovery_beta_members (market_code, active);
 create index if not exists job_notification_preferences_email_idx on public.job_notification_preferences (email_enabled, updated_at desc) where email_enabled = true;
@@ -416,6 +611,8 @@ create index if not exists job_requirement_revisions_user_idx on public.job_requ
 create index if not exists job_scans_user_created_idx on public.job_scans (user_id, created_at desc);
 create index if not exists job_scans_queue_idx on public.job_scans (status, created_at) where status in ('queued', 'cancel_requested');
 create index if not exists job_scans_result_job_idx on public.job_scans (result_job_id) where result_job_id is not null;
+create unique index if not exists job_scans_user_active_input_uq on public.job_scans (user_id, input_hash) where status in ('queued', 'running', 'cancel_requested');
+create index if not exists job_scans_recovery_idx on public.job_scans (status, updated_at, created_at) where status in ('queued', 'running', 'cancel_requested');
 create index if not exists extraction_metrics_workflow_created_idx on public.extraction_metrics (workflow_type, status, created_at desc);
 create index if not exists extraction_metrics_trace_idx on public.extraction_metrics (trace_id) where trace_id <> '';
 create index if not exists extraction_metrics_user_idx on public.extraction_metrics (user_id);
@@ -437,6 +634,8 @@ alter table public.agent_steps enable row level security;
 alter table public.shared_job_catalog enable row level security;
 alter table public.recommendation_runs enable row level security;
 alter table public.job_recommendations enable row level security;
+alter table public.recommendation_events enable row level security;
+alter table public.recommendation_field_calibrations enable row level security;
 alter table public.job_source_runs enable row level security;
 alter table public.job_discovery_beta_members enable row level security;
 alter table public.job_notification_preferences enable row level security;
@@ -493,68 +692,63 @@ $$;
 revoke execute on function public.consume_rate_limit(text, integer, integer) from public, anon, authenticated;
 grant execute on function public.consume_rate_limit(text, integer, integer) to service_role;
 
-create policy profiles_owner_all on public.profiles
-  for all to authenticated
-  using ((select auth.uid()) = user_id)
-  with check ((select auth.uid()) = user_id);
+-- Browser clients authenticate with Supabase, but all application mutations
+-- pass through the backend. Keep owner reads available to server-rendered auth
+-- checks while preventing forged derived data through PostgREST.
+revoke insert, update, delete, truncate, references, trigger
+  on all tables in schema public from anon, authenticated;
 
-create policy profile_interests_owner_all on public.profile_interests
-  for all to authenticated
-  using ((select auth.uid()) = user_id)
-  with check ((select auth.uid()) = user_id);
+alter default privileges for role postgres in schema public
+  revoke insert, update, delete, truncate, references, trigger
+  on tables from anon, authenticated;
 
-create policy profile_sources_owner_all on public.profile_sources
-  for all to authenticated
-  using ((select auth.uid()) = user_id)
-  with check ((select auth.uid()) = user_id);
+create policy profiles_owner_select on public.profiles
+  for select to authenticated
+  using ((select auth.uid()) = user_id);
 
-create policy profile_facts_owner_all on public.profile_facts
-  for all to authenticated
-  using ((select auth.uid()) = user_id)
-  with check ((select auth.uid()) = user_id);
+create policy profile_interests_owner_select on public.profile_interests
+  for select to authenticated
+  using ((select auth.uid()) = user_id);
+
+create policy profile_sources_owner_select on public.profile_sources
+  for select to authenticated
+  using ((select auth.uid()) = user_id);
+
+create policy profile_facts_owner_select on public.profile_facts
+  for select to authenticated
+  using ((select auth.uid()) = user_id);
 
 create policy profile_fact_feedback_owner_select on public.profile_fact_feedback
   for select to authenticated
   using ((select auth.uid()) = user_id);
 
-create policy profile_fact_feedback_owner_insert on public.profile_fact_feedback
-  for insert to authenticated
-  with check ((select auth.uid()) = user_id);
+create policy clarification_questions_owner_select on public.clarification_questions
+  for select to authenticated
+  using ((select auth.uid()) = user_id);
 
-create policy clarification_questions_owner_all on public.clarification_questions
-  for all to authenticated
-  using ((select auth.uid()) = user_id)
-  with check ((select auth.uid()) = user_id);
+create policy jobs_owner_select on public.jobs
+  for select to authenticated
+  using ((select auth.uid()) = user_id);
 
-create policy jobs_owner_all on public.jobs
-  for all to authenticated
-  using ((select auth.uid()) = user_id)
-  with check ((select auth.uid()) = user_id);
+create policy job_matches_owner_select on public.job_matches
+  for select to authenticated
+  using ((select auth.uid()) = user_id);
 
-create policy job_matches_owner_all on public.job_matches
-  for all to authenticated
-  using ((select auth.uid()) = user_id)
-  with check ((select auth.uid()) = user_id);
+create policy resume_advice_owner_select on public.resume_advice
+  for select to authenticated
+  using ((select auth.uid()) = user_id);
 
-create policy resume_advice_owner_all on public.resume_advice
-  for all to authenticated
-  using ((select auth.uid()) = user_id)
-  with check ((select auth.uid()) = user_id);
+create policy job_status_events_owner_select on public.job_status_events
+  for select to authenticated
+  using ((select auth.uid()) = user_id);
 
-create policy job_status_events_owner_all on public.job_status_events
-  for all to authenticated
-  using ((select auth.uid()) = user_id)
-  with check ((select auth.uid()) = user_id);
+create policy agent_runs_owner_select on public.agent_runs
+  for select to authenticated
+  using ((select auth.uid()) = user_id);
 
-create policy agent_runs_owner_all on public.agent_runs
-  for all to authenticated
-  using ((select auth.uid()) = user_id)
-  with check ((select auth.uid()) = user_id);
-
-create policy agent_steps_owner_all on public.agent_steps
-  for all to authenticated
-  using ((select auth.uid()) = user_id)
-  with check ((select auth.uid()) = user_id);
+create policy agent_steps_owner_select on public.agent_steps
+  for select to authenticated
+  using ((select auth.uid()) = user_id);
 
 create policy shared_job_catalog_client_deny on public.shared_job_catalog
   for all to anon, authenticated using (false) with check (false);
@@ -565,9 +759,11 @@ create policy recommendation_runs_client_deny on public.recommendation_runs
 create policy job_recommendations_owner_select on public.job_recommendations
   for select to authenticated using ((select auth.uid()) = user_id);
 
-create policy job_recommendations_owner_update on public.job_recommendations
-  for update to authenticated using ((select auth.uid()) = user_id)
-  with check ((select auth.uid()) = user_id);
+create policy recommendation_events_owner_select on public.recommendation_events
+  for select to authenticated using ((select auth.uid()) = user_id);
+
+create policy recommendation_field_calibrations_client_deny on public.recommendation_field_calibrations
+  for all to anon, authenticated using (false) with check (false);
 
 create policy job_source_runs_client_deny on public.job_source_runs
   for all to anon, authenticated using (false) with check (false);
@@ -578,20 +774,14 @@ create policy job_discovery_beta_owner_select on public.job_discovery_beta_membe
 create policy job_notification_preferences_owner_select on public.job_notification_preferences
   for select to authenticated using ((select auth.uid()) = user_id);
 
-create policy job_notification_preferences_owner_update on public.job_notification_preferences
-  for update to authenticated using ((select auth.uid()) = user_id)
-  with check ((select auth.uid()) = user_id);
-
 create policy notification_deliveries_client_deny on public.notification_deliveries
   for all to anon, authenticated using (false) with check (false);
 
-create policy job_requirement_revisions_owner_all on public.job_requirement_revisions
-  for all to authenticated using ((select auth.uid()) = user_id)
-  with check ((select auth.uid()) = user_id);
+create policy job_requirement_revisions_owner_select on public.job_requirement_revisions
+  for select to authenticated using ((select auth.uid()) = user_id);
 
-create policy job_scans_owner_all on public.job_scans
-  for all to authenticated using ((select auth.uid()) = user_id)
-  with check ((select auth.uid()) = user_id);
+create policy job_scans_owner_select on public.job_scans
+  for select to authenticated using ((select auth.uid()) = user_id);
 
 -- These rows contain only privacy-safe features, but remain backend-only so
 -- product telemetry cannot become a second user-facing profile store.
@@ -607,34 +797,8 @@ insert into storage.buckets (id, name, public)
 values ('profile-documents', 'profile-documents', false)
 on conflict (id) do nothing;
 
-create policy profile_documents_owner_select on storage.objects
-  for select to authenticated
-  using (
-    bucket_id = 'profile-documents'
-    and (storage.foldername(name))[1] = (select auth.uid())::text
-  );
-
-create policy profile_documents_owner_insert on storage.objects
-  for insert to authenticated
-  with check (
-    bucket_id = 'profile-documents'
-    and (storage.foldername(name))[1] = (select auth.uid())::text
-  );
-
-create policy profile_documents_owner_update on storage.objects
-  for update to authenticated
-  using (
-    bucket_id = 'profile-documents'
-    and (storage.foldername(name))[1] = (select auth.uid())::text
-  )
-  with check (
-    bucket_id = 'profile-documents'
-    and (storage.foldername(name))[1] = (select auth.uid())::text
-  );
-
-create policy profile_documents_owner_delete on storage.objects
-  for delete to authenticated
-  using (
-    bucket_id = 'profile-documents'
-    and (storage.foldername(name))[1] = (select auth.uid())::text
-  );
+-- The API uses a Supabase secret/service credential and is the only supported
+-- document boundary. Browser sessions may not bypass its validation or
+-- lifecycle controls with direct Storage calls.
+revoke select, insert, update, delete, truncate, references, trigger
+  on storage.objects from anon, authenticated;

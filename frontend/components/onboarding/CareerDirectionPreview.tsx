@@ -61,7 +61,7 @@ export function CareerDirectionPreview({ interests, facts }: { interests: string
               <div><span>0{index + 1}</span><small>{label}</small></div>
               <h3>{interest}</h3>
               {evidence.length ? (
-                <p><Sparkles size={12} /> Supported by {evidence.slice(0, 3).map((fact) => fact.value).join(", ")}</p>
+                <p dir="auto"><Sparkles size={12} /> Supported by {evidence.slice(0, 3).map((fact) => fact.value).join(", ")}</p>
               ) : (
                 <p>Add role-specific evidence later to make this direction more precise.</p>
               )}

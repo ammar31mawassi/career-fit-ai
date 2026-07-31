@@ -1,11 +1,16 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+import io
+import urllib.error
 from uuid import UUID
 
+import pytest
 from sqlalchemy.pool import StaticPool
-from sqlmodel import Session, SQLModel, create_engine
+from sqlmodel import Session, SQLModel, create_engine, select
+from starlette.responses import Response
 
+from app.api import routes
 from app.models import (
     JobRecommendation,
     Profile,
@@ -15,6 +20,7 @@ from app.models import (
     SharedJobCatalog,
 )
 from app.services import account
+from app.services import storage
 
 
 USER_ID = UUID("00000000-0000-0000-0000-000000000701")
@@ -22,6 +28,18 @@ USER_ID = UUID("00000000-0000-0000-0000-000000000701")
 
 def _engine():
     return create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+
+
+def test_account_export_response_is_private_and_not_cacheable(monkeypatch):
+    sentinel = object()
+    monkeypatch.setattr(routes, "export_account", lambda _session, _user_id: sentinel)
+    response = Response()
+
+    result = routes.download_account_export(response, USER_ID, object())
+
+    assert result is sentinel
+    assert response.headers["Cache-Control"] == "private, no-store"
+    assert response.headers["Content-Disposition"] == 'attachment; filename="careerfit-export.json"'
 
 
 def test_account_export_contains_user_content_without_private_storage_paths():
@@ -123,3 +141,113 @@ def test_admin_account_deletion_uses_server_identity_headers(monkeypatch):
     assert str(USER_ID) in request.full_url
     assert request.headers["User-agent"] == "careerfit-api/1.0"
     assert request.headers["Authorization"] == "Bearer sb_secret_test"
+
+
+def test_admin_account_deletion_treats_an_already_missing_user_as_success(monkeypatch):
+    monkeypatch.setattr(
+        account,
+        "get_settings",
+        lambda: SimpleNamespace(
+            supabase_url="https://project.supabase.co",
+            supabase_secret_key="sb_secret_test",
+        ),
+    )
+    monkeypatch.setattr(
+        account.urllib.request,
+        "urlopen",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            urllib.error.HTTPError(
+                "https://project.supabase.co/auth/v1/admin/users/missing",
+                404,
+                "Not found",
+                {},
+                io.BytesIO(b'{"message":"not found"}'),
+            )
+        ),
+    )
+
+    account._delete_supabase_auth_user(USER_ID)
+
+
+def test_account_deletion_route_does_not_expose_provider_errors(monkeypatch):
+    monkeypatch.setattr(
+        routes,
+        "delete_account",
+        lambda *_args: (_ for _ in ()).throw(
+            RuntimeError("Supabase Storage deletion failed: 500 secret-provider-detail")
+        ),
+    )
+
+    with pytest.raises(routes.HTTPException) as raised:
+        routes.remove_account(object(), USER_ID, object())
+
+    assert raised.value.status_code == 503
+    assert raised.value.detail == "Account deletion could not be completed. Try again."
+    assert "secret-provider-detail" not in raised.value.detail
+
+
+def test_account_deletion_removes_full_local_user_prefix_including_orphans(monkeypatch, tmp_path):
+    engine = _engine()
+    SQLModel.metadata.create_all(engine)
+    other_user_id = UUID("00000000-0000-0000-0000-000000000702")
+    settings = SimpleNamespace(
+        supabase_url=None,
+        supabase_secret_key=None,
+        local_upload_dir=tmp_path,
+    )
+    monkeypatch.setattr(storage, "get_settings", lambda: settings)
+    deleted_auth_users: list[UUID] = []
+    monkeypatch.setattr(account, "_delete_supabase_auth_user", deleted_auth_users.append)
+
+    referenced_path = storage.save_private_file(USER_ID, "cv.pdf", b"referenced", "application/pdf")
+    orphan_path = storage.save_private_file(USER_ID, "orphan.pdf", b"unreferenced", "application/pdf")
+    other_path = storage.save_private_file(other_user_id, "cv.pdf", b"other-user", "application/pdf")
+
+    with Session(engine) as session:
+        profile = Profile(user_id=USER_ID, status="ready")
+        session.add(profile)
+        session.commit()
+        session.refresh(profile)
+        session.add(
+            ProfileSource(
+                user_id=USER_ID,
+                profile_id=profile.id or 0,
+                source_type="cv",
+                storage_path=referenced_path,
+            )
+        )
+        session.commit()
+
+        account.delete_account(session, USER_ID)
+
+    assert deleted_auth_users == [USER_ID]
+    assert storage.load_private_file(referenced_path, expected_user_id=USER_ID) is None
+    assert storage.load_private_file(orphan_path, expected_user_id=USER_ID) is None
+    assert storage.load_private_file(other_path, expected_user_id=other_user_id) == b"other-user"
+
+
+def test_account_deletion_stops_before_auth_when_prefix_cleanup_fails(monkeypatch):
+    engine = _engine()
+    SQLModel.metadata.create_all(engine)
+    monkeypatch.setattr(
+        account,
+        "delete_private_user_files",
+        lambda _user_id: (_ for _ in ()).throw(RuntimeError("storage unavailable")),
+    )
+    monkeypatch.setattr(
+        account,
+        "_delete_supabase_auth_user",
+        lambda _user_id: pytest.fail("auth user deleted after storage cleanup failed"),
+    )
+
+    with Session(engine) as session:
+        profile = Profile(user_id=USER_ID, status="ready")
+        session.add(profile)
+        session.commit()
+
+        with pytest.raises(RuntimeError, match="storage unavailable"):
+            account.delete_account(session, USER_ID)
+
+        persisted = session.exec(select(Profile).where(Profile.user_id == USER_ID)).one()
+
+    assert persisted.status == "ready"

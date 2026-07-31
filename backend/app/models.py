@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from typing import Optional
 from uuid import UUID
 
-from sqlalchemy import UniqueConstraint
+from sqlalchemy import Index, UniqueConstraint, text
 from sqlmodel import Field, SQLModel
 
 
@@ -195,6 +195,20 @@ class JobRequirementRevision(SQLModel, table=True):
 
 class JobScan(SQLModel, table=True):
     __tablename__ = "job_scans"
+    __table_args__ = (
+        Index(
+            "job_scans_user_active_input_uq",
+            "user_id",
+            "input_hash",
+            unique=True,
+            sqlite_where=text(
+                "status in ('queued', 'running', 'cancel_requested')"
+            ),
+            postgresql_where=text(
+                "status in ('queued', 'running', 'cancel_requested')"
+            ),
+        ),
+    )
 
     id: Optional[int] = Field(default=None, primary_key=True)
     user_id: UUID = Field(index=True)
@@ -206,6 +220,7 @@ class JobScan(SQLModel, table=True):
     result_job_id: Optional[int] = Field(default=None, foreign_key="jobs.id", index=True)
     trace_id: str = Field(default="", index=True)
     attempts: int = 0
+    lease_token: str = Field(default="", index=True)
     error_code: str = ""
     error_message: str = ""
     created_at: datetime = Field(default_factory=utc_now)

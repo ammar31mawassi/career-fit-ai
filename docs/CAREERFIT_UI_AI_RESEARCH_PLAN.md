@@ -1,6 +1,8 @@
 # CareerFit UI/UX and AI-agent research plan
 
 Date: 2026-07-08
+Status: historical research/roadmap snapshot; validate all “current” findings
+against the live code and the latest audit before implementation
 
 ## Executive decision
 

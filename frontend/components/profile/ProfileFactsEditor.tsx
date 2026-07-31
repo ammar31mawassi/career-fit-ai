@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Check, ChevronDown, Pencil, Plus, X } from "lucide-react";
 import type { ProfileFact } from "@/lib/api";
 
@@ -33,6 +33,7 @@ export function ProfileFactsEditor({
 }) {
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [bulkSaving, setBulkSaving] = useState(false);
+  const selectAllRef = useRef<HTMLInputElement>(null);
   const factsByType = useMemo(() => {
     const grouped = new Map<string, ProfileFact[]>();
     for (const fact of facts) grouped.set(fact.fact_type, [...(grouped.get(fact.fact_type) ?? []), fact]);
@@ -67,6 +68,12 @@ export function ProfileFactsEditor({
     setSelected((current) => new Set([...current].filter((id) => pendingIds.has(id))));
   }, [pendingFacts]);
 
+  useEffect(() => {
+    if (selectAllRef.current) {
+      selectAllRef.current.indeterminate = selectedFacts.length > 0 && selectedFacts.length < pendingFacts.length;
+    }
+  }, [pendingFacts.length, selectedFacts.length]);
+
   async function bulkReview(status: "approved" | "rejected") {
     if (!selectedFacts.length) return;
     setBulkSaving(true);
@@ -89,7 +96,7 @@ export function ProfileFactsEditor({
       </div>
       {pendingFacts.length ? (
         <div className="bulk-review-bar" aria-label="Bulk fact review">
-          <label><input checked={selectedFacts.length === pendingFacts.length} onChange={(event) => setSelected(event.target.checked ? new Set(pendingFacts.map((fact) => fact.id)) : new Set())} type="checkbox" /> Select all pending</label>
+          <label><input aria-checked={selectedFacts.length > 0 && selectedFacts.length < pendingFacts.length ? "mixed" : selectedFacts.length === pendingFacts.length} checked={selectedFacts.length === pendingFacts.length} onChange={(event) => setSelected(event.target.checked ? new Set(pendingFacts.map((fact) => fact.id)) : new Set())} ref={selectAllRef} type="checkbox" /> Select all pending</label>
           <span>{selectedFacts.length} selected</span>
           <button className="button compact approve" disabled={bulkSaving || !selectedFacts.length} onClick={() => void bulkReview("approved")} type="button"><Check size={13} /> Confirm selected</button>
           <button className="button compact reject" disabled={bulkSaving || !selectedFacts.length} onClick={() => void bulkReview("rejected")} type="button"><X size={13} /> Reject selected</button>
@@ -134,28 +141,38 @@ function FactGroup({ type, facts, addable, defaultExpanded, selected, onAdd, onR
   const [value, setValue] = useState("");
   const [saving, setSaving] = useState(false);
   const label = type.replaceAll("_", " ");
+  const groupId = `fact-group-${type.replace(/[^a-z0-9_-]/gi, "-")}`;
+  const addInputId = `${groupId}-new-value`;
 
   useEffect(() => {
     if (defaultExpanded && pendingCount) setExpanded(true);
-    else if (!pendingCount && !adding) setExpanded(false);
-  }, [adding, defaultExpanded, pendingCount]);
+  }, [defaultExpanded, pendingCount]);
 
   async function save() {
     if (!value.trim()) return;
     setSaving(true);
-    try { await onAdd(type, value); setValue(""); setAdding(false); setExpanded(true); } finally { setSaving(false); }
+    try {
+      await onAdd(type, value);
+      setValue("");
+      setAdding(false);
+      setExpanded(true);
+    } catch {
+      // The parent displays the error; preserve the draft for retry.
+    } finally {
+      setSaving(false);
+    }
   }
 
   return (
     <section className={`fact-group ${expanded ? "expanded" : "collapsed"}`}>
       <div className="fact-group-heading">
-        <button aria-expanded={expanded} className="fact-group-toggle" onClick={() => setExpanded((current) => !current)} type="button"><ChevronDown size={14} /><span>{label}</span><small>{facts.length} facts{pendingCount ? ` · ${pendingCount} pending` : ""}</small></button>
+        <button aria-controls={groupId} aria-expanded={expanded} className="fact-group-toggle" onClick={() => setExpanded((current) => !current)} type="button"><ChevronDown size={14} /><span>{label}</span><small>{facts.length} facts{pendingCount ? ` · ${pendingCount} pending` : ""}</small></button>
         {addable ? <button className="add-fact-button" onClick={() => { setAdding((current) => !current); setExpanded(true); }} type="button"><Plus size={13} /> Add</button> : null}
       </div>
-      {expanded ? <>
-        {adding ? <div className="add-fact-form"><input autoFocus onChange={(event) => setValue(event.target.value)} placeholder={`Add ${label}`} value={value} /><button className="button compact primary" disabled={saving || !value.trim()} onClick={() => void save()} type="button">Save</button><button className="button compact quiet" disabled={saving} onClick={() => { setAdding(false); setValue(""); }} type="button">Cancel</button></div> : null}
+      {expanded ? <div id={groupId}>
+        {adding ? <div className="add-fact-form"><label className="sr-only" htmlFor={addInputId}>Add {label}</label><input autoFocus id={addInputId} onChange={(event) => setValue(event.target.value)} placeholder={`Add ${label}`} value={value} /><button className="button compact primary" disabled={saving || !value.trim()} onClick={() => void save()} type="button">Save</button><button className="button compact quiet" disabled={saving} onClick={() => { setAdding(false); setValue(""); }} type="button">Cancel</button></div> : null}
         {facts.length ? facts.map((fact) => <FactRow fact={fact} key={fact.id} onReview={onReview} onSelectedChange={onSelectedChange} selected={selected.has(fact.id)} />) : <p className="fact-empty">Nothing added yet.</p>}
-      </> : null}
+      </div> : null}
     </section>
   );
 }
@@ -169,14 +186,25 @@ function FactRow({ fact, selected, onReview, onSelectedChange }: {
   const [editing, setEditing] = useState(false);
   const [value, setValue] = useState(fact.value);
   const [saving, setSaving] = useState(false);
+  const editInputId = `fact-edit-${fact.id}`;
+  useEffect(() => {
+    if (!editing) setValue(fact.value);
+  }, [editing, fact.value]);
   async function review(status: ProfileFact["review_status"]) {
     setSaving(true);
-    try { await onReview(fact, value, status); setEditing(false); } finally { setSaving(false); }
+    try {
+      await onReview(fact, value, status);
+      setEditing(false);
+    } catch {
+      // The parent displays the error; preserve the editor and its draft.
+    } finally {
+      setSaving(false);
+    }
   }
   return (
     <div className={`fact-row ${fact.review_status}`}>
       {fact.review_status === "pending" ? <input aria-label={`Select ${fact.value}`} checked={selected} className="fact-select" onChange={(event) => onSelectedChange(fact.id, event.target.checked)} type="checkbox" /> : <span className={`fact-state ${fact.review_status}`} aria-label={fact.review_status}>{fact.review_status === "approved" ? <Check size={13} /> : <X size={13} />}</span>}
-      {editing ? <input onChange={(event) => setValue(event.target.value)} value={value} /> : <div><strong>{fact.value}</strong><span>{Math.round(fact.confidence * 100)}% confidence · {fact.support_count} {fact.support_count === 1 ? "source" : "sources"} · {fact.review_status}</span><p>{fact.evidence}</p></div>}
+      {editing ? <><label className="sr-only" htmlFor={editInputId}>Edit {fact.fact_type.replaceAll("_", " ")}</label><input id={editInputId} onChange={(event) => setValue(event.target.value)} value={value} /></> : <div dir="auto"><strong>{fact.value}</strong><span>{Math.round(fact.confidence * 100)}% confidence · {fact.support_count} {fact.support_count === 1 ? "source" : "sources"} · {fact.review_status}</span><p>{fact.evidence}</p></div>}
       <div className="fact-actions">
         {editing ? <><button className="button compact" disabled={saving} onClick={() => { setValue(fact.value); setEditing(false); }} type="button">Cancel</button><button className="button compact primary" disabled={saving || !value.trim()} onClick={() => void review("approved")} type="button"><Check size={13} /> Save &amp; confirm</button></> : <>{fact.review_status !== "approved" ? <button className="button compact approve" disabled={saving} onClick={() => void review("approved")} type="button"><Check size={13} /> Confirm</button> : null}{fact.review_status !== "rejected" ? <button className="button compact reject" disabled={saving} onClick={() => void review("rejected")} type="button"><X size={13} /> Reject</button> : null}<button className="button compact" disabled={saving} onClick={() => setEditing(true)} type="button"><Pencil size={13} /> Edit</button></>}
       </div>

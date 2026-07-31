@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import time
 import base64
 from collections.abc import Callable
@@ -10,6 +11,7 @@ from datetime import datetime, timezone
 from uuid import UUID
 
 from sqlalchemy import and_, or_
+from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
 from ..models import Job, JobMatch, JobRequirementRevision, JobStatusEvent, Profile, ResumeAdvice
@@ -36,15 +38,26 @@ from .agent_workflows import (
     start_agent_run,
     start_step,
 )
-from .job_research import JOB_READER_VERSION, extract_job_from_input, requirements_from_json
+from .job_research import (
+    JOB_READER_VERSION,
+    extract_job_from_input,
+    requirements_from_json,
+    validate_pasted_job_description,
+)
 from .matcher import MODEL_VERSION
-from .profile import candidate_snapshot, get_or_create_profile
+from .profile import (
+    MATCHABLE_PROFILE_REQUIRED,
+    candidate_snapshot,
+    get_or_create_profile,
+    profile_is_matchable,
+)
 from .recommendations import catalog_and_enqueue_job, record_recommendation_application
 from .scoring import get_match_scorer
-from .telemetry import record_evaluation_example, record_extraction_metric, safe_error_code
+from .telemetry import current_trace_id, record_evaluation_example, record_extraction_metric, safe_error_code
 
 
 ProgressCallback = Callable[[str, int], None]
+logger = logging.getLogger("careerfit.jobs")
 
 
 def create_or_analyze_job(
@@ -55,8 +68,10 @@ def create_or_analyze_job(
 ) -> JobOut:
     _report_progress(progress_callback, "validate_profile", 5)
     profile = get_or_create_profile(session, user_id)
-    if profile.status == "needs_cv":
-        raise ValueError("Upload at least one CV before matching jobs.")
+    if not profile_is_matchable(session, profile):
+        raise ValueError(MATCHABLE_PROFILE_REQUIRED)
+    if payload.description_text.strip():
+        validate_pasted_job_description(payload.description_text)
 
     content_hash = _content_hash(payload.source_url, payload.description_text, payload.company, payload.role)
     run = start_agent_run(
@@ -91,7 +106,12 @@ def create_or_analyze_job(
         )
         complete_run(session, run, "Existing saved job reused.", status="reused")
         session.commit()
-        _catalog_for_discovery(session, user_id, existing)
+        _catalog_for_discovery(
+            session,
+            user_id,
+            existing,
+            consented=payload.contribute_public_posting,
+        )
         _report_progress(progress_callback, "ready", 100)
         return job_output(session, user_id, existing.id or 0)
     complete_step(
@@ -112,7 +132,18 @@ def create_or_analyze_job(
             payload.description_text,
         )
     except Exception as exc:
-        fail_step(session, extraction_step, str(exc), {"source_url": payload.source_url.strip()})
+        error_code = safe_error_code("JOB_READ", exc)
+        logger.exception(
+            "job_extraction_failed trace_id=%s error_code=%s",
+            current_trace_id(),
+            error_code,
+        )
+        fail_step(
+            session,
+            extraction_step,
+            error_code,
+            {"has_source_url": bool(payload.source_url.strip())},
+        )
         if existing and existing.status == "analyzed":
             attach_subject(session, run, "job", existing.id or 0)
             complete_run(session, run, "Extraction failed, existing analyzed job reused.", status="reused")
@@ -124,7 +155,7 @@ def create_or_analyze_job(
         job.role = payload.role.strip() or "Unknown Role"
         job.description_text = payload.description_text.strip()
         job.status = "failed"
-        job.error = str(exc)[:500]
+        job.error = "CareerFit could not read enough job information. Check the URL or paste the full public description."
         job.updated_at = _now()
         session.add(job)
         session.flush()
@@ -138,12 +169,12 @@ def create_or_analyze_job(
             status="failed",
             duration_ms=round((time.perf_counter() - extraction_started) * 1000),
             input_length=len(payload.description_text),
-            error_code=safe_error_code("JOB_READ", exc),
+            error_code=error_code,
         )
         session.commit()
         session.refresh(job)
         attach_subject(session, run, "job", job.id or 0)
-        fail_run(session, run, str(exc), "Job reader failed during extraction.")
+        fail_run(session, run, error_code, "Job reader failed during extraction.")
         session.commit()
         return job_output(session, user_id, job.id or 0)
     complete_step(
@@ -211,8 +242,15 @@ def create_or_analyze_job(
     try:
         match = save_match(session, user_id, profile, job, commit=False)
     except Exception as exc:
-        fail_step(session, match_step, str(exc), {"job_id": job.id or 0})
-        fail_run(session, run, str(exc), "Job reader failed during evidence matching.")
+        error_code = safe_error_code("JOB_MATCH", exc)
+        logger.exception(
+            "job_matching_failed trace_id=%s error_code=%s job_id=%s",
+            current_trace_id(),
+            error_code,
+            job.id or 0,
+        )
+        fail_step(session, match_step, error_code, {"job_id": job.id or 0})
+        fail_run(session, run, error_code, "Job reader failed during evidence matching.")
         session.commit()
         raise
     complete_step(
@@ -236,12 +274,25 @@ def create_or_analyze_job(
     )
     complete_run(session, run, "Job analyzed, matched, and saved.")
     session.commit()
-    _catalog_for_discovery(session, user_id, job)
+    _catalog_for_discovery(
+        session,
+        user_id,
+        job,
+        consented=payload.contribute_public_posting,
+    )
     _report_progress(progress_callback, "ready", 100)
     return job_output(session, user_id, job.id or 0)
 
 
-def _catalog_for_discovery(session: Session, user_id: UUID, job: Job) -> None:
+def _catalog_for_discovery(
+    session: Session,
+    user_id: UUID,
+    job: Job,
+    *,
+    consented: bool,
+) -> None:
+    if not consented:
+        return
     try:
         catalog_and_enqueue_job(session, user_id, job)
     except Exception:
@@ -263,15 +314,20 @@ def _can_reuse(job: Job, payload: JobCreateIn) -> bool:
 
 
 def list_jobs(session: Session, user_id: UUID, query: str = "", limit: int = 100) -> list[JobOut]:
-    statement = select(Job).where(Job.user_id == user_id).order_by(Job.updated_at.desc()).limit(limit)
-    jobs = list(session.exec(statement).all())
+    filters = [Job.user_id == user_id]
     if query.strip():
-        normalized = query.strip().lower()
-        jobs = [
-            job
-            for job in jobs
-            if normalized in " ".join([job.company, job.role, job.source_url, job.description_text]).lower()
-        ]
+        pattern = f"%{query.strip()}%"
+        filters.append(
+            or_(
+                Job.company.ilike(pattern),
+                Job.role.ilike(pattern),
+                Job.location.ilike(pattern),
+                Job.source_url.ilike(pattern),
+                Job.description_text.ilike(pattern),
+            )
+        )
+    statement = select(Job).where(*filters).order_by(Job.updated_at.desc()).limit(limit)
+    jobs = list(session.exec(statement).all())
     if not jobs:
         return []
 
@@ -366,8 +422,11 @@ def list_job_summary_page(
     query: str = "",
     limit: int = 30,
     cursor: str = "",
+    watermark: datetime | None = None,
 ) -> JobSummaryPageOut:
     filters = [Job.user_id == user_id]
+    if watermark is not None:
+        filters.append(Job.updated_at <= watermark)
     if query.strip():
         pattern = f"%{query.strip()}%"
         filters.append(
@@ -412,7 +471,7 @@ def list_job_summary_page(
     has_more = len(rows) > limit
     visible_rows = rows[:limit]
     if not visible_rows:
-        return JobSummaryPageOut()
+        return JobSummaryPageOut(watermark=watermark)
     job_ids = [int(row[0]) for row in visible_rows if row[0] is not None]
     matches = list(
         session.exec(
@@ -423,7 +482,11 @@ def list_job_summary_page(
     items = [_summary_from_row(row, matches_by_job.get(int(row[0]))) for row in visible_rows]
     last = visible_rows[-1]
     next_cursor = _encode_cursor(last[10], int(last[0])) if has_more else None
-    return JobSummaryPageOut(items=items, next_cursor=next_cursor, watermark=visible_rows[0][10])
+    return JobSummaryPageOut(
+        items=items,
+        next_cursor=next_cursor,
+        watermark=watermark or visible_rows[0][10],
+    )
 
 
 def job_output(session: Session, user_id: UUID, job_id: int) -> JobOut:
@@ -458,8 +521,8 @@ def rematch_job(session: Session, user_id: UUID, job_id: int) -> JobOut:
     if not job or job.user_id != user_id:
         raise ValueError("Job not found.")
     profile = get_or_create_profile(session, user_id)
-    if profile.status != "ready":
-        raise ValueError("Analyze the profile before refreshing this match.")
+    if not profile_is_matchable(session, profile):
+        raise ValueError(MATCHABLE_PROFILE_REQUIRED)
     save_match(session, user_id, profile, job)
     return job_output(session, user_id, job_id)
 
@@ -552,7 +615,6 @@ def review_job_requirements(
     profile = get_or_create_profile(session, user_id)
     save_match(session, user_id, profile, job, commit=False)
     session.commit()
-    _catalog_for_discovery(session, user_id, job)
     return job_output(session, user_id, job_id)
 
 
@@ -573,48 +635,123 @@ def save_match(
         requirements,
         job.source_confidence,
     )
-    match = session.exec(select(JobMatch).where(JobMatch.user_id == user_id, JobMatch.job_id == job.id)).first()
-    if match is None:
-        match = JobMatch(user_id=user_id, job_id=job.id or 0)
-        is_new = True
-    else:
-        is_new = False
-    match.score = result.score
-    match.fit_level = result.fit_level
-    match.confidence = result.confidence
-    match.matched_evidence_json = json.dumps(result.matched_evidence)
-    match.missing_blockers_json = json.dumps(result.missing_blockers)
-    match.gaps_json = json.dumps(result.gaps)
-    match.model_version = result.model_version
-    match.ontology_version = result.ontology_version
-    match.component_scores_json = json.dumps(result.component_scores, sort_keys=True)
-    match.applied_caps_json = json.dumps(result.applied_caps)
-    match.feature_snapshot_json = json.dumps(result.feature_snapshot, sort_keys=True)
-    match.analyzed_at = _now()
-    match.updated_at = _now()
-    session.add(match)
-    session.flush()
-    if is_new:
-        session.add(JobStatusEvent(user_id=user_id, match_id=match.id or 0, status=match.status, created_at=_now()))
-        session.flush()
+    now = _now()
+    match_values = {
+        "score": result.score,
+        "fit_level": result.fit_level,
+        "confidence": result.confidence,
+        "matched_evidence_json": json.dumps(result.matched_evidence),
+        "missing_blockers_json": json.dumps(result.missing_blockers),
+        "gaps_json": json.dumps(result.gaps),
+        "model_version": result.model_version,
+        "ontology_version": result.ontology_version,
+        "component_scores_json": json.dumps(result.component_scores, sort_keys=True),
+        "applied_caps_json": json.dumps(result.applied_caps),
+        "feature_snapshot_json": json.dumps(result.feature_snapshot, sort_keys=True),
+        "analyzed_at": now,
+        "updated_at": now,
+    }
+    advice_values = {
+        "projects_json": json.dumps(result.projects),
+        "skill_order_json": json.dumps(result.skill_order),
+        "about_text": result.about_text,
+        "template_id": result.about_template_id,
+        "evidence_json": json.dumps(result.about_evidence),
+        "generated_at": now,
+    }
+    try:
+        match = session.exec(
+            select(JobMatch).where(
+                JobMatch.user_id == user_id,
+                JobMatch.job_id == job.id,
+            )
+        ).first()
+        inserted_match = False
+        if match is None:
+            candidate_match = JobMatch(
+                user_id=user_id,
+                job_id=job.id or 0,
+                **match_values,
+            )
+            try:
+                with session.begin_nested():
+                    session.add(candidate_match)
+                    session.flush()
+            except IntegrityError:
+                match = session.exec(
+                    select(JobMatch).where(
+                        JobMatch.user_id == user_id,
+                        JobMatch.job_id == job.id,
+                    )
+                ).one()
+            else:
+                match = candidate_match
+                inserted_match = True
+        if not inserted_match:
+            if match is None:
+                raise RuntimeError("Job match upsert did not return a row.")
+            # Never touch `status`: a concurrent application transition is a
+            # user decision and must win over a background rematch.
+            for key, value in match_values.items():
+                setattr(match, key, value)
+            session.add(match)
+            session.flush()
+        if inserted_match:
+            session.add(
+                JobStatusEvent(
+                    user_id=user_id,
+                    match_id=match.id or 0,
+                    status=match.status,
+                    created_at=now,
+                )
+            )
+            session.flush()
 
-    advice = session.exec(
-        select(ResumeAdvice).where(ResumeAdvice.user_id == user_id, ResumeAdvice.match_id == match.id)
-    ).first()
-    if advice is None:
-        advice = ResumeAdvice(user_id=user_id, match_id=match.id or 0)
-    advice.projects_json = json.dumps(result.projects)
-    advice.skill_order_json = json.dumps(result.skill_order)
-    advice.about_text = result.about_text
-    advice.template_id = result.about_template_id
-    advice.evidence_json = json.dumps(result.about_evidence)
-    advice.generated_at = _now()
-    session.add(advice)
-    if commit:
-        session.commit()
-    else:
-        session.flush()
-    return match
+        advice = session.exec(
+            select(ResumeAdvice).where(
+                ResumeAdvice.user_id == user_id,
+                ResumeAdvice.match_id == match.id,
+            )
+        ).first()
+        inserted_advice = False
+        if advice is None:
+            candidate_advice = ResumeAdvice(
+                user_id=user_id,
+                match_id=match.id or 0,
+                **advice_values,
+            )
+            try:
+                with session.begin_nested():
+                    session.add(candidate_advice)
+                    session.flush()
+            except IntegrityError:
+                advice = session.exec(
+                    select(ResumeAdvice).where(
+                        ResumeAdvice.user_id == user_id,
+                        ResumeAdvice.match_id == match.id,
+                    )
+                ).one()
+            else:
+                advice = candidate_advice
+                inserted_advice = True
+        if not inserted_advice:
+            if advice is None:
+                raise RuntimeError("Resume advice upsert did not return a row.")
+            for key, value in advice_values.items():
+                setattr(advice, key, value)
+            session.add(advice)
+            session.flush()
+        if commit:
+            session.commit()
+        else:
+            session.flush()
+        return match
+    except Exception:
+        # Keep both direct calls and larger caller-owned units of work atomic.
+        # For commit=False this intentionally rolls back the caller's pending
+        # job/recommendation transition as one failed unit.
+        session.rollback()
+        raise
 
 
 def _job_to_out(session: Session, user_id: UUID, job: Job) -> JobOut:

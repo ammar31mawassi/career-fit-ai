@@ -9,7 +9,14 @@ function joined(values: string[]) {
 }
 
 function splitSkills(value: string) {
-  return [...new Set(value.split(/[,\n]/).map((item) => item.trim().toLowerCase()).filter(Boolean))];
+  const seen = new Set<string>();
+  return value.split(/[,\n]/).map((item) => item.trim()).filter((item) => {
+    if (!item) return false;
+    const key = item.toLocaleLowerCase();
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 export function RequirementReviewPanel({ job, onSaved }: { job: TrackedJob; onSaved: (job: TrackedJob) => void }) {
@@ -40,6 +47,25 @@ export function RequirementReviewPanel({ job, onSaved }: { job: TrackedJob; onSa
     setDomain(job.requirements.domain);
   }, [job]);
 
+  function resetDraft() {
+    setMust(joined(job.requirements.must_have_skills));
+    setPreferred(joined(job.requirements.preferred_skills));
+    setNice(joined(job.requirements.nice_to_have_skills));
+    setYears(String(job.requirements.min_years_experience || 0));
+    setKnown(job.requirements.experience_requirement_known);
+    setSeniority(job.requirements.seniority);
+    setWorkMode(job.requirements.work_mode);
+    setLocation(job.requirements.location_requirement);
+    setEducation(job.requirements.education);
+    setDomain(job.requirements.domain);
+    setError("");
+  }
+
+  function toggleOpen() {
+    if (open) resetDraft();
+    setOpen((current) => !current);
+  }
+
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setSaving(true);
@@ -68,12 +94,11 @@ export function RequirementReviewPanel({ job, onSaved }: { job: TrackedJob; onSa
 
   return (
     <section className={`analysis-section requirement-review${open ? " open" : ""}`}>
-      <button aria-expanded={open} className="requirement-review-toggle" onClick={() => setOpen((current) => !current)} type="button">
+      <button aria-controls={`requirement-review-form-${job.id}`} aria-expanded={open} className="requirement-review-toggle" onClick={toggleOpen} type="button">
         <span><SlidersHorizontal size={15} /><span><strong>Review extracted requirements</strong><small>Correct high-impact reader mistakes before trusting the score.</small></span></span>
         <ChevronDown size={16} aria-hidden />
       </button>
-      {open ? (
-        <form className="requirement-review-form" onSubmit={submit}>
+        <form className="requirement-review-form" hidden={!open} id={`requirement-review-form-${job.id}`} onSubmit={submit}>
           <label className="field"><span>Must-have skills</span><textarea onChange={(event) => setMust(event.target.value)} rows={2} value={must} /></label>
           <label className="field"><span>Preferred skills</span><textarea onChange={(event) => setPreferred(event.target.value)} rows={2} value={preferred} /></label>
           <label className="field"><span>Nice-to-have skills</span><textarea onChange={(event) => setNice(event.target.value)} rows={2} value={nice} /></label>
@@ -88,11 +113,10 @@ export function RequirementReviewPanel({ job, onSaved }: { job: TrackedJob; onSa
           <label className="field"><span>Education requirement</span><input onChange={(event) => setEducation(event.target.value)} value={education} /></label>
           {error ? <div className="notice error compact-notice" role="alert">{error}</div> : null}
           <div className="requirement-review-actions">
-            <button className="button compact quiet" disabled={saving} onClick={() => setOpen(false)} type="button"><X size={14} /> Cancel</button>
+            <button className="button compact quiet" disabled={saving} onClick={() => { resetDraft(); setOpen(false); }} type="button"><X size={14} /> Cancel</button>
             <button className="button compact primary" disabled={saving} type="submit"><Check size={14} /> {saving ? "Recalculating…" : "Save and recalculate"}</button>
           </div>
         </form>
-      ) : null}
     </section>
   );
 }

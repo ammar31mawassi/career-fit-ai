@@ -30,7 +30,7 @@ from ..schemas import (
 )
 from .jobs import list_jobs
 from .profile import profile_output
-from .storage import delete_private_file
+from .storage import delete_private_user_files
 
 
 def export_account(session: Session, user_id: UUID) -> AccountExportOut:
@@ -161,12 +161,7 @@ def _json_list(value: str) -> list[str]:
 
 
 def delete_account(session: Session, user_id: UUID) -> None:
-    sources = list(
-        session.exec(select(ProfileSource).where(ProfileSource.user_id == user_id)).all()
-    )
-    for source in sources:
-        if source.storage_path:
-            delete_private_file(source.storage_path)
+    delete_private_user_files(user_id)
     _delete_supabase_auth_user(user_id)
     # Auth deletion cascades through every user-owned public table. End the
     # read transaction so this session cannot expose a stale identity map.
@@ -192,6 +187,10 @@ def _delete_supabase_auth_user(user_id: UUID) -> None:
             return
     except urllib.error.HTTPError as exc:
         exc.read()
+        if exc.code == 404:
+            # Retrying a deletion after the provider accepted an earlier
+            # request is successful by definition.
+            return
         raise RuntimeError("Supabase account deletion failed.") from exc
     except urllib.error.URLError as exc:
         raise RuntimeError("Supabase account deletion could not be reached.") from exc

@@ -4,8 +4,9 @@ import Link from "next/link";
 import { useEffect, useState, type FormEvent } from "react";
 import { useRouter } from "next/navigation";
 import { CheckCircle2, ShieldCheck, Sparkles, Waypoints } from "lucide-react";
-import { clearWorkspaceCaches } from "@/components/AppDataProvider";
+import { safePostLoginPath } from "@/lib/auth-policy.mjs";
 import { createClient } from "@/lib/supabase/client";
+import { clearWorkspaceCaches } from "@/lib/workspace-session";
 import { getProfile } from "@/lib/api";
 
 export function LoginClient() {
@@ -26,8 +27,15 @@ export function LoginClient() {
       setMessage("That recovery link is invalid or expired. Request a new one below.");
       setMessageKind("error");
       setMode("reset");
+    } else if (parameters.get("configuration_error")) {
+      setMessage("Authentication is temporarily unavailable. Please try again later.");
+      setMessageKind("error");
     }
   }, []);
+
+  useEffect(() => {
+    document.title = `${mode === "login" ? "Sign in" : mode === "signup" ? "Create account" : "Reset password"} — CareerFit`;
+  }, [mode]);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -72,7 +80,9 @@ export function LoginClient() {
         const { error } = await supabase.auth.signInWithPassword({ email, password });
         if (error) throw error;
         const profile = await getProfile();
-        router.replace(profile.onboarding_completed ? "/" : "/onboarding");
+        const requestedNext = new URLSearchParams(window.location.search).get("next");
+        const nextPath = safePostLoginPath(window.location.href, requestedNext);
+        router.replace(profile.onboarding_completed ? nextPath : "/onboarding");
       }
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Authentication failed.");
@@ -101,11 +111,11 @@ export function LoginClient() {
         {message ? <div aria-live="polite" className={`notice ${messageKind}`}>{message}</div> : null}
         <label className="field">
           <span>Email</span>
-          <input autoComplete="email" onChange={(event) => setEmail(event.target.value)} required type="email" value={email} />
+          <input autoComplete="email" maxLength={320} onChange={(event) => setEmail(event.target.value)} required type="email" value={email} />
         </label>
         {mode !== "reset" ? <label className="field">
           <span>Password</span>
-          <input autoComplete={mode === "login" ? "current-password" : "new-password"} minLength={8} onChange={(event) => setPassword(event.target.value)} required type="password" value={password} />
+          <input autoComplete={mode === "login" ? "current-password" : "new-password"} maxLength={128} minLength={8} onChange={(event) => setPassword(event.target.value)} required type="password" value={password} />
           {mode === "signup" ? <small>Use at least 8 characters. Never reuse an important password.</small> : null}
         </label> : null}
         <button className="button primary" disabled={loading} type="submit">

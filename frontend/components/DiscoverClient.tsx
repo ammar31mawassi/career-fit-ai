@@ -4,10 +4,12 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import {
   BriefcaseBusiness,
+  BellOff,
   ChevronDown,
   Clock3,
   Compass,
   LockKeyhole,
+  Mail,
   Power,
   Radar,
   RefreshCw,
@@ -21,26 +23,34 @@ import { useAppData } from "@/components/AppDataProvider";
 import { CareerInterestPicker } from "@/components/CareerInterestPicker";
 import { RecommendedMatches } from "@/components/home/RecommendedMatches";
 import {
+  getNotificationPreference,
   getRecommendations,
   refreshRecommendations,
+  saveNotificationPreference,
   saveProfilePreferences,
   toJobSummary,
-  type JobRecommendation
+  type JobRecommendation,
+  type NotificationPreference
 } from "@/lib/api";
 
 export function DiscoverClient() {
   const { profile, profileLoading, dataError, setProfile, setJobs } = useAppData();
+  const [persistedInterests, setPersistedInterests] = useState<string[]>([]);
   const [careerInterests, setCareerInterests] = useState<string[]>([]);
   const [enabled, setEnabled] = useState(false);
   const [recommendations, setRecommendations] = useState<JobRecommendation[]>([]);
+  const [notificationPreference, setNotificationPreference] = useState<NotificationPreference | null>(null);
   const [loadingMatches, setLoadingMatches] = useState(false);
+  const [loadingNotifications, setLoadingNotifications] = useState(false);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const skipNextAutomaticLoad = useRef(false);
+  const draftDirty = !sameInterests(careerInterests, persistedInterests);
 
   useEffect(() => {
     if (!profile) return;
+    setPersistedInterests(profile.career_interests);
     setCareerInterests(profile.career_interests);
     setEnabled(profile.recommendations_enabled);
   }, [profile?.id, profile?.career_interests, profile?.recommendations_enabled]);
@@ -55,15 +65,41 @@ export function DiscoverClient() {
       skipNextAutomaticLoad.current = false;
       return;
     }
+    const controller = new AbortController();
     let active = true;
     setLoadingMatches(true);
-    void getRecommendations(30)
+    void getRecommendations(30, controller.signal)
       .then((items) => { if (active) setRecommendations(items); })
       .catch((caught) => {
-        if (active) setError(caught instanceof Error ? caught.message : "Could not load discovery matches.");
+        if (active && !controller.signal.aborted) {
+          setError(caught instanceof Error ? caught.message : "Could not load discovery matches.");
+        }
       })
       .finally(() => { if (active) setLoadingMatches(false); });
-    return () => { active = false; };
+    return () => {
+      active = false;
+      controller.abort();
+    };
+  }, [enabled]);
+
+  useEffect(() => {
+    if (!enabled) {
+      setNotificationPreference(null);
+      return;
+    }
+    const controller = new AbortController();
+    setLoadingNotifications(true);
+    void getNotificationPreference(controller.signal)
+      .then(setNotificationPreference)
+      .catch((caught) => {
+        if (!controller.signal.aborted) {
+          setError(caught instanceof Error ? caught.message : "Could not load email alert settings.");
+        }
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setLoadingNotifications(false);
+      });
+    return () => controller.abort();
   }, [enabled]);
 
   const sourceCount = useMemo(
@@ -89,6 +125,8 @@ export function DiscoverClient() {
       const updated = await saveProfilePreferences(careerInterests, true);
       skipNextAutomaticLoad.current = true;
       setProfile(updated);
+      setPersistedInterests(updated.career_interests);
+      setCareerInterests(updated.career_interests);
       setEnabled(true);
     } catch (caught) {
       setEnabled(false);
@@ -117,8 +155,14 @@ export function DiscoverClient() {
     setError("");
     setMessage("");
     try {
-      const updated = await saveProfilePreferences(careerInterests, false);
+      if (notificationPreference?.email_enabled) {
+        const preference = await saveNotificationPreference(false);
+        setNotificationPreference(preference);
+      }
+      const updated = await saveProfilePreferences(persistedInterests, false);
       setProfile(updated);
+      setPersistedInterests(updated.career_interests);
+      setCareerInterests(updated.career_interests);
       setEnabled(false);
       setRecommendations([]);
       setMessage("Discovery is paused. Your saved opportunities stay unchanged.");
@@ -126,6 +170,24 @@ export function DiscoverClient() {
       setError(caught instanceof Error ? caught.message : "Could not pause discovery.");
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function toggleEmailAlerts() {
+    if (!notificationPreference?.eligible || !notificationPreference.delivery_available) return;
+    setLoadingNotifications(true);
+    setError("");
+    setMessage("");
+    try {
+      const updated = await saveNotificationPreference(!notificationPreference.email_enabled);
+      setNotificationPreference(updated);
+      setMessage(updated.email_enabled
+        ? "Email alerts are on for eligible higher-confidence matches."
+        : "Email alerts are off. In-app discovery remains active.");
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Could not update email alerts.");
+    } finally {
+      setLoadingNotifications(false);
     }
   }
 
@@ -141,6 +203,8 @@ export function DiscoverClient() {
     try {
       const updated = await saveProfilePreferences(careerInterests, true);
       setProfile(updated);
+      setPersistedInterests(updated.career_interests);
+      setCareerInterests(updated.career_interests);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Could not update discovery.");
       setSaving(false);
@@ -158,6 +222,33 @@ export function DiscoverClient() {
       setSaving(false);
       setLoadingMatches(false);
     }
+  }
+
+  async function saveDirectionOnly() {
+    if (!careerInterests.length) {
+      setError("Choose at least one career field to save your direction.");
+      return;
+    }
+    setSaving(true);
+    setError("");
+    setMessage("");
+    try {
+      const updated = await saveProfilePreferences(careerInterests, false);
+      setProfile(updated);
+      setPersistedInterests(updated.career_interests);
+      setCareerInterests(updated.career_interests);
+      setMessage("Career direction saved. Discovery remains off.");
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Could not save your career direction.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  function discardDirectionDraft() {
+    setCareerInterests(persistedInterests);
+    setError("");
+    setMessage("Unsaved direction changes discarded.");
   }
 
   async function reloadMatches() {
@@ -215,14 +306,24 @@ export function DiscoverClient() {
             {!profileReady && !profileLoading ? (
               <div className="discover-profile-warning"><span>Your profile must be ready first.</span><Link href="/profile">Complete profile</Link></div>
             ) : null}
-            <button
-              className="button primary allow-discovery-button"
-              disabled={saving || profileLoading || !profileReady || !careerInterests.length}
-              onClick={() => void allowDiscovery()}
-              type="button"
-            >
-              <Sparkles size={17} /> {saving ? "Turning discovery on…" : "Allow job discovery"}
-            </button>
+            <div className="form-actions">
+              <button
+                className="button"
+                disabled={saving || profileLoading || !careerInterests.length || !draftDirty}
+                onClick={() => void saveDirectionOnly()}
+                type="button"
+              >
+                <Save size={16} /> Save direction only
+              </button>
+              <button
+                className="button primary allow-discovery-button"
+                disabled={saving || profileLoading || !profileReady || !careerInterests.length}
+                onClick={() => void allowDiscovery()}
+                type="button"
+              >
+                <Sparkles size={17} /> {saving ? "Saving…" : "Allow job discovery"}
+              </button>
+            </div>
             <small className="consent-footnote">By allowing discovery, you consent to private automated matching. You can turn it off here at any time.</small>
           </div>
         </section>
@@ -234,7 +335,7 @@ export function DiscoverClient() {
               <div><small>Discovery status</small><strong>Actively watching</strong></div>
             </div>
             <div className="discover-status-facts">
-              <span><Target size={15} aria-hidden /><span><small>Direction</small><strong>{careerInterests.length} {careerInterests.length === 1 ? "field" : "fields"}</strong></span></span>
+              <span><Target size={15} aria-hidden /><span><small>Direction</small><strong>{persistedInterests.length} {persistedInterests.length === 1 ? "field" : "fields"}</strong></span></span>
               <span><BriefcaseBusiness size={15} aria-hidden /><span><small>Current feed</small><strong>{recommendations.length ? `${recommendations.length} ${recommendations.length === 1 ? "match" : "matches"} · ${sourceCount} ${sourceCount === 1 ? "source" : "sources"}` : "Watching for a match"}</strong></span></span>
               <span><Clock3 size={15} aria-hidden /><span><small>Next checks</small><strong>Hourly + shared scans</strong></span></span>
             </div>
@@ -268,7 +369,7 @@ export function DiscoverClient() {
                 <span>
                   <small>Discovery settings</small>
                   <strong>Change the fields we watch</strong>
-                  <span>{careerInterests.length} selected · Changes are only applied when you save.</span>
+                  <span>{persistedInterests.length} active{draftDirty ? " · unsaved changes" : ""}</span>
                 </span>
                 <ChevronDown className="discover-settings-chevron" size={18} aria-hidden />
               </summary>
@@ -278,12 +379,54 @@ export function DiscoverClient() {
                   <span className="review-count">{careerInterests.length} selected</span>
                 </div>
                 <CareerInterestPicker disabled={saving} onChange={setCareerInterests} selected={careerInterests} />
-                <div className="form-actions"><button className="button primary" disabled={saving || !careerInterests.length} onClick={() => void saveDirection()} type="button"><Save size={15} /> {saving ? "Saving…" : "Save and recheck"}</button></div>
+                <div className="form-actions">
+                  {draftDirty ? <button className="button quiet" disabled={saving} onClick={discardDirectionDraft} type="button">Discard changes</button> : null}
+                  <button className="button primary" disabled={saving || !careerInterests.length || !draftDirty} onClick={() => void saveDirection()} type="button"><Save size={15} /> {saving ? "Saving…" : "Save and recheck"}</button>
+                </div>
               </div>
             </details>
+            <section className="panel notification-preference" aria-labelledby="email-alert-title">
+              <div className="section-heading compact-heading">
+                <div>
+                  <span className="section-kicker">Optional alerts</span>
+                  <h2 id="email-alert-title">Higher-confidence match emails</h2>
+                  <p>CareerFit uses your verified account email. Messages contain job details and a score, never CV excerpts or raw profile evidence.</p>
+                </div>
+                {notificationPreference?.email_enabled ? <Mail size={20} aria-hidden /> : <BellOff size={20} aria-hidden />}
+              </div>
+              {loadingNotifications && !notificationPreference ? <p role="status">Loading email settings…</p> : null}
+              {notificationPreference && !notificationPreference.eligible ? (
+                <p>Email alerts are currently limited to explicitly enrolled Israel discovery beta accounts. In-app discovery is unaffected.</p>
+              ) : null}
+              {notificationPreference?.eligible && !notificationPreference.delivery_available ? (
+                <p>Email delivery is not configured in this environment. Your matches remain available in CareerFit.</p>
+              ) : null}
+              {notificationPreference?.eligible && notificationPreference.delivery_available ? (
+                <button
+                  aria-pressed={notificationPreference.email_enabled}
+                  className={`button ${notificationPreference.email_enabled ? "primary" : "quiet"}`}
+                  disabled={loadingNotifications}
+                  onClick={() => void toggleEmailAlerts()}
+                  type="button"
+                >
+                  {notificationPreference.email_enabled ? <BellOff size={15} /> : <Mail size={15} />}
+                  {loadingNotifications
+                    ? "Saving…"
+                    : notificationPreference.email_enabled
+                      ? "Turn email alerts off"
+                      : "Turn email alerts on"}
+                </button>
+              ) : null}
+            </section>
           </section>
         </>
       )}
     </div>
   );
+}
+
+function sameInterests(left: string[], right: string[]) {
+  if (left.length !== right.length) return false;
+  const expected = new Set(right);
+  return left.every((value) => expected.has(value));
 }

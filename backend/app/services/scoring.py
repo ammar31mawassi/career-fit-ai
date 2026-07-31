@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import logging
 from dataclasses import replace
 from functools import lru_cache
 from pathlib import Path
@@ -10,6 +12,9 @@ from .job_research import JobRequirements
 from .matcher import MatchResult, score_match
 from .profile import CandidateSnapshot
 from ..config import get_settings
+
+
+logger = logging.getLogger("careerfit.scoring")
 
 
 class MatchScorer(Protocol):
@@ -83,13 +88,27 @@ def get_match_scorer() -> MatchScorer:
     base = DeterministicMatchScorer()
     path = get_settings().score_calibration_path
     if path is None:
+        logger.info("score_calibration status=disabled scorer=deterministic")
         return base
     try:
-        payload = json.loads(Path(path).read_text(encoding="utf-8"))
+        artifact = Path(path).read_bytes()
+        payload = json.loads(artifact.decode("utf-8"))
         knots = [(float(item[0]), float(item[1])) for item in payload["knots"]]
-        return PiecewiseCalibratedScorer(base, knots, str(payload.get("version") or "calibrated-v1"))
-    except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+        version = str(payload.get("version") or "calibrated-v1")
+        scorer = PiecewiseCalibratedScorer(base, knots, version)
+        logger.info(
+            "score_calibration status=loaded version=%s sha256=%s knots=%s",
+            version,
+            hashlib.sha256(artifact).hexdigest(),
+            len(knots),
+        )
+        return scorer
+    except (OSError, UnicodeDecodeError, KeyError, TypeError, ValueError, json.JSONDecodeError):
         # A bad optional artifact must not take the deterministic scorer offline.
+        logger.exception(
+            "score_calibration status=invalid path=%s scorer=deterministic",
+            path,
+        )
         return base
 
 

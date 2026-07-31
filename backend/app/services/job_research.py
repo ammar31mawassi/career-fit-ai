@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import html
+import http.client
 import ipaddress
 import json
 import re
 import socket
+import ssl
 import urllib.error
 import urllib.parse
-import urllib.request
 from dataclasses import asdict, dataclass, field, replace
 from html.parser import HTMLParser
 
@@ -22,11 +23,26 @@ USER_AGENT = (
 )
 
 JOB_READER_VERSION = "reader-v2.4.0"
+MIN_MEANINGFUL_JOB_CHARACTERS = 120
+JOB_CONTENT_HINTS = (
+    "experience",
+    "qualification",
+    "requirement",
+    "responsibilit",
+    "what you",
+    "about the role",
+    "job description",
+)
 
 CAREER_HINTS = ("career", "careers", "job", "jobs", "position", "greenhouse", "lever", "workday", "comeet", "workable")
 MUST_HINTS = ("must", "required", "requirements", "qualification", "you have", "minimum", "mandatory")
 PREFERRED_HINTS = ("preferred", "advantage", "a plus", "bonus", "ideally")
 NICE_HINTS = ("nice to have", "nice-to-have", "optional")
+
+FETCH_TIMEOUT_SECONDS = 15
+MAX_FETCH_BYTES = 2_000_000
+MAX_FETCH_REDIRECTS = 10
+REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
 
 
 @dataclass(frozen=True)
@@ -89,7 +105,7 @@ def extract_job_from_input(
     company = company.strip()
     role = role.strip()
     pasted_text = _normalize_job_text(description_text)
-    if source_url:
+    if source_url and pasted_text:
         validate_public_job_url(source_url)
     if pasted_text:
         title = role or "Pasted job description"
@@ -100,6 +116,7 @@ def extract_job_from_input(
         confidence = _source_confidence(guessed_company, guessed_role, source_url, title, text, method)
         application_link = source_url
         location = _guess_location(text)
+        _validate_job_content(guessed_role, text, confidence, source_kind="pasted")
     else:
         html_text = _fetch(source_url)
         source = _structured_source(source_url, html_text)
@@ -146,6 +163,10 @@ def extract_job_from_input(
             guessed_company, guessed_role, source_url, title, text, method
         )
         _validate_job_content(guessed_role, text, confidence)
+
+    application_link = normalize_application_link(application_link, base_url=source_url)
+    if not application_link and source_url:
+        application_link = normalize_application_link(source_url)
 
     requirements = classify_requirements(text, guessed_role)
     requirements = replace(
@@ -272,59 +293,379 @@ def requirements_from_json(value: str) -> JobRequirements:
     )
 
 
-def validate_public_job_url(url: str) -> None:
+@dataclass(frozen=True)
+class _ResolvedAddress:
+    family: int
+    socktype: int
+    proto: int
+    sockaddr: tuple
+    ip: str
+
+
+@dataclass(frozen=True)
+class _PublicUrlTarget:
+    url: str
+    parsed: urllib.parse.ParseResult
+    hostname: str
+    port: int
+    addresses: tuple[_ResolvedAddress, ...]
+
+
+@dataclass
+class _PublicResponse:
+    connection: http.client.HTTPConnection
+    response: http.client.HTTPResponse
+
+    def __enter__(self) -> http.client.HTTPResponse:
+        return self.response
+
+    def __exit__(self, exc_type, exc, traceback) -> None:
+        try:
+            self.response.close()
+        finally:
+            self.connection.close()
+
+
+def _parse_public_job_url(url: str) -> tuple[urllib.parse.ParseResult, str, int]:
+    if any(ord(character) < 32 or ord(character) == 127 for character in url):
+        raise ValueError("The job URL contains invalid control characters.")
     parsed = urllib.parse.urlparse(url)
     if parsed.scheme not in {"http", "https"}:
         raise ValueError("Only HTTP and HTTPS job URLs are supported.")
     if not parsed.hostname or parsed.username or parsed.password:
         raise ValueError("The job URL must contain a valid public hostname.")
-    hostname = parsed.hostname.rstrip(".").lower()
+    if "\\" in parsed.netloc:
+        raise ValueError("The job URL must contain a valid public hostname.")
+    raw_hostname = parsed.hostname.rstrip(".")
+    if not raw_hostname:
+        raise ValueError("The job URL must contain a valid public hostname.")
+    if "%" in raw_hostname:
+        raise ValueError("Scoped IP addresses are not allowed in job URLs.")
+    try:
+        literal_ip = ipaddress.ip_address(raw_hostname)
+    except ValueError:
+        literal_ip = None
+    if literal_ip is not None:
+        hostname = str(literal_ip)
+    else:
+        try:
+            hostname = raw_hostname.encode("idna").decode("ascii").lower()
+        except UnicodeError as exc:
+            raise ValueError("The job URL must contain a valid public hostname.") from exc
+        if not _is_valid_dns_hostname(hostname):
+            raise ValueError("The job URL must contain a valid public hostname.")
     if hostname == "localhost" or hostname.endswith(".localhost"):
         raise ValueError("Local job URLs are not allowed.")
-    if parsed.port not in {None, 80, 443}:
-        raise ValueError("Job URLs may only use standard HTTP or HTTPS ports.")
     try:
-        addresses = socket.getaddrinfo(hostname, parsed.port or 443, type=socket.SOCK_STREAM)
+        parsed_port = parsed.port
+    except ValueError as exc:
+        raise ValueError("The job URL must contain a valid port.") from exc
+    if parsed_port not in {None, 80, 443}:
+        raise ValueError("Job URLs may only use standard HTTP or HTTPS ports.")
+    port = parsed_port or (443 if parsed.scheme == "https" else 80)
+    return parsed, hostname, port
+
+
+def _is_valid_dns_hostname(hostname: str) -> bool:
+    if len(hostname) > 253 or "." not in hostname or re.fullmatch(r"[0-9.]+", hostname):
+        return False
+    return all(
+        re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label) is not None
+        for label in hostname.split(".")
+    )
+
+
+def _resolve_public_addresses(hostname: str, port: int) -> tuple[_ResolvedAddress, ...]:
+    literal_hostname = hostname.split("%", 1)[0]
+    try:
+        literal_ip = ipaddress.ip_address(literal_hostname)
+    except ValueError:
+        literal_ip = None
+    if literal_ip is not None:
+        if not literal_ip.is_global:
+            raise ValueError("Job URLs must not resolve to private or local network addresses.")
+        if literal_ip.version == 4:
+            return (
+                _ResolvedAddress(
+                    family=socket.AF_INET,
+                    socktype=socket.SOCK_STREAM,
+                    proto=socket.IPPROTO_TCP,
+                    sockaddr=(str(literal_ip), port),
+                    ip=str(literal_ip),
+                ),
+            )
+        return (
+            _ResolvedAddress(
+                family=socket.AF_INET6,
+                socktype=socket.SOCK_STREAM,
+                proto=socket.IPPROTO_TCP,
+                sockaddr=(str(literal_ip), port, 0, 0),
+                ip=str(literal_ip),
+            ),
+        )
+    try:
+        records = socket.getaddrinfo(
+            hostname,
+            port,
+            family=socket.AF_UNSPEC,
+            type=socket.SOCK_STREAM,
+            proto=socket.IPPROTO_TCP,
+        )
     except socket.gaierror as exc:
         raise urllib.error.URLError(f"Could not resolve job URL hostname: {hostname}") from exc
-    for address in addresses:
-        ip = ipaddress.ip_address(address[4][0].split("%", 1)[0])
+    addresses: list[_ResolvedAddress] = []
+    seen: set[tuple[int, str, int]] = set()
+    for family, socktype, proto, _, sockaddr in records:
+        ip = ipaddress.ip_address(sockaddr[0].split("%", 1)[0])
         if not ip.is_global:
             raise ValueError("Job URLs must not resolve to private or local network addresses.")
+        key = (family, str(ip), port)
+        if key in seen:
+            continue
+        seen.add(key)
+        if family == socket.AF_INET6:
+            pinned_sockaddr = (str(ip), port, 0, 0)
+        else:
+            pinned_sockaddr = (str(ip), port)
+        addresses.append(
+            _ResolvedAddress(
+                family=family,
+                socktype=socktype,
+                proto=proto,
+                sockaddr=pinned_sockaddr,
+                ip=str(ip),
+            )
+        )
+    if not addresses:
+        raise urllib.error.URLError(f"Could not resolve job URL hostname: {hostname}")
+    return tuple(addresses)
 
 
-class _PublicOnlyRedirectHandler(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        validate_public_job_url(newurl)
-        return super().redirect_request(req, fp, code, msg, headers, newurl)
+def _public_url_target(url: str) -> _PublicUrlTarget:
+    parsed, hostname, port = _parse_public_job_url(url)
+    return _PublicUrlTarget(
+        url=url,
+        parsed=parsed,
+        hostname=hostname,
+        port=port,
+        addresses=_resolve_public_addresses(hostname, port),
+    )
+
+
+def validate_public_job_url(url: str) -> None:
+    _public_url_target(url)
+
+
+def normalize_application_link(value: str, *, base_url: str = "") -> str:
+    """Return a canonical absolute HTTP(S) URL without performing another DNS lookup."""
+    candidate = str(value or "").strip()
+    if not candidate:
+        return ""
+    if base_url:
+        candidate = urllib.parse.urljoin(base_url, candidate)
+    try:
+        parsed, hostname, port = _parse_public_job_url(candidate)
+    except ValueError:
+        return ""
+    try:
+        literal_ip = ipaddress.ip_address(hostname)
+    except ValueError:
+        literal_ip = None
+    if literal_ip is not None and not literal_ip.is_global:
+        return ""
+    host = f"[{hostname}]" if ":" in hostname else hostname
+    default_port = 443 if parsed.scheme == "https" else 80
+    netloc = host if port == default_port else f"{host}:{port}"
+    return urllib.parse.urlunparse(
+        (
+            parsed.scheme.lower(),
+            netloc,
+            parsed.path or "/",
+            parsed.params,
+            parsed.query,
+            "",
+        )
+    )
+
+
+def _connect_pinned_socket(
+    addresses: tuple[_ResolvedAddress, ...],
+    timeout: float,
+) -> socket.socket:
+    """Connect only to addresses captured in the validated DNS snapshot."""
+    last_error: OSError | None = None
+    for address in addresses:
+        sock = socket.socket(address.family, address.socktype, address.proto)
+        try:
+            sock.settimeout(timeout)
+            sock.connect(address.sockaddr)
+            return sock
+        except OSError as exc:
+            last_error = exc
+            sock.close()
+    if last_error is not None:
+        raise last_error
+    raise OSError("No validated public address is available.")
+
+
+class _PinnedHTTPConnection(http.client.HTTPConnection):
+    def __init__(
+        self,
+        host: str,
+        port: int,
+        addresses: tuple[_ResolvedAddress, ...],
+        *,
+        timeout: float,
+    ) -> None:
+        super().__init__(host, port=port, timeout=timeout)
+        self._validated_addresses = addresses
+
+    def connect(self) -> None:
+        if self._tunnel_host:
+            raise OSError("Proxy tunnels are disabled for public job URL fetching.")
+        self.sock = _connect_pinned_socket(self._validated_addresses, self.timeout)
+
+
+class _PinnedHTTPSConnection(http.client.HTTPSConnection):
+    def __init__(
+        self,
+        host: str,
+        port: int,
+        addresses: tuple[_ResolvedAddress, ...],
+        *,
+        timeout: float,
+        context: ssl.SSLContext | None = None,
+    ) -> None:
+        super().__init__(host, port=port, timeout=timeout, context=context)
+        self._validated_addresses = addresses
+
+    def connect(self) -> None:
+        if self._tunnel_host:
+            raise OSError("Proxy tunnels are disabled for public job URL fetching.")
+        raw_socket = _connect_pinned_socket(self._validated_addresses, self.timeout)
+        try:
+            # The socket is IP-pinned; the URL hostname remains authoritative for SNI and verification.
+            self.sock = self._context.wrap_socket(raw_socket, server_hostname=self.host)
+        except Exception:
+            raw_socket.close()
+            raise
+
+
+def _connection_for_target(target: _PublicUrlTarget) -> http.client.HTTPConnection:
+    if target.parsed.scheme == "https":
+        return _PinnedHTTPSConnection(
+            target.hostname,
+            target.port,
+            target.addresses,
+            timeout=FETCH_TIMEOUT_SECONDS,
+        )
+    return _PinnedHTTPConnection(
+        target.hostname,
+        target.port,
+        target.addresses,
+        timeout=FETCH_TIMEOUT_SECONDS,
+    )
+
+
+def _request_target(parsed: urllib.parse.ParseResult) -> str:
+    path = urllib.parse.quote(
+        parsed.path or "/",
+        safe="/%:@!$&'()*+,;=-._~",
+    )
+    params = urllib.parse.quote(parsed.params, safe="%:@!$&'()*+,;=-._~")
+    query = urllib.parse.quote(parsed.query, safe="/?%:@!$&'()*+,;=-._~")
+    return urllib.parse.urlunparse(("", "", path, params, query, ""))
+
+
+def _host_header(target: _PublicUrlTarget) -> str:
+    hostname = f"[{target.hostname}]" if ":" in target.hostname else target.hostname
+    default_port = 443 if target.parsed.scheme == "https" else 80
+    return hostname if target.port == default_port else f"{hostname}:{target.port}"
+
+
+def _open_public_url(url: str, *, headers: dict[str, str]) -> _PublicResponse:
+    # Direct http.client connections intentionally ignore HTTP(S)_PROXY environment variables.
+    current_url = url
+    for redirect_count in range(MAX_FETCH_REDIRECTS + 1):
+        target = _public_url_target(current_url)
+        connection = _connection_for_target(target)
+        request_headers = {
+            **headers,
+            "Host": _host_header(target),
+            "User-Agent": USER_AGENT,
+        }
+        try:
+            connection.request("GET", _request_target(target.parsed), headers=request_headers)
+            response = connection.getresponse()
+        except (OSError, http.client.HTTPException) as exc:
+            connection.close()
+            raise urllib.error.URLError(exc) from exc
+        if response.status in REDIRECT_STATUSES:
+            status = response.status
+            response_headers = response.headers
+            location = response.headers.get("location", "").strip()
+            response.close()
+            connection.close()
+            if not location:
+                raise urllib.error.HTTPError(
+                    current_url,
+                    status,
+                    "Redirect response did not include a Location header.",
+                    response_headers,
+                    None,
+                )
+            if redirect_count >= MAX_FETCH_REDIRECTS:
+                raise urllib.error.HTTPError(
+                    current_url,
+                    status,
+                    "Job URL exceeded the redirect limit.",
+                    response_headers,
+                    None,
+                )
+            current_url = urllib.parse.urljoin(current_url, location)
+            continue
+        if response.status >= 400:
+            status = response.status
+            reason = response.reason
+            response_headers = response.headers
+            response.close()
+            connection.close()
+            raise urllib.error.HTTPError(current_url, status, reason, response_headers, None)
+        return _PublicResponse(connection=connection, response=response)
+    raise urllib.error.URLError("Job URL exceeded the redirect limit.")
+
+
+def _read_limited_response(response: http.client.HTTPResponse) -> bytes:
+    content_length = response.headers.get("content-length", "").strip()
+    try:
+        declared_length = int(content_length) if content_length else None
+    except ValueError:
+        declared_length = None
+    if declared_length is not None and declared_length > MAX_FETCH_BYTES:
+        raise ValueError("Job URL response is too large.")
+    body = response.read(MAX_FETCH_BYTES + 1)
+    if len(body) > MAX_FETCH_BYTES:
+        raise ValueError("Job URL response is too large.")
+    return body
 
 
 def _fetch(url: str) -> str:
-    validate_public_job_url(url)
-    request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-    opener = urllib.request.build_opener(_PublicOnlyRedirectHandler())
-    with opener.open(request, timeout=15) as response:
-        content_type = response.headers.get("content-type", "")
+    with _open_public_url(url, headers={}) as response:
+        content_type = response.headers.get("content-type", "").lower()
         if "text" not in content_type and "html" not in content_type and "xml" not in content_type:
             raise ValueError(f"Unsupported content type: {content_type}")
-        return response.read(2_000_000).decode("utf-8", errors="ignore")
+        return _read_limited_response(response).decode("utf-8", errors="ignore")
 
 
 def _fetch_json(url: str) -> dict:
-    validate_public_job_url(url)
-    request = urllib.request.Request(
+    with _open_public_url(
         url,
-        headers={
-            "User-Agent": USER_AGENT,
-            "Accept": "application/json",
-        },
-    )
-    opener = urllib.request.build_opener(_PublicOnlyRedirectHandler())
-    with opener.open(request, timeout=15) as response:
-        content_type = response.headers.get("content-type", "")
+        headers={"Accept": "application/json"},
+    ) as response:
+        content_type = response.headers.get("content-type", "").lower()
         if "json" not in content_type:
             raise ValueError(f"Unsupported ATS content type: {content_type}")
-        payload = json.loads(response.read(2_000_000).decode("utf-8", errors="ignore"))
+        payload = json.loads(_read_limited_response(response).decode("utf-8", errors="ignore"))
     return payload if isinstance(payload, dict) else {}
 
 
@@ -530,6 +871,11 @@ def _html_fragment_text(value: str) -> str:
 
 def _normalize_job_text(value: str) -> str:
     value = html.unescape(value).replace("\u00a0", " ")
+    value = re.sub(
+        r"(?is)<(script|style|noscript|template)\b[^>]*>.*?</\1\s*>",
+        " ",
+        value,
+    )
     value = re.sub(r"(?i)<br\s*/?>|</(?:p|div|li|h[1-6])>", "\n", value)
     value = re.sub(r"<[^>]+>", " ", value)
     value = re.sub(r"[\u2022\u25cf\u25aa\u25e6\u00b7]", "\n• ", value)
@@ -542,7 +888,21 @@ def _normalize_job_text(value: str) -> str:
     return "\n".join(output).strip()
 
 
-def _validate_job_content(role: str, text: str, confidence: float) -> None:
+def validate_pasted_job_description(text: str) -> None:
+    normalized = _normalize_job_text(text)
+    if not _has_meaningful_job_content(normalized):
+        raise ValueError(
+            "Paste a complete job description with readable requirements or responsibilities."
+        )
+
+
+def _validate_job_content(
+    role: str,
+    text: str,
+    confidence: float,
+    *,
+    source_kind: str = "url",
+) -> None:
     normalized_role = role.strip().lower()
     if normalized_role in {
         "",
@@ -555,23 +915,23 @@ def _validate_job_content(role: str, text: str, confidence: float) -> None:
         raise ValueError(
             "Could not identify the job title from this page. Add the title or paste the description."
         )
-    lower = text.lower()
-    meaningful = len(text) >= 180 and any(
-        hint in lower
-        for hint in (
-            "experience",
-            "qualification",
-            "requirement",
-            "responsibilit",
-            "what you",
-            "about the role",
-            "job description",
-        )
-    )
+    meaningful = _has_meaningful_job_content(text)
     if not meaningful or confidence < 0.5:
+        if source_kind == "pasted":
+            raise ValueError(
+                "Paste a complete job description with readable requirements or responsibilities."
+            )
         raise ValueError(
             "Could not extract a complete job posting from this URL. Paste the description and submit again."
         )
+
+
+def _has_meaningful_job_content(text: str) -> bool:
+    lower = text.lower()
+    readable_characters = sum(character.isalnum() for character in text)
+    return readable_characters >= MIN_MEANINGFUL_JOB_CHARACTERS and any(
+        hint in lower for hint in JOB_CONTENT_HINTS
+    )
 
 
 def _looks_like_page_failure(text: str) -> bool:

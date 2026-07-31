@@ -11,7 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from starlette.responses import JSONResponse
 
 from .api.routes import router
-from .config import get_settings
+from .config import get_settings, validate_security_settings
 from .database import init_db
 from .services.rate_limit import check_rate_limit
 from .services.telemetry import reset_trace_id, set_trace_id
@@ -23,6 +23,7 @@ TRACE_PATTERN = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    validate_security_settings(get_settings())
     init_db()
     yield
 
@@ -72,7 +73,7 @@ async def public_beta_rate_limit(request, call_next):
         )
         response = JSONResponse(
             {
-                "detail": "Unexpected server error. Try again or share the support code.",
+                "detail": "Unexpected server error. Try again and keep the reference code if the problem continues.",
                 "code": "SERVER_ERROR",
                 "trace_id": trace_id,
             },

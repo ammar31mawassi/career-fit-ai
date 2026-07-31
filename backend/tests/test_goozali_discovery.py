@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gzip
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from uuid import UUID
@@ -13,6 +14,7 @@ from app.services.goozali import (
     GoozaliFetchResult,
     GoozaliJob,
     GoozaliSourceError,
+    _decompress_gzip_limited,
     parse_shared_view,
 )
 from app.services.goozali_reader import GOOZALI_READER_VERSION, classify_goozali_job
@@ -21,6 +23,15 @@ from app.services.job_research import requirements_from_json
 
 
 BETA_USER = UUID("00000000-0000-0000-0000-000000000301")
+
+
+def test_gzip_expansion_is_bounded_before_materializing_the_payload():
+    compressed = gzip.compress(b"x" * 10_000)
+
+    with pytest.raises(GoozaliSourceError, match="size limit"):
+        _decompress_gzip_limited(compressed, 1_000)
+
+    assert _decompress_gzip_limited(gzip.compress(b"small"), 1_000) == b"small"
 
 
 def _engine():

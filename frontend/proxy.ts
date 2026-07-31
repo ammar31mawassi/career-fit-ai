@@ -14,9 +14,6 @@ function secure(response: NextResponse) {
 
 export async function proxy(request: NextRequest) {
   const pathname = request.nextUrl.pathname;
-  if (process.env.NEXT_PUBLIC_DESIGN_PREVIEW === "1" && pathname === "/") {
-    return secure(NextResponse.next());
-  }
   if (
     PUBLIC_PATHS.some((path) => pathname === path || pathname.startsWith(`${path}/`)) ||
     pathname.startsWith("/_next/")
@@ -27,7 +24,17 @@ export async function proxy(request: NextRequest) {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
   const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
   if (!url || !anonKey) {
-    return secure(NextResponse.next());
+    if (pathname.startsWith("/backend/")) {
+      return secure(
+        NextResponse.json(
+          { detail: "Authentication service is not configured." },
+          { status: 503 }
+        )
+      );
+    }
+    const loginUrl = new URL("/login", request.url);
+    loginUrl.searchParams.set("configuration_error", "1");
+    return secure(NextResponse.redirect(loginUrl));
   }
 
   let response = secure(NextResponse.next({ request }));

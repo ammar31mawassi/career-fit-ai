@@ -1,6 +1,9 @@
 # Goozali Discovery Beta
 
 Date: 2026-07-21
+Last reviewed: 2026-07-30
+Status: optional beta; disabled by default. The environment, scheduler, and
+monitoring checks in `ENVIRONMENT_AND_SCHEDULER_PREFLIGHT.md` are authoritative.
 
 ## Outcome
 
@@ -64,7 +67,13 @@ Do not reuse `CRON_SECRET` as the unsubscribe-signing secret. Keep all three bac
 
 ## Hourly Supabase Cron
 
-Apply migration `20260721_goozali_discovery_v16.sql`, then place the existing backend `CRON_SECRET` in Supabase Vault as `careerfit_cron_secret`. Do not paste the value into migration files.
+For an existing project, apply every unapplied migration in the explicit release
+order documented in `supabase/migrations/README.md` through database contract
+v22; historical filenames do not sort into release order. The original Goozali
+tables were introduced in `20260721_goozali_discovery_v16.sql`. Then place the
+existing backend
+`CRON_SECRET` in Supabase Vault as `careerfit_cron_secret`. Do not paste the
+value into migration files.
 
 Schedule the production worker:
 
@@ -92,6 +101,12 @@ select cron.schedule(
 ```
 
 Only enable `GOOZALI_DISCOVERY_ENABLED` after the migration, allowlist, endpoint deployment, and cron secret are ready.
+
+The cron/Vault setup remains a manual provider operation, not fully managed
+infrastructure as code. Treat the SQL above as reviewed setup intent and run the
+read-only drift checks in `ENVIRONMENT_AND_SCHEDULER_PREFLIGHT.md` for every
+release. Record exactly one active schedule and the presence—not the decrypted
+value—of the named Vault secret.
 
 ## Operational behavior
 

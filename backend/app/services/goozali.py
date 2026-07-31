@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import gzip
+import io
 import json
 import re
 import urllib.parse
@@ -248,11 +249,28 @@ def _request_bytes(
     if len(data) > limit:
         raise GoozaliSourceError("Goozali response exceeded the configured size limit.")
     if decompress_gzip and encoding == "gzip":
-        try:
-            data = gzip.decompress(data)
-        except OSError as exc:
-            raise GoozaliSourceError("Goozali response compression was invalid.") from exc
+        data = _decompress_gzip_limited(data, MAX_JSON_BYTES)
     return data
+
+
+def _decompress_gzip_limited(data: bytes, limit: int) -> bytes:
+    expanded = bytearray()
+    try:
+        with gzip.GzipFile(fileobj=io.BytesIO(data), mode="rb") as stream:
+            while True:
+                chunk = stream.read(min(64 * 1024, limit + 1 - len(expanded)))
+                if not chunk:
+                    break
+                expanded.extend(chunk)
+                if len(expanded) > limit:
+                    raise GoozaliSourceError(
+                        "Goozali response exceeded the configured size limit."
+                    )
+    except GoozaliSourceError:
+        raise
+    except (EOFError, OSError) as exc:
+        raise GoozaliSourceError("Goozali response compression was invalid.") from exc
+    return bytes(expanded)
 
 
 def _content_length(response: object) -> int | None:

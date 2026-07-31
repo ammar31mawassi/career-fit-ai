@@ -11,6 +11,7 @@ from app.models import (
     JobNotificationPreference,
     JobRecommendation,
     NotificationDelivery,
+    Profile,
     SharedJobCatalog,
 )
 from app.services.notifications import (
@@ -35,6 +36,12 @@ def test_email_queue_requires_cohort_consent_and_is_idempotent():
         session.add(catalog)
         session.add(JobDiscoveryBetaMember(user_id=USER, market_code="IL", active=True))
         session.add(JobNotificationPreference(user_id=USER, email_enabled=True))
+        session.add(Profile(
+            user_id=USER,
+            status="ready",
+            onboarding_completed=True,
+            recommendations_enabled=True,
+        ))
         session.commit()
         session.refresh(catalog)
         recommendation = JobRecommendation(
@@ -85,6 +92,12 @@ def test_delivery_sends_once_and_unsubscribe_preserves_auditable_consent_state()
         session.add(catalog)
         session.add(JobDiscoveryBetaMember(user_id=USER, market_code="IL", active=True))
         session.add(JobNotificationPreference(user_id=USER, email_enabled=True))
+        session.add(Profile(
+            user_id=USER,
+            status="ready",
+            onboarding_completed=True,
+            recommendations_enabled=True,
+        ))
         session.commit()
         session.refresh(catalog)
         recommendation = JobRecommendation(
@@ -128,6 +141,99 @@ def test_delivery_sends_once_and_unsubscribe_preserves_auditable_consent_state()
     assert len(sent) == 1
     assert preference is not None and not preference.email_enabled
     assert preference.unsubscribed_at is not None
+
+
+def test_paused_discovery_suppresses_a_queued_email_before_provider_call():
+    engine = _engine()
+    SQLModel.metadata.create_all(engine)
+    settings = SimpleNamespace(
+        notification_signing_secret="test-signing-secret",
+        public_api_url="https://api.example.com",
+    )
+    with Session(engine) as session:
+        catalog = SharedJobCatalog(content_hash="paused", active=True)
+        session.add(catalog)
+        session.add(JobDiscoveryBetaMember(user_id=USER, market_code="IL", active=True))
+        session.add(JobNotificationPreference(user_id=USER, email_enabled=True))
+        session.add(Profile(
+            user_id=USER,
+            status="ready",
+            onboarding_completed=True,
+            recommendations_enabled=False,
+        ))
+        session.commit()
+        session.refresh(catalog)
+        recommendation = JobRecommendation(
+            user_id=USER,
+            catalog_job_id=catalog.id or 0,
+            score=90,
+            confidence=0.9,
+            status="available",
+        )
+        session.add(recommendation)
+        session.commit()
+        session.refresh(recommendation)
+        delivery = NotificationDelivery(
+            user_id=USER,
+            recommendation_id=recommendation.id or 0,
+        )
+        session.add(delivery)
+        session.commit()
+        session.refresh(delivery)
+        called = False
+
+        def sender(**_kwargs):
+            nonlocal called
+            called = True
+            return "unexpected"
+
+        result = deliver_notification(
+            session,
+            delivery.id or 0,
+            settings=settings,
+            email_lookup=lambda *_args: "candidate@example.com",
+            sender=sender,
+        )
+
+    assert result.status == "suppressed"
+    assert not called
+
+
+def test_delivery_stops_before_a_sixth_provider_attempt():
+    engine = _engine()
+    SQLModel.metadata.create_all(engine)
+    settings = SimpleNamespace(
+        notification_signing_secret="test-signing-secret",
+        public_api_url="https://api.example.com",
+    )
+    with Session(engine) as session:
+        delivery = NotificationDelivery(
+            user_id=USER,
+            recommendation_id=123,
+            status="failed",
+            attempts=5,
+        )
+        session.add(delivery)
+        session.commit()
+        session.refresh(delivery)
+        called = False
+
+        def sender(**_kwargs):
+            nonlocal called
+            called = True
+            return "unexpected"
+
+        result = deliver_notification(
+            session,
+            delivery.id or 0,
+            settings=settings,
+            email_lookup=lambda *_args: "candidate@example.com",
+            sender=sender,
+        )
+
+    assert result.status == "failed"
+    assert result.error_code == "MAX_ATTEMPTS"
+    assert not called
 
 
 def test_email_below_high_confidence_threshold_is_not_queued():

@@ -9,5 +9,16 @@
       "suggestion": 2
     },
     "scope": "Full repository, deployment configuration, data model, tests, and read-only live product flows"
+  },
+  {
+    "date": "2026-07-30",
+    "mode": "Full Sweep",
+    "score": 73,
+    "findings": {
+      "critical": 0,
+      "warning": 5,
+      "suggestion": 2
+    },
+    "scope": "Whole repository remediation, migrations, deployment and operations controls, automated tests, and local production-build browser verification"
   }
 ]

@@ -1,19 +1,20 @@
 # Design QA — CareerFit readability and evidence remediation
 
 Date: 2026-07-17
+Status: historical point-in-time release record; not current release evidence
+
+The screenshots used for this 2026-07-17 review were stored in machine-local
+temporary/visualization directories and are not reproducible repository
+artifacts. Their former absolute paths have been removed. Re-run the documented
+fixtures and store durable CI/release artifacts before relying on these claims
+for a new release.
 
 ## Sources and test state
 
-- Defect evidence: `C:\Users\ammar\AppData\Local\Temp\codex-clipboard-f7c0a932-f600-47a1-8031-a86a77624e5a.png`
-- Defect evidence: `C:\Users\ammar\AppData\Local\Temp\codex-clipboard-c29cbfd3-dee1-4bf4-8893-3ef4e753fe51.png`
 - Local implementation: `http://127.0.0.1:3001/` with `NEXT_PUBLIC_DESIGN_PREVIEW=1`
 - Stress fixture: Application Engineering Student, 39% Weak fit, long location/work-mode metadata, mixed component coverage, and a missing must-have skill.
-- Desktop final: `C:\Users\ammar\.codex\visualizations\2026\07\17\019f7073-5050-7672-b7db-a9e074972bf9\careerfit-fix-final-desktop.png`
-- Mobile final: `C:\Users\ammar\.codex\visualizations\2026\07\17\019f7073-5050-7672-b7db-a9e074972bf9\careerfit-fix-mobile-inspector-final.png`
-- Interactive evidence state: `C:\Users\ammar\.codex\visualizations\2026\07\17\019f7073-5050-7672-b7db-a9e074972bf9\careerfit-fix-mobile-evidence.png`
-- Before/after comparison: `C:\Users\ammar\.codex\visualizations\2026\07\17\019f7073-5050-7672-b7db-a9e074972bf9\careerfit-fix-before-after.png`
-- Focused scanner comparison: `C:\Users\ammar\.codex\visualizations\2026\07\17\019f7073-5050-7672-b7db-a9e074972bf9\careerfit-fix-scan-card.png`
-- Focused score comparison: `C:\Users\ammar\.codex\visualizations\2026\07\17\019f7073-5050-7672-b7db-a9e074972bf9\careerfit-fix-inspector-header.png`
+- Historical screenshots covered desktop, mobile inspector/evidence, before/after,
+  scanner, and score-header states; they are not checked into this repository.
 
 ## Findings and resolution
 

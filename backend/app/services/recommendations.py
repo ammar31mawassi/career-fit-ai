@@ -1,15 +1,18 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import logging
 from collections.abc import Iterator
 from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
-from sqlalchemy import or_, text
+from sqlalchemy import or_, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
 from ..models import (
+    ExtractionMetric,
     Job,
     JobDiscoveryBetaMember,
     JobRecommendation,
@@ -30,6 +33,8 @@ from .scoring import get_match_scorer
 
 
 QUEUE_NAME = "careerfit_job_recommendations"
+QUEUE_VISIBILITY_SECONDS = 900
+QUEUE_MAX_ATTEMPTS = 3
 MAX_CANDIDATES_PER_JOB = 250
 MAX_DISCOVERY_BACKFILL_JOBS = 40
 MAX_DISCOVERY_SCORE_BUDGET = 250
@@ -41,6 +46,14 @@ DISCOVERY_SUGGESTION_CONFIDENCE = 0.45
 CALIBRATION_WINDOW_DAYS = 90
 CALIBRATION_MINIMUM_SAMPLE = 20
 CALIBRATION_BAND_MINIMUM_SAMPLE = 8
+CALIBRATION_REFRESH_INTERVAL = timedelta(hours=1)
+ACTIONABLE_RECOMMENDATION_STATUSES = ("available", "shadow_eligible")
+SCORABLE_RECOMMENDATION_STATUSES = (
+    "available",
+    "shadow_eligible",
+    "shadow_observation",
+)
+CALIBRATION_NEGATIVE_DISMISS_REASONS = {"wrong_field", "missing_skills"}
 DISMISS_REASONS = {
     "too_senior",
     "wrong_field",
@@ -50,10 +63,21 @@ DISMISS_REASONS = {
     "not_interested",
     "other",
 }
+PUBLIC_JOB_READER_STRATEGIES = frozenset(
+    {
+        "json_ld",
+        "json_ld+scoped_html",
+        "meta_description",
+        "scoped_html",
+        "workday_api",
+        "workday_api+scoped_html",
+    }
+)
+logger = logging.getLogger(__name__)
 
 
 def catalog_and_enqueue_job(session: Session, source_user_id: UUID, job: Job) -> SharedJobCatalog | None:
-    if job.status != "analyzed":
+    if not _has_public_job_provenance(session, source_user_id, job):
         return None
     requirements = requirements_from_json(job.requirements_json)
     fields = route_job_fields(job.role, requirements)
@@ -91,6 +115,34 @@ def catalog_and_enqueue_job(session: Session, source_user_id: UUID, job: Job) ->
     return catalog
 
 
+def _has_public_job_provenance(session: Session, source_user_id: UUID, job: Job) -> bool:
+    """Only redistribute descriptions that were read from a public job URL.
+
+    A URL on its own is not proof of public provenance because the scanner also
+    accepts pasted text alongside an optional application URL. ExtractionMetric
+    records which input actually supplied the description. Requiring the latest
+    successful metric also prevents a later pasted rescan from overwriting a
+    previously public catalog entry.
+    """
+    if job.id is None or job.status != "analyzed" or not job.source_url.strip():
+        return False
+    latest_metric = session.exec(
+        select(ExtractionMetric)
+        .where(
+            ExtractionMetric.user_id == source_user_id,
+            ExtractionMetric.workflow_type == "job_extraction",
+            ExtractionMetric.subject_type == "job",
+            ExtractionMetric.subject_id == job.id,
+        )
+        .order_by(ExtractionMetric.created_at.desc(), ExtractionMetric.id.desc())
+    ).first()
+    return bool(
+        latest_metric
+        and latest_metric.status == "succeeded"
+        and latest_metric.strategy in PUBLIC_JOB_READER_STRATEGIES
+    )
+
+
 def generate_shadow_recommendations(
     session: Session,
     catalog_job_id: int,
@@ -122,7 +174,6 @@ def generate_shadow_recommendations(
                 ProfileInterest.interest.in_(fields[:1] or ["__none__"]),
             )
             .distinct()
-            .limit(MAX_CANDIDATES_PER_JOB)
         )
         if catalog.source_name == "goozali":
             statement = statement.join(
@@ -134,11 +185,34 @@ def generate_shadow_recommendations(
             )
         if active_source_user_id is not None:
             statement = statement.where(Profile.user_id != active_source_user_id)
-        profiles = list(session.exec(statement).all())
+        profiles = _rotated_candidate_profiles(session, statement, catalog)
         run.candidate_count = len(profiles)
         scorer = get_match_scorer()
-        minimum_score = discovery_threshold_for_field(session, fields[0] if fields else "")
+        primary_field = fields[0] if fields else ""
+        _refresh_stale_field_calibration(session, primary_field)
+        minimum_score = discovery_threshold_for_field(session, primary_field)
+        candidate_user_ids = [profile.user_id for profile in profiles]
+        already_saved_users = {
+            user_id
+            for user_id in session.exec(
+                select(Job.user_id).where(
+                    Job.content_hash == catalog.content_hash,
+                    Job.user_id.in_(candidate_user_ids or [UUID(int=0)]),
+                )
+            ).all()
+        }
+        recommendations_by_key = {
+            (recommendation.user_id, recommendation.model_version): recommendation
+            for recommendation in session.exec(
+                select(JobRecommendation).where(
+                    JobRecommendation.catalog_job_id == catalog_job_id,
+                    JobRecommendation.user_id.in_(candidate_user_ids or [UUID(int=0)]),
+                )
+            ).all()
+        }
         for profile in profiles:
+            if profile.user_id in already_saved_users:
+                continue
             snapshot = candidate_snapshot(session, profile)
             scored, is_strong = _score_catalog_for_profile(
                 session,
@@ -149,6 +223,8 @@ def generate_shadow_recommendations(
                 fields,
                 scorer,
                 minimum_score=minimum_score,
+                already_saved=False,
+                recommendations_by_key=recommendations_by_key,
             )
             run.scored_count += int(scored)
             if is_strong:
@@ -160,11 +236,18 @@ def generate_shadow_recommendations(
         session.refresh(run)
         return run
     except Exception as exc:
-        run.status = "failed"
-        run.error = str(exc)[:500]
-        run.completed_at = _now()
-        session.add(run)
-        session.commit()
+        run_id = run.id
+        error = str(exc)[:500]
+        # A failed flush leaves SQLAlchemy/PostgreSQL in a failed transaction.
+        # Record the durable failure only after restoring a clean transaction.
+        session.rollback()
+        failed_run = session.get(RecommendationRun, run_id) if run_id is not None else None
+        if failed_run is not None:
+            failed_run.status = "failed"
+            failed_run.error = error
+            failed_run.completed_at = _now()
+            session.add(failed_run)
+            session.commit()
         raise
 
 
@@ -172,24 +255,63 @@ def process_one_queued_recommendation(session: Session) -> RecommendationRun | N
     if session.get_bind().dialect.name != "postgresql":
         return None
     row = session.exec(
-        text("select msg_id, message from pgmq.read(:queue_name, 180, 1)").bindparams(
-            queue_name=QUEUE_NAME
+        text(
+            "select msg_id, read_ct, message "
+            "from pgmq.read(:queue_name, :visibility_seconds, 1)"
+        ).bindparams(
+            queue_name=QUEUE_NAME,
+            visibility_seconds=QUEUE_VISIBILITY_SECONDS,
         )
     ).first()
     if row is None:
         return None
-    message = row[1] if isinstance(row[1], dict) else json.loads(str(row[1]))
-    run = generate_shadow_recommendations(
-        session,
-        int(message["catalog_job_id"]),
-        UUID(str(message["source_user_id"])) if message.get("source_user_id") else None,
-    )
-    session.exec(
-        text("select pgmq.archive(:queue_name, :msg_id)").bindparams(
-            queue_name=QUEUE_NAME,
-            msg_id=int(row[0]),
+    msg_id = int(row[0])
+    read_count = int(row[1])
+    try:
+        message = row[2] if isinstance(row[2], dict) else json.loads(str(row[2]))
+        if not isinstance(message, dict):
+            raise TypeError("Queue message must be an object.")
+        catalog_job_id = int(message["catalog_job_id"])
+        if catalog_job_id <= 0:
+            raise ValueError("Catalog job id must be positive.")
+        source_user_id = (
+            UUID(str(message["source_user_id"]))
+            if message.get("source_user_id")
+            else None
         )
-    )
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+        logger.warning("Archiving malformed recommendation queue message msg_id=%s", msg_id)
+        _archive_queue_message(session, msg_id)
+        session.commit()
+        return None
+
+    # Persist PGMQ's read count and visibility lease independently of the scoring
+    # transaction. Otherwise a pre-run validation failure can hot-loop forever.
+    session.commit()
+    try:
+        run = generate_shadow_recommendations(
+            session,
+            catalog_job_id,
+            source_user_id,
+        )
+    except Exception:
+        session.rollback()
+        if read_count >= QUEUE_MAX_ATTEMPTS:
+            logger.exception(
+                "Archiving recommendation queue message after %s attempts msg_id=%s",
+                read_count,
+                msg_id,
+            )
+            _archive_queue_message(session, msg_id)
+            session.commit()
+        else:
+            logger.exception(
+                "Recommendation queue message will retry attempt=%s msg_id=%s",
+                read_count,
+                msg_id,
+            )
+        return None
+    _archive_queue_message(session, msg_id)
     session.commit()
     return run
 
@@ -337,63 +459,157 @@ def update_recommendation(
     # Imported lazily because jobs catalogues completed scans into this module.
     from .jobs import job_output, save_match
 
+    if status not in {"dismissed", "saved"}:
+        raise ValueError("Unsupported recommendation action.")
+    if status == "dismissed" and dismiss_reason not in DISMISS_REASONS:
+        raise ValueError("Choose a valid dismissal reason.")
     recommendation = session.get(JobRecommendation, recommendation_id)
     if recommendation is None or recommendation.user_id != user_id:
         raise ValueError("Recommendation not found.")
     catalog = session.get(SharedJobCatalog, recommendation.catalog_job_id)
     if catalog is None or not catalog.active:
         raise ValueError("Recommended job is no longer available.")
-    if status not in {"dismissed", "saved"}:
-        raise ValueError("Unsupported recommendation action.")
-    if recommendation.status in {"dismissed", "saved"} and recommendation.status != status:
-        raise ValueError("Recommendation was already handled.")
-    if recommendation.status not in {"available", "shadow_eligible", status}:
-        raise ValueError("Recommendation is not actionable.")
-    if status == "dismissed":
-        if dismiss_reason not in DISMISS_REASONS:
-            raise ValueError("Choose a valid dismissal reason.")
-        recommendation.status = "dismissed"
+    try:
+        recommendation, transitioned = _transition_recommendation_action(
+            session,
+            recommendation,
+            status,
+        )
+        if status == "dismissed":
+            _record_recommendation_event(
+                session,
+                recommendation,
+                catalog,
+                "dismissed",
+                dismiss_reason=dismiss_reason or "",
+            )
+            session.commit()
+            return _recommendation_out(recommendation, catalog), None
+
+        if not transitioned and recommendation.materialized_job_id is not None:
+            job_id = recommendation.materialized_job_id
+            _record_recommendation_event(
+                session,
+                recommendation,
+                catalog,
+                "saved",
+                materialized_job_id=job_id,
+            )
+            session.commit()
+            return (
+                _recommendation_out(recommendation, catalog),
+                job_output(session, user_id, job_id),
+            )
+        if not transitioned:
+            # Heal a historical `saved` row without a materialized job while
+            # retaining the same row lock/conditional semantics as a new action.
+            claimed_missing_job = session.execute(
+                update(JobRecommendation)
+                .where(
+                    JobRecommendation.id == recommendation_id,
+                    JobRecommendation.user_id == user_id,
+                    JobRecommendation.status == "saved",
+                    JobRecommendation.materialized_job_id.is_(None),
+                )
+                .values(updated_at=_now())
+                .execution_options(synchronize_session=False)
+            )
+            if claimed_missing_job.rowcount != 1:
+                session.expire_all()
+                current = session.get(JobRecommendation, recommendation_id)
+                if (
+                    current is not None
+                    and current.user_id == user_id
+                    and current.status == "saved"
+                    and current.materialized_job_id is not None
+                ):
+                    session.commit()
+                    return (
+                        _recommendation_out(current, catalog),
+                        job_output(session, user_id, current.materialized_job_id),
+                    )
+                raise ValueError("Recommendation was already handled.")
+
+        job = session.exec(
+            select(Job).where(Job.user_id == user_id, Job.content_hash == catalog.content_hash)
+        ).first()
+        if job is None:
+            candidate_job = Job(user_id=user_id, content_hash=catalog.content_hash)
+            try:
+                with session.begin_nested():
+                    session.add(candidate_job)
+                    session.flush()
+            except IntegrityError:
+                job = session.exec(
+                    select(Job).where(
+                        Job.user_id == user_id,
+                        Job.content_hash == catalog.content_hash,
+                    )
+                ).one()
+            else:
+                job = candidate_job
+        job.source_url = catalog.source_url
+        job.application_link = catalog.application_link
+        job.company = catalog.company
+        job.role = catalog.role
+        job.location = catalog.location
+        job.description_text = catalog.description_text
+        job.source_title = catalog.role
+        job.source_confidence = catalog.source_confidence
+        job.requirements_json = _catalog_requirements(catalog).to_json()
+        job.status = "analyzed"
+        job.error = ""
+        job.updated_at = _now()
+        session.add(job)
+        session.flush()
+        profile = session.exec(select(Profile).where(Profile.user_id == user_id)).one()
+        save_match(session, user_id, profile, job, commit=False)
+        recommendation.materialized_job_id = job.id
         recommendation.updated_at = _now()
         session.add(recommendation)
         _record_recommendation_event(
             session,
             recommendation,
             catalog,
-            "dismissed",
-            dismiss_reason=dismiss_reason,
+            "saved",
+            materialized_job_id=job.id,
         )
-        refresh_field_calibration(session, _primary_field(recommendation))
         session.commit()
-        return _recommendation_out(recommendation, catalog), None
-    job = session.exec(
-        select(Job).where(Job.user_id == user_id, Job.content_hash == catalog.content_hash)
-    ).first()
-    if job is None:
-        job = Job(user_id=user_id, content_hash=catalog.content_hash)
-    job.source_url = catalog.source_url
-    job.application_link = catalog.application_link
-    job.company = catalog.company
-    job.role = catalog.role
-    job.location = catalog.location
-    job.description_text = catalog.description_text
-    job.source_title = catalog.role
-    job.source_confidence = catalog.source_confidence
-    job.requirements_json = _catalog_requirements(catalog).to_json()
-    job.status = "analyzed"
-    job.error = ""
-    job.updated_at = _now()
-    session.add(job)
-    session.flush()
-    profile = session.exec(select(Profile).where(Profile.user_id == user_id)).one()
-    save_match(session, user_id, profile, job, commit=False)
-    recommendation.status = "saved"
-    recommendation.materialized_job_id = job.id
-    recommendation.updated_at = _now()
-    session.add(recommendation)
-    _record_recommendation_event(session, recommendation, catalog, "saved", materialized_job_id=job.id)
-    refresh_field_calibration(session, _primary_field(recommendation))
-    session.commit()
-    return _recommendation_out(recommendation, catalog), job_output(session, user_id, job.id or 0)
+        return (
+            _recommendation_out(recommendation, catalog),
+            job_output(session, user_id, job.id or 0),
+        )
+    except Exception:
+        session.rollback()
+        raise
+
+
+def _transition_recommendation_action(
+    session: Session,
+    recommendation: JobRecommendation,
+    status: str,
+) -> tuple[JobRecommendation, bool]:
+    transitioned = session.execute(
+        update(JobRecommendation)
+        .where(
+            JobRecommendation.id == recommendation.id,
+            JobRecommendation.user_id == recommendation.user_id,
+            JobRecommendation.status.in_(ACTIONABLE_RECOMMENDATION_STATUSES),
+        )
+        .values(status=status, updated_at=_now())
+        .execution_options(synchronize_session=False)
+    )
+    session.expire_all()
+    current = session.get(JobRecommendation, recommendation.id)
+    if current is None or current.user_id != recommendation.user_id:
+        raise ValueError("Recommendation not found.")
+    if transitioned.rowcount == 1:
+        return current, True
+    if current.status in {"dismissed", "saved"} and current.status != status:
+        raise ValueError("Recommendation was already handled.")
+    if current.status != status:
+        raise ValueError("Recommendation is not actionable.")
+    return current, False
 
 
 def record_recommendation_view(
@@ -456,7 +672,6 @@ def record_recommendation_application(
         "applied",
         materialized_job_id=job_id,
     )
-    refresh_field_calibration(session, _primary_field(recommendation))
 
 
 def discovery_threshold_for_field(session: Session, career_field: str) -> float:
@@ -481,6 +696,7 @@ def refresh_field_calibration(
                 RecommendationEvent.recommendation_id,
                 RecommendationEvent.event_type,
                 RecommendationEvent.score,
+                RecommendationEvent.dismiss_reason,
             ).where(
                 RecommendationEvent.career_field == career_field,
                 RecommendationEvent.event_type.in_(["saved", "applied", "dismissed"]),
@@ -491,7 +707,14 @@ def refresh_field_calibration(
     # A recommendation may be saved and later applied. It still contributes one
     # positive example so frequent users do not receive extra voting weight.
     outcomes: dict[int, tuple[bool, float]] = {}
-    for recommendation_id, event_type, score in events:
+    for recommendation_id, event_type, score, dismiss_reason in events:
+        if (
+            event_type == "dismissed"
+            and dismiss_reason not in CALIBRATION_NEGATIVE_DISMISS_REASONS
+        ):
+            # Logistics and individual preference are not global relevance
+            # labels, so they must not suppress future exposure for a field.
+            continue
         is_positive = event_type in {"saved", "applied"}
         current = outcomes.get(recommendation_id)
         if current is None or (is_positive and not current[0]):
@@ -517,22 +740,54 @@ def refresh_field_calibration(
         ):
             minimum_score = 65.0
 
+    calibration_values = {
+        "minimum_score": minimum_score,
+        "sample_size": len(values),
+        "positive_count": positive_count,
+        "negative_count": len(values) - positive_count,
+        "possible_sample_size": len(possible),
+        "possible_positive_count": possible_positive_count,
+        "medium_sample_size": len(medium),
+        "medium_positive_count": medium_positive_count,
+        "window_days": CALIBRATION_WINDOW_DAYS,
+        "updated_at": _now(),
+    }
     calibration = session.get(RecommendationFieldCalibration, career_field)
     if calibration is None:
-        calibration = RecommendationFieldCalibration(career_field=career_field)
-    calibration.minimum_score = minimum_score
-    calibration.sample_size = len(values)
-    calibration.positive_count = positive_count
-    calibration.negative_count = len(values) - positive_count
-    calibration.possible_sample_size = len(possible)
-    calibration.possible_positive_count = possible_positive_count
-    calibration.medium_sample_size = len(medium)
-    calibration.medium_positive_count = medium_positive_count
-    calibration.window_days = CALIBRATION_WINDOW_DAYS
-    calibration.updated_at = _now()
+        candidate = RecommendationFieldCalibration(
+            career_field=career_field,
+            **calibration_values,
+        )
+        try:
+            with session.begin_nested():
+                session.add(candidate)
+                session.flush()
+        except IntegrityError:
+            calibration = session.get(RecommendationFieldCalibration, career_field)
+            if calibration is None:
+                raise
+        else:
+            return candidate
+    for key, value in calibration_values.items():
+        setattr(calibration, key, value)
     session.add(calibration)
     session.flush()
     return calibration
+
+
+def _refresh_stale_field_calibration(session: Session, career_field: str) -> None:
+    """Refresh feedback aggregates off the user-action request path."""
+    if not career_field or career_field == "unknown":
+        return
+    calibration = session.get(RecommendationFieldCalibration, career_field)
+    if calibration is None:
+        refresh_field_calibration(session, career_field)
+        return
+    updated_at = calibration.updated_at
+    if updated_at.tzinfo is None:
+        updated_at = updated_at.replace(tzinfo=timezone.utc)
+    if updated_at <= _now() - CALIBRATION_REFRESH_INTERVAL:
+        refresh_field_calibration(session, career_field)
 
 
 def _record_recommendation_event(
@@ -618,6 +873,15 @@ def enqueue_catalog_job(
     session.flush()
 
 
+def _archive_queue_message(session: Session, msg_id: int) -> None:
+    session.exec(
+        text("select pgmq.archive(:queue_name, :msg_id)").bindparams(
+            queue_name=QUEUE_NAME,
+            msg_id=msg_id,
+        )
+    )
+
+
 def _score_catalog_for_profile(
     session: Session,
     catalog: SharedJobCatalog,
@@ -629,13 +893,19 @@ def _score_catalog_for_profile(
     *,
     queue_email: bool = True,
     minimum_score: float | None = None,
+    already_saved: bool | None = None,
+    recommendations_by_key: dict[tuple[UUID, str], JobRecommendation] | None = None,
 ) -> tuple[bool, bool]:
-    already_saved = session.exec(
-        select(Job.id).where(
-            Job.user_id == profile.user_id,
-            Job.content_hash == catalog.content_hash,
+    if already_saved is None:
+        already_saved = (
+            session.exec(
+                select(Job.id).where(
+                    Job.user_id == profile.user_id,
+                    Job.content_hash == catalog.content_hash,
+                )
+            ).first()
+            is not None
         )
-    ).first()
     if already_saved or not _cheap_eligible(snapshot, requirements, catalog.location):
         return False, False
     result = scorer.score(
@@ -651,46 +921,87 @@ def _score_catalog_for_profile(
         else discovery_threshold_for_field(session, fields[0] if fields else "")
     )
     is_available = _is_available_recommendation(result, threshold)
-    recommendation = session.exec(
-        select(JobRecommendation).where(
-            JobRecommendation.user_id == profile.user_id,
-            JobRecommendation.catalog_job_id == (catalog.id or 0),
-            JobRecommendation.model_version == result.model_version,
-        )
-    ).first()
+    recommendation = (
+        recommendations_by_key.get((profile.user_id, result.model_version))
+        if recommendations_by_key is not None
+        else session.exec(
+            select(JobRecommendation).where(
+                JobRecommendation.user_id == profile.user_id,
+                JobRecommendation.catalog_job_id == (catalog.id or 0),
+                JobRecommendation.model_version == result.model_version,
+            )
+        ).first()
+    )
+    recommendation_values = {
+        "score": result.score,
+        "fit_level": result.fit_level,
+        "confidence": result.confidence,
+        "career_fields_json": json.dumps(fields),
+        "reasons_json": json.dumps(result.matched_evidence[:4]),
+        "match_snapshot_json": json.dumps(
+            {
+                "matched_evidence": result.matched_evidence,
+                "gaps": result.gaps,
+                "component_scores": result.component_scores,
+                "projects": result.projects,
+                "skill_order": result.skill_order,
+                "about_text": result.about_text,
+            },
+            sort_keys=True,
+        ),
+        "status": "available" if is_available else "shadow_observation",
+        "updated_at": _now(),
+    }
+    inserted = False
     if recommendation is None:
-        recommendation = JobRecommendation(
+        candidate = JobRecommendation(
             user_id=profile.user_id,
             catalog_job_id=catalog.id or 0,
             model_version=result.model_version,
+            **recommendation_values,
         )
-    terminal_status = recommendation.status in {"dismissed", "saved"}
-    recommendation.score = result.score
-    recommendation.fit_level = result.fit_level
-    recommendation.confidence = result.confidence
-    recommendation.career_fields_json = json.dumps(fields)
-    recommendation.reasons_json = json.dumps(result.matched_evidence[:4])
-    recommendation.match_snapshot_json = json.dumps(
-        {
-            "matched_evidence": result.matched_evidence,
-            "gaps": result.gaps,
-            "component_scores": result.component_scores,
-            "projects": result.projects,
-            "skill_order": result.skill_order,
-            "about_text": result.about_text,
-        },
-        sort_keys=True,
-    )
-    if not terminal_status:
-        recommendation.status = "available" if is_available else "shadow_observation"
-    recommendation.updated_at = _now()
-    session.add(recommendation)
-    session.flush()
-    if queue_email and catalog.source_name == "goozali" and _is_email_eligible(result):
+        try:
+            with session.begin_nested():
+                session.add(candidate)
+                session.flush()
+        except IntegrityError:
+            recommendation = session.exec(
+                select(JobRecommendation).where(
+                    JobRecommendation.user_id == profile.user_id,
+                    JobRecommendation.catalog_job_id == (catalog.id or 0),
+                    JobRecommendation.model_version == result.model_version,
+                )
+            ).one()
+        else:
+            recommendation = candidate
+            inserted = True
+            if recommendations_by_key is not None:
+                recommendations_by_key[(profile.user_id, result.model_version)] = recommendation
+            actionable_available = is_available
+    if not inserted:
+        if recommendation is None:
+            raise RuntimeError("Recommendation upsert did not return a row.")
+        updated = session.execute(
+            update(JobRecommendation)
+            .where(
+                JobRecommendation.id == recommendation.id,
+                JobRecommendation.status.in_(SCORABLE_RECOMMENDATION_STATUSES),
+            )
+            .values(**recommendation_values)
+            .execution_options(synchronize_session=False)
+        )
+        session.expire(recommendation)
+        actionable_available = updated.rowcount == 1 and is_available
+    if (
+        queue_email
+        and actionable_available
+        and catalog.source_name == "goozali"
+        and _is_email_eligible(result)
+    ):
         from .notifications import queue_recommendation_email
 
         queue_recommendation_email(session, recommendation)
-    return True, is_available and not terminal_status
+    return True, actionable_available
 
 
 def _json_list(value: str) -> list[str]:
@@ -770,6 +1081,36 @@ def _candidate_catalogs(
             return
         yield from batch
         offset += len(batch)
+
+
+def _rotated_candidate_profiles(
+    session: Session,
+    statement,
+    catalog: SharedJobCatalog,
+) -> list[Profile]:
+    """Select a stable, per-job rotation instead of an arbitrary first 250."""
+    digest = hashlib.sha256(
+        f"{catalog.id or 0}:{catalog.content_hash}".encode("utf-8")
+    ).digest()
+    rotation_point = UUID(bytes=digest[:16])
+    after = list(
+        session.exec(
+            statement.where(Profile.user_id >= rotation_point)
+            .order_by(Profile.user_id)
+            .limit(MAX_CANDIDATES_PER_JOB)
+        ).all()
+    )
+    remaining = MAX_CANDIDATES_PER_JOB - len(after)
+    if remaining <= 0:
+        return after
+    before = list(
+        session.exec(
+            statement.where(Profile.user_id < rotation_point)
+            .order_by(Profile.user_id)
+            .limit(remaining)
+        ).all()
+    )
+    return [*after, *before]
 
 
 def _catalog_fields(catalog: SharedJobCatalog, requirements: JobRequirements) -> list[str]:

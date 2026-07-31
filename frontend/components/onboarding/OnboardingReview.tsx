@@ -115,7 +115,7 @@ export function OnboardingReview({
                   >
                     <span className="fact-review-check" aria-hidden>{selected ? <Check size={13} /> : <X size={13} />}</span>
                     <span className="fact-review-copy">
-                      <span><small>{fact.fact_type.replaceAll("_", " ")}</small><strong>{fact.value}</strong></span>
+                      <span dir="auto"><small>{fact.fact_type.replaceAll("_", " ")}</small><strong>{fact.value}</strong></span>
                       <p>{fact.evidence || "Found in the uploaded evidence."}</p>
                       <span className="fact-confidence-copy">
                         <b>{Math.round(confidence * 100)}% extraction confidence</b>

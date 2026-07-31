@@ -1,4 +1,11 @@
 -r requirements.txt
-pytest>=8.3,<10.0
-httpx>=0.27,<1.0
 
+# Exact development/test additions. Runtime transitives are locked above.
+certifi==2026.6.17
+httpcore==1.0.9
+httpx==0.28.1
+iniconfig==2.3.0
+packaging==26.2
+pluggy==1.6.0
+Pygments==2.20.0
+pytest==9.1.1

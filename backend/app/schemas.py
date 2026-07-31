@@ -396,6 +396,7 @@ class JobCreateIn(BaseModel):
     company: str = Field(default="", max_length=160)
     role: str = Field(default="", max_length=220)
     description_text: str = Field(default="", max_length=70000)
+    contribute_public_posting: bool = False
 
     @model_validator(mode="after")
     def require_source(self):
@@ -423,7 +424,20 @@ class JobRequirementsReviewIn(BaseModel):
     @field_validator("must_have_skills", "preferred_skills", "nice_to_have_skills")
     @classmethod
     def clean_requirement_skills(cls, values: list[str]) -> list[str]:
-        return list(dict.fromkeys(value.strip().lower() for value in values if value.strip()))
+        cleaned: list[str] = []
+        seen: set[str] = set()
+        for value in values:
+            display = " ".join(value.split())
+            if not display:
+                continue
+            if len(display) > 160:
+                raise ValueError("Each requirement skill must be 160 characters or fewer.")
+            key = display.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            cleaned.append(display)
+        return cleaned
 
 
 class JobScanOut(BaseModel):

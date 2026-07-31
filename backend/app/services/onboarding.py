@@ -113,7 +113,7 @@ def cleanup_abandoned_onboarding(
         )
         try:
             for source in sources:
-                delete_private_file(source.storage_path)
+                delete_private_file(source.storage_path, expected_user_id=profile.user_id)
         except RuntimeError:
             session.rollback()
             continue

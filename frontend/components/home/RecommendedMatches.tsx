@@ -1,7 +1,8 @@
 "use client";
 
-import { useState, type CSSProperties } from "react";
+import { useRef, useState, type CSSProperties, type Dispatch, type SetStateAction } from "react";
 import { ArrowUpRight, BookmarkPlus, MapPin, Radar, RefreshCw, Sparkles, X } from "lucide-react";
+import { createKeyedOperationGate, withoutItemId } from "@/lib/ui-concurrency.mjs";
 import {
   recordRecommendationView,
   updateRecommendation,
@@ -9,6 +10,7 @@ import {
   type RecommendationDismissReason,
   type TrackedJob
 } from "@/lib/api";
+import { safeExternalWebUrl } from "@/lib/url-policy.mjs";
 
 const DISMISS_REASONS: Array<{ value: RecommendationDismissReason; label: string }> = [
   { value: "too_senior", label: "Too senior or experience mismatch" },
@@ -20,6 +22,8 @@ const DISMISS_REASONS: Array<{ value: RecommendationDismissReason; label: string
   { value: "other", label: "Something else" }
 ];
 
+type RecommendationOperation = "saving" | "dismissing";
+
 export function RecommendedMatches({
   items,
   loading,
@@ -30,41 +34,79 @@ export function RecommendedMatches({
 }: {
   items: JobRecommendation[];
   loading: boolean;
-  onItemsChange: (items: JobRecommendation[]) => void;
+  onItemsChange: Dispatch<SetStateAction<JobRecommendation[]>>;
   onSaved: (job: TrackedJob) => void;
   onRefresh?: () => void;
   showEmpty?: boolean;
 }) {
-  const [busyId, setBusyId] = useState<number | null>(null);
+  const [busyById, setBusyById] = useState<Partial<Record<number, RecommendationOperation>>>({});
+  const [errorsById, setErrorsById] = useState<Partial<Record<number, string>>>({});
   const [dismissId, setDismissId] = useState<number | null>(null);
-  const [error, setError] = useState("");
+  const operationGate = useRef(createKeyedOperationGate()).current;
+
+  function clearItemError(itemId: number) {
+    setErrorsById((current) => {
+      if (!(itemId in current)) return current;
+      const next = { ...current };
+      delete next[itemId];
+      return next;
+    });
+  }
+
+  function beginOperation(itemId: number, operation: RecommendationOperation) {
+    const token = operationGate.begin(itemId);
+    if (!token) return null;
+    clearItemError(itemId);
+    setBusyById((current) => ({ ...current, [itemId]: operation }));
+    return token;
+  }
+
+  function finishOperation(itemId: number, token: symbol) {
+    if (!operationGate.end(itemId, token)) return;
+    setBusyById((current) => {
+      if (!(itemId in current)) return current;
+      const next = { ...current };
+      delete next[itemId];
+      return next;
+    });
+  }
+
+  function setItemError(itemId: number, message: string) {
+    setErrorsById((current) => ({ ...current, [itemId]: message }));
+  }
 
   async function dismiss(item: JobRecommendation, reason: RecommendationDismissReason) {
-    setBusyId(item.id);
-    setError("");
+    const token = beginOperation(item.id, "dismissing");
+    if (!token) return;
     try {
       await updateRecommendation(item.id, "dismissed", reason);
-      onItemsChange(items.filter((candidate) => candidate.id !== item.id));
-      setDismissId(null);
+      if (!operationGate.isCurrent(item.id, token)) return;
+      onItemsChange((current) => withoutItemId(current, item.id));
+      setDismissId((current) => current === item.id ? null : current);
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Could not dismiss the recommendation.");
+      if (operationGate.isCurrent(item.id, token)) {
+        setItemError(item.id, caught instanceof Error ? caught.message : "Could not dismiss the recommendation.");
+      }
     } finally {
-      setBusyId(null);
+      finishOperation(item.id, token);
     }
   }
 
   async function save(item: JobRecommendation) {
-    setBusyId(item.id);
-    setError("");
+    const token = beginOperation(item.id, "saving");
+    if (!token) return;
     try {
       const result = await updateRecommendation(item.id, "saved");
-      onItemsChange(items.filter((candidate) => candidate.id !== item.id));
-      setDismissId(null);
+      if (!operationGate.isCurrent(item.id, token)) return;
+      onItemsChange((current) => withoutItemId(current, item.id));
+      setDismissId((current) => current === item.id ? null : current);
       if (result.job) onSaved(result.job);
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Could not save the recommendation.");
+      if (operationGate.isCurrent(item.id, token)) {
+        setItemError(item.id, caught instanceof Error ? caught.message : "Could not save the recommendation.");
+      }
     } finally {
-      setBusyId(null);
+      finishOperation(item.id, token);
     }
   }
 
@@ -80,7 +122,6 @@ export function RecommendedMatches({
         </div>
         <span className="recommendation-privacy">{items.length ? `${items.length} live ${items.length === 1 ? "match" : "matches"}` : "Private scoring"}</span>
       </div>
-      {error ? <div className="notice error compact-notice" role="alert">{error}</div> : null}
       <div className="recommendation-track">
         {loading && !items.length ? [0, 1, 2].map((item) => <div className="recommendation-card is-loading" key={item}><span className="skeleton-block wide" /><span className="skeleton-block text" /></div>) : null}
         {!loading && !items.length && showEmpty ? (
@@ -92,26 +133,37 @@ export function RecommendedMatches({
         ) : null}
         {items.map((item) => {
           const score = Math.max(0, Math.min(100, Math.round(item.score)));
-          const displayFit = item.fit_level === "Weak" ? "Possible" : item.fit_level;
+          const displayFit = item.fit_level;
+          const externalJobUrl = safeExternalWebUrl(item.application_link || item.source_url);
+          const sourceLabel = item.source_name === "goozali"
+            ? "Goozali"
+            : item.source_name === "community"
+              ? "Community scan"
+              : "Public job source";
           const explainingDismissal = dismissId === item.id;
+          const operation = busyById[item.id];
+          const itemError = errorsById[item.id];
           return (
-            <article className={`recommendation-card ${explainingDismissal ? "is-explaining-dismissal" : ""}`} key={item.id}>
+            <article aria-busy={Boolean(operation)} className={`recommendation-card ${explainingDismissal ? "is-explaining-dismissal" : ""}`} key={item.id}>
               <div
+                aria-label={`${score}% evidence alignment, ${displayFit} fit`}
                 className={`recommendation-score score-${item.fit_level.toLowerCase()}`}
                 style={{ "--score": `${score}%` } as CSSProperties}
+                title="Evidence alignment guidance, not a hiring-outcome prediction"
               >
                 <strong>{score}%</strong><span>{displayFit}</span>
               </div>
-              <div className="recommendation-copy">
+              <div className="recommendation-copy" dir="auto">
                 <span>{item.company || "Company not listed"}</span>
                 <h3>{item.role}</h3>
                 <small className="recommendation-reason-label">Why it fits</small>
                 <p>{item.reasons[0] || "Evidence alignment with your approved profile."}</p>
                 <div className="recommendation-tags">
-                  <span>{item.source_name === "goozali" ? "Goozali" : "Community scan"}</span>
+                  <span>{sourceLabel}</span>
                   {item.career_fields.slice(0, 1).map((field) => <span key={field}>{field}</span>)}
                   {item.location ? <span><MapPin size={11} aria-hidden />{item.location}</span> : null}
                 </div>
+                {itemError ? <div className="notice error compact-notice" role="alert">{itemError}</div> : null}
               </div>
               {explainingDismissal ? (
                 <div aria-labelledby={`dismiss-title-${item.id}`} className="recommendation-dismiss-panel" role="region">
@@ -123,7 +175,7 @@ export function RecommendedMatches({
                     <button
                       aria-label="Cancel dismissal"
                       className="icon-button"
-                      disabled={busyId === item.id}
+                      disabled={Boolean(operation)}
                       onClick={() => setDismissId(null)}
                       type="button"
                     >
@@ -133,7 +185,7 @@ export function RecommendedMatches({
                   <div className="recommendation-dismiss-reasons">
                     {DISMISS_REASONS.map((reason) => (
                       <button
-                        disabled={busyId === item.id}
+                        disabled={Boolean(operation)}
                         key={reason.value}
                         onClick={() => void dismiss(item, reason.value)}
                         type="button"
@@ -149,30 +201,30 @@ export function RecommendedMatches({
                     aria-expanded={false}
                     aria-label={`Dismiss ${item.role}`}
                     className="icon-button"
-                    disabled={busyId === item.id}
+                    disabled={Boolean(operation)}
                     onClick={() => {
                       setDismissId(item.id);
-                      setError("");
+                      clearItemError(item.id);
                     }}
                     title="Not for me"
                     type="button"
                   >
                     <X size={15} />
                   </button>
-                  {item.source_url || item.application_link ? (
+                  {externalJobUrl ? (
                     <a
                       className="button compact recommendation-open"
-                      href={item.application_link || item.source_url}
+                      href={externalJobUrl}
                       onClick={() => {
                         void recordRecommendationView(item.id).catch(() => undefined);
                       }}
-                      rel="noreferrer"
+                      rel="noreferrer noopener"
                       target="_blank"
                     >
                       View job <ArrowUpRight size={14} />
                     </a>
                   ) : null}
-                  <button className="button compact primary" disabled={busyId === item.id} onClick={() => void save(item)} type="button"><BookmarkPlus size={14} /> {busyId === item.id ? "Saving…" : "Save"}</button>
+                  <button className="button compact primary" disabled={Boolean(operation)} onClick={() => void save(item)} type="button"><BookmarkPlus size={14} /> {operation === "saving" ? "Saving…" : "Save"}</button>
                 </div>
               )}
             </article>

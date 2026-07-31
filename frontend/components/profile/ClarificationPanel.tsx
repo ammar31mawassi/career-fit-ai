@@ -16,6 +16,16 @@ export function ClarificationPanel({ questions, onAnswer }: { questions: Clarifi
 function QuestionRow({ question, onAnswer }: { question: ClarificationQuestion; onAnswer: (id: number, answer: string) => Promise<void> }) {
   const [answer, setAnswer] = useState(question.answer);
   const [saving, setSaving] = useState(false);
-  async function submit() { setSaving(true); try { await onAnswer(question.id, answer); } finally { setSaving(false); } }
-  return <div className="question-row"><span className={`chip ${question.status === "answered" ? "ready-chip" : ""}`}>{question.status}</span><strong>{question.question}</strong><textarea onChange={(event) => setAnswer(event.target.value)} value={answer} /><button className="button compact" disabled={saving || !answer.trim()} onClick={() => void submit()} type="button">Save answer</button></div>;
+  const answerId = `clarification-answer-${question.id}`;
+  async function submit() {
+    setSaving(true);
+    try {
+      await onAnswer(question.id, answer);
+    } catch {
+      // The parent restores server state and renders the actionable error.
+    } finally {
+      setSaving(false);
+    }
+  }
+  return <div className="question-row"><span className={`chip ${question.status === "answered" ? "ready-chip" : ""}`}>{question.status}</span><label htmlFor={answerId}><strong>{question.question}</strong></label><textarea id={answerId} onChange={(event) => setAnswer(event.target.value)} value={answer} /><button className="button compact" disabled={saving || !answer.trim()} onClick={() => void submit()} type="button">Save answer</button></div>;
 }

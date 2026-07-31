@@ -1,0 +1,5 @@
+# No ownership rule is active until real GitHub handles accept the roles in
+# docs/OWNERSHIP.md. Do not replace this with fake or unmonitored accounts.
+#
+# Release gate: assign owners, add path rules, enable required CODEOWNER review,
+# and verify the protection with a test pull request.

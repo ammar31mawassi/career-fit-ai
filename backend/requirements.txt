@@ -1,8 +1,30 @@
-fastapi>=0.115,<1.0
-uvicorn[standard]>=0.32,<1.0
-sqlmodel>=0.0.22,<0.1
-psycopg[binary]>=3.2,<4.0
-python-dotenv>=1.0,<2.0
-python-multipart>=0.0.20,<1.0
-pypdf>=5.0,<7.0
-PyJWT[crypto]>=2.10,<3.0
+# Exact production lock for Python 3.12.
+#
+# Direct constraints are maintained in pyproject.toml. Update this complete
+# closure only in a reviewed dependency PR; see docs/DEPENDENCY_POLICY.md.
+annotated-types==0.7.0
+anyio==4.14.1
+cffi==2.1.0
+click==8.4.2
+colorama==0.4.6
+cryptography==49.0.0
+fastapi==0.116.1
+greenlet==3.5.3
+h11==0.16.0
+idna==3.18
+psycopg[binary]==3.3.4
+psycopg-binary==3.3.4
+pycparser==3.0
+pydantic==2.13.4
+pydantic-core==2.46.4
+PyJWT[crypto]==2.13.0
+pypdf==6.14.2
+python-dotenv==1.2.2
+python-multipart==0.0.32
+SQLAlchemy==2.0.51
+sqlmodel==0.0.39
+starlette==0.47.3
+typing-extensions==4.15.0
+typing-inspection==0.4.2
+tzdata==2026.2
+uvicorn==0.35.0

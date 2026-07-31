@@ -3,7 +3,9 @@ import { createClient } from "@/lib/supabase/server";
 
 export async function POST() {
   const supabase = await createClient();
-  await supabase.auth.signOut();
+  const { error } = await supabase.auth.signOut({ scope: "local" });
+  if (error) {
+    redirect("/profile?signout_error=1");
+  }
   redirect("/login");
 }
-

@@ -20,9 +20,10 @@ export function Shell({ children }: { children: ReactNode }) {
 
   return (
     <div className="app-shell">
+      <a className="skip-link" href="#main-content">Skip to main content</a>
       <header className="app-header">
         <div className="app-header-inner">
-          <Link className="brand" href="/" prefetch={false} aria-label="CareerFit home">
+          <Link className="brand" href="/" aria-label="CareerFit home">
             <span className="brand-mark"><Waypoints size={18} aria-hidden /></span>
             <span className="brand-copy"><strong>CareerFit</strong><small>Evidence-led matching</small></span>
           </Link>
@@ -43,7 +44,6 @@ export function Shell({ children }: { children: ReactNode }) {
                   aria-current={active ? "page" : undefined}
                   className={active ? "active" : ""}
                   href={item.href}
-                  prefetch={false}
                   key={item.href}
                   onFocus={() => setIndicatorIndex(index)}
                   onMouseEnter={() => setIndicatorIndex(index)}
@@ -63,7 +63,7 @@ export function Shell({ children }: { children: ReactNode }) {
           </div>
         </div>
       </header>
-      <main className="workspace">{children}</main>
+      <main className="workspace" id="main-content" tabIndex={-1}>{children}</main>
     </div>
   );
 }

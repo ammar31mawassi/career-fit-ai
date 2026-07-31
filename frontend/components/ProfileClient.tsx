@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useMemo, useState, type FormEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type ChangeEvent, type FormEvent } from "react";
+import { useSearchParams } from "next/navigation";
 import { FileCheck2, FileText, Github, Linkedin, RefreshCw, Save, ScanText, Sparkles, UploadCloud } from "lucide-react";
 import { useAppData } from "@/components/AppDataProvider";
 import { LongTaskProgress } from "@/components/LongTaskProgress";
@@ -8,6 +9,7 @@ import { ClarificationPanel } from "@/components/profile/ClarificationPanel";
 import { AccountControls } from "@/components/profile/AccountControls";
 import { ProfileFactsEditor } from "@/components/profile/ProfileFactsEditor";
 import { recognizePdfInBrowser } from "@/lib/browserOcr";
+import { isAbortError, validateBrowserOcrFile } from "@/lib/browser-ocr-policy.mjs";
 import {
   addProfileFact,
   analyzeProfile,
@@ -23,6 +25,7 @@ import {
 } from "@/lib/api";
 
 export function ProfileClient() {
+  const searchParams = useSearchParams();
   const { profile, setProfile, profileLoading, dataError, refreshProfile } = useAppData();
   const [githubUrl, setGithubUrl] = useState("");
   const [linkedinText, setLinkedinText] = useState("");
@@ -32,10 +35,65 @@ export function ProfileClient() {
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
-  const [task, setTask] = useState<{ title: string; detail: string; progress: number; activeStep: number } | null>(null);
+  const [task, setTask] = useState<{
+    title: string;
+    detail: string;
+    progress: number;
+    activeStep: number;
+    canCancelOcr?: boolean;
+  } | null>(null);
+  const ocrController = useRef<AbortController | null>(null);
+  const profileMutationTail = useRef<Promise<void>>(Promise.resolve());
+  const sourceDraftDirty = Boolean(
+    cvFile
+    || linkedinFile
+    || (profile && (
+      githubUrl !== profile.github_url
+      || linkedinText !== profile.linkedin_text
+      || manualInfo !== profile.manual_info
+    ))
+  );
+
+  function serializeProfileMutation<T>(operation: () => Promise<T>): Promise<T> {
+    const result = profileMutationTail.current.then(operation, operation);
+    profileMutationTail.current = result.then(() => undefined, () => undefined);
+    return result;
+  }
 
   async function refresh() {
-    await refreshProfile();
+    if (sourceDraftDirty && !window.confirm("Discard unsaved source changes and reload the server profile?")) return;
+    setError("");
+    try {
+      await refreshProfile();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Could not refresh your profile.");
+    }
+  }
+
+  function selectCvFile(event: ChangeEvent<HTMLInputElement>) {
+    const selected = event.currentTarget.files?.[0] ?? null;
+    if (!selected) {
+      setCvFile(null);
+      return;
+    }
+    const policy = validateBrowserOcrFile(selected);
+    if (!policy.ok) {
+      setCvFile(null);
+      setError(policy.error);
+      event.currentTarget.value = "";
+      return;
+    }
+    setError("");
+    setCvFile(selected);
+  }
+
+  function cancelLocalOcr() {
+    const controller = ocrController.current;
+    if (!controller || controller.signal.aborted) return;
+    controller.abort();
+    setTask((current) => current
+      ? { ...current, detail: "Stopping local OCR…" }
+      : current);
   }
 
   useEffect(() => {
@@ -44,6 +102,8 @@ export function ProfileClient() {
     setLinkedinText(profile.linkedin_text);
     setManualInfo(profile.manual_info);
   }, [profile?.id, profile?.github_url, profile?.linkedin_text, profile?.manual_info]);
+
+  useEffect(() => () => ocrController.current?.abort(), []);
 
   const openQuestions = useMemo(
     () => (profile?.questions ?? []).filter((question) => question.status === "open"),
@@ -58,9 +118,11 @@ export function ProfileClient() {
     setMessage("");
     setTask({ title: "Updating your evidence", detail: "Preparing your selected sources", progress: 4, activeStep: 0 });
     try {
-      const saved = await persistSources();
+      const { profile: saved, ocrDisclosure } = await persistSources();
       setProfile(saved);
-      setMessage("Sources saved. Run analysis to rebuild the profile.");
+      setMessage(
+        `Sources saved. Run analysis to rebuild the profile.${ocrDisclosure ? ` ${ocrDisclosure}` : ""}`
+      );
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not save profile sources.");
     } finally {
@@ -74,20 +136,26 @@ export function ProfileClient() {
     setError("");
     setMessage("");
     setTask({ title: "Rebuilding your profile", detail: "Preparing your selected sources", progress: 4, activeStep: 0 });
+    let sourcesSaved = false;
+    let ocrDisclosure = "";
     try {
-      await persistSources();
+      ({ ocrDisclosure } = await persistSources());
+      sourcesSaved = true;
       setTask({ title: "Rebuilding your profile", detail: "Extracting facts and checking supporting evidence", progress: 82, activeStep: 3 });
       const result = await analyzeProfile();
       setProfile(result.profile);
       if (result.profile.status === "ready") {
-        setMessage(`Profile analyzed: ${result.generated_facts} facts, ${result.open_questions} open questions.`);
+        setMessage(
+          `Profile analyzed: ${result.generated_facts} facts, ${result.open_questions} open questions.${ocrDisclosure ? ` ${ocrDisclosure}` : ""}`
+        );
       } else if (result.profile.status === "cv_unreadable") {
         setError("We couldn't recover enough text from this CV. Try a clearer scan or upload a text-based PDF, then analyze again.");
       } else {
         setError("Profile analysis did not finish. Review your sources and analyze again.");
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not analyze profile.");
+      const detail = err instanceof Error ? err.message : "Could not analyze profile.";
+      setError(sourcesSaved ? `Your sources were saved, but analysis did not finish: ${detail}` : detail);
     } finally {
       setSaving(false);
       setTask(null);
@@ -95,49 +163,97 @@ export function ProfileClient() {
   }
 
   async function persistSources() {
-    if (cvFile) {
-      const selectedCv = cvFile;
-      setTask((current) => ({
-        title: current?.title || "Updating your evidence",
-        detail: "Securely uploading your CV",
-        progress: 8,
-        activeStep: 0
-      }));
-      let uploaded = await uploadCv(selectedCv);
-      setProfile(uploaded);
-      const uploadedCv = uploaded.sources.find((source) => source.source_type === "cv");
-      if (uploadedCv?.ocr_recommended) {
-        setTask((current) => ({ ...(current || { title: "Reading your CV", activeStep: 1 }), detail: "Preparing private browser OCR", progress: 18, activeStep: 1 }));
-        const ocr = await recognizePdfInBrowser(selectedCv, (update) => {
-          setTask((current) => ({
-            title: current?.title || "Reading your CV",
-            detail: update.detail,
-            progress: 18 + update.progress * 46,
-            activeStep: 1
-          }));
-        });
-        uploaded = await saveBrowserOcr(ocr);
+    const selectedCv = cvFile;
+    const selectedLinkedin = linkedinFile;
+    const sourceSnapshot = { githubUrl, linkedinText, manualInfo };
+    const completedSteps: string[] = [];
+    let ocrDisclosure = "";
+    try {
+      if (selectedCv) {
+        const filePolicy = validateBrowserOcrFile(selectedCv);
+        if (!filePolicy.ok) throw new Error(filePolicy.error);
+        setTask((current) => ({
+          title: current?.title || "Updating your evidence",
+          detail: "Securely uploading your CV",
+          progress: 8,
+          activeStep: 0
+        }));
+        let uploaded = await uploadCv(selectedCv);
+        completedSteps.push("CV upload");
         setProfile(uploaded);
+        setCvFile(null);
+        const uploadedCv = uploaded.sources.find((source) => source.source_type === "cv");
+        if (uploadedCv?.ocr_recommended) {
+          const controller = new AbortController();
+          ocrController.current = controller;
+          setTask((current) => ({
+            ...(current || { title: "Reading your CV", activeStep: 1 }),
+            detail: "Preparing private browser OCR",
+            progress: 18,
+            activeStep: 1,
+            canCancelOcr: true
+          }));
+          let ocr;
+          try {
+            ocr = await recognizePdfInBrowser(selectedCv, (update) => {
+              setTask((current) => ({
+                title: current?.title || "Reading your CV",
+                detail: update.detail,
+                progress: 18 + update.progress * 46,
+                activeStep: 1,
+                canCancelOcr: true
+              }));
+            }, controller.signal);
+          } finally {
+            if (ocrController.current === controller) ocrController.current = null;
+            setTask((current) => current
+              ? { ...current, canCancelOcr: false }
+              : current);
+          }
+          controller.signal.throwIfAborted();
+          ocrDisclosure = ocr.coverage_detail;
+          uploaded = await saveBrowserOcr(ocr);
+          completedSteps.push("CV text recovery");
+          setProfile(uploaded);
+        }
       }
-      setCvFile(null);
-    }
-    if (linkedinFile) {
+      if (selectedLinkedin) {
+        setTask((current) => ({
+          title: current?.title || "Updating your evidence",
+          detail: "Reading your LinkedIn export",
+          progress: 66,
+          activeStep: 2
+        }));
+        await uploadLinkedInPdf(selectedLinkedin);
+        completedSteps.push("LinkedIn PDF");
+        setLinkedinFile(null);
+      }
       setTask((current) => ({
         title: current?.title || "Updating your evidence",
-        detail: "Reading your LinkedIn export",
-        progress: 66,
+        detail: "Connecting CV, GitHub, LinkedIn, and your notes",
+        progress: 72,
         activeStep: 2
       }));
-      await uploadLinkedInPdf(linkedinFile);
-      setLinkedinFile(null);
+      const saved = await saveProfileSources({
+        github_url: sourceSnapshot.githubUrl,
+        linkedin_text: sourceSnapshot.linkedinText,
+        manual_info: sourceSnapshot.manualInfo
+      });
+      completedSteps.push("profile text sources");
+      return { profile: saved, ocrDisclosure };
+    } catch (caught) {
+      if (isAbortError(caught)) {
+        throw new Error(
+          "Local OCR stopped. Your CV upload is stored, but recovered OCR text and the remaining source changes were not saved."
+        );
+      }
+      const detail = caught instanceof Error ? caught.message : "The source update failed.";
+      if (!completedSteps.length) throw caught;
+      throw new Error(
+        `${completedSteps.join(", ")} saved; the remaining source update did not finish: ${detail}`
+        + (ocrDisclosure ? ` ${ocrDisclosure}` : "")
+      );
     }
-    setTask((current) => ({
-      title: current?.title || "Updating your evidence",
-      detail: "Connecting CV, GitHub, LinkedIn, and your notes",
-      progress: 72,
-      activeStep: 2
-    }));
-    return saveProfileSources({ github_url: githubUrl, linkedin_text: linkedinText, manual_info: manualInfo });
   }
 
   async function reviewFact(fact: ProfileFact, value: string, status: ProfileFact["review_status"]) {
@@ -152,13 +268,14 @@ export function ProfileClient() {
       } : item)
     } : current);
     try {
-      setProfile(await updateProfileFact(fact.id, value, status));
+      setProfile(await serializeProfileMutation(() => updateProfileFact(fact.id, value, status)));
     } catch (caught) {
       setProfile((current) => current ? {
         ...current,
         facts: current.facts.map((item) => item.id === fact.id ? fact : item)
       } : current);
       setError(caught instanceof Error ? `Fact update was rolled back: ${caught.message}` : "Fact update was rolled back.");
+      throw caught;
     }
   }
 
@@ -175,7 +292,7 @@ export function ProfileClient() {
       } : fact)
     } : current);
     try {
-      setProfile(await bulkUpdateProfileFacts(ids, status));
+      setProfile(await serializeProfileMutation(() => bulkUpdateProfileFacts(ids, status)));
     } catch (caught) {
       setProfile((current) => current ? {
         ...current,
@@ -196,7 +313,7 @@ export function ProfileClient() {
       questions: current.questions.filter((question) => question.id !== questionId)
     } : current);
     try {
-      setProfile(await answerProfileQuestion(questionId, value));
+      setProfile(await serializeProfileMutation(() => answerProfileQuestion(questionId, value)));
     } catch (caught) {
       if (originalQuestion) {
         setProfile((current) => current ? {
@@ -207,6 +324,7 @@ export function ProfileClient() {
         } : current);
       }
       setError(caught instanceof Error ? `Answer was restored: ${caught.message}` : "Answer was restored because it could not be saved.");
+      throw caught;
     }
   }
 
@@ -229,13 +347,14 @@ export function ProfileClient() {
       }]
     } : current);
     try {
-      setProfile(await addProfileFact(type, value));
+      setProfile(await serializeProfileMutation(() => addProfileFact(type, value)));
     } catch (caught) {
       setProfile((current) => current ? {
         ...current,
         facts: current.facts.filter((item) => item.id !== temporaryId)
       } : current);
       setError(caught instanceof Error ? `New fact was removed: ${caught.message}` : "New fact was removed because it could not be saved.");
+      throw caught;
     }
   }
 
@@ -245,6 +364,7 @@ export function ProfileClient() {
         <LongTaskProgress
           activeStep={task.activeStep}
           detail={task.detail}
+          onCancel={task.canCancelOcr ? cancelLocalOcr : undefined}
           progress={task.progress}
           steps={[
             { label: "Secure upload" },
@@ -261,11 +381,12 @@ export function ProfileClient() {
           <h1>Your evidence,<br /><em>under your control.</em></h1>
           <p>Connect your sources, review every extracted fact, and shape the profile used for job matching.</p>
         </div>
-        <button className="button quiet" onClick={() => void refresh()} type="button"><RefreshCw size={16} /> Refresh</button>
+        <button className="button quiet" disabled={profileLoading || saving} onClick={() => void refresh()} type="button"><RefreshCw size={16} /> Refresh</button>
       </header>
 
-      {error || dataError ? <div className="notice error">{error || dataError}</div> : null}
-      {message ? <div className="notice success">{message}</div> : null}
+      {searchParams.get("signout_error") === "1" ? <div className="notice error" role="alert">CareerFit could not end this session. Your work is unchanged; try signing out again.</div> : null}
+      {error || dataError ? <div className="notice error" role="alert">{error || dataError}</div> : null}
+      {message ? <div className="notice success" role="status">{message}</div> : null}
 
       <section className="profile-status">
         <div className={profile?.status === "ready" ? "status-card ready" : "status-card warning"}>
@@ -290,22 +411,25 @@ export function ProfileClient() {
           <div>
             <span className="section-kicker">Source studio</span>
             <h2>Build your evidence base</h2>
-            <p>Your CV anchors the profile. LinkedIn, GitHub, and notes add context and confidence.</p>
+            <p>
+              Your CV anchors the profile. CareerFit stores selected sources and extracted text;
+              scanned page images render locally when browser OCR is needed.
+            </p>
           </div>
           <FileText size={20} aria-hidden />
         </div>
         <div className="form-grid source-upload-grid">
           <label className={`source-upload-card ${cvFile || cvSource ? "has-file" : ""}`}>
-            <input accept="application/pdf" onChange={(event) => setCvFile(event.target.files?.[0] ?? null)} type="file" />
+            <input accept="application/pdf" disabled={saving || profileLoading} onChange={selectCvFile} type="file" />
             <span className="source-upload-icon">{cvFile || cvSource ? <FileCheck2 size={20} /> : <UploadCloud size={20} />}</span>
             <span className="source-upload-copy">
               <strong>{cvFile?.name || cvSource?.title || "Choose your CV PDF"}</strong>
-              <small>{cvSource ? "Ready · choose another file to replace it" : "Required to unlock matching"}</small>
+              <small>{cvSource ? "Stored · choose another PDF to replace it" : "Required · PDF up to 5 MB"}</small>
             </span>
             <span className="source-upload-action">{cvFile || cvSource ? "Replace" : "Browse"}</span>
           </label>
           <label className={`source-upload-card ${linkedinFile || linkedinSource ? "has-file" : ""}`}>
-            <input accept="application/pdf" onChange={(event) => setLinkedinFile(event.target.files?.[0] ?? null)} type="file" />
+            <input accept="application/pdf" disabled={saving || profileLoading} onChange={(event) => setLinkedinFile(event.target.files?.[0] ?? null)} type="file" />
             <span className="source-upload-icon">{linkedinFile || linkedinSource ? <FileCheck2 size={20} /> : <UploadCloud size={20} />}</span>
             <span className="source-upload-copy">
               <strong>{linkedinFile?.name || linkedinSource?.title || "Add a LinkedIn PDF"}</strong>
@@ -325,15 +449,15 @@ export function ProfileClient() {
         ) : null}
         <label className="field">
           <span><Github size={14} /> GitHub URL or username (optional)</span>
-          <input onChange={(event) => setGithubUrl(event.target.value)} placeholder="https://github.com/username" value={githubUrl} />
+          <input disabled={saving || profileLoading} onChange={(event) => setGithubUrl(event.target.value)} placeholder="https://github.com/username" value={githubUrl} />
         </label>
         <label className="field">
           <span><Linkedin size={14} /> LinkedIn profile text (optional)</span>
-          <textarea onChange={(event) => setLinkedinText(event.target.value)} placeholder="Paste profile About, Experience, Education, Projects..." value={linkedinText} />
+          <textarea disabled={saving || profileLoading} onChange={(event) => setLinkedinText(event.target.value)} placeholder="Paste profile About, Experience, Education, Projects..." value={linkedinText} />
         </label>
         <label className="field">
           <span>Extra typed info (optional)</span>
-          <textarea onChange={(event) => setManualInfo(event.target.value)} placeholder="Availability, preferred roles, location constraints, missing projects, experience details..." value={manualInfo} />
+          <textarea disabled={saving || profileLoading} onChange={(event) => setManualInfo(event.target.value)} placeholder="Availability, preferred roles, location constraints, missing projects, experience details..." value={manualInfo} />
         </label>
         <div className="form-actions">
           <button className="button" disabled={saving} type="submit"><Save size={16} /> Save sources</button>

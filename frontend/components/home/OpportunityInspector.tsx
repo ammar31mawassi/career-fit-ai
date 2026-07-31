@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import {
+  ArrowRight,
   BriefcaseBusiness,
   Check,
   CheckCircle2,
@@ -19,6 +20,7 @@ import {
   Zap
 } from "lucide-react";
 import { RequirementReviewPanel } from "@/components/home/RequirementReviewPanel";
+import { safeExternalWebUrl } from "@/lib/url-policy.mjs";
 import {
   formatDate,
   rematchJob,
@@ -45,6 +47,7 @@ export function OpportunityInspector({
   loading,
   detailError,
   onJobChanged,
+  onRetry,
   profileUpdatedAt
 }: {
   summary: TrackedJobSummary | null;
@@ -52,16 +55,32 @@ export function OpportunityInspector({
   loading: boolean;
   detailError: string;
   onJobChanged: (job: TrackedJob) => void;
+  onRetry?: () => void;
   profileUpdatedAt: string | null;
 }) {
   const [saving, setSaving] = useState(false);
   const [rematching, setRematching] = useState(false);
   const [statusError, setStatusError] = useState("");
   const [activeTab, setActiveTab] = useState<InspectorTab>("evidence");
+  const tabRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const match = job?.match ?? null;
+  const externalJobUrl = safeExternalWebUrl(job?.application_link || job?.source_url || "");
   const matchStale = Boolean(match && profileUpdatedAt && new Date(profileUpdatedAt).getTime() > new Date(match.analyzed_at).getTime());
 
   useEffect(() => setActiveTab("evidence"), [job?.id]);
+
+  function moveTabFocus(currentIndex: number, key: string) {
+    let nextIndex = currentIndex;
+    if (key === "ArrowRight") nextIndex = (currentIndex + 1) % inspectorTabs.length;
+    else if (key === "ArrowLeft") nextIndex = (currentIndex - 1 + inspectorTabs.length) % inspectorTabs.length;
+    else if (key === "Home") nextIndex = 0;
+    else if (key === "End") nextIndex = inspectorTabs.length - 1;
+    else return;
+    const next = inspectorTabs[nextIndex];
+    if (!next) return;
+    setActiveTab(next.id);
+    tabRefs.current[nextIndex]?.focus();
+  }
 
   async function setStatus(status: JobStatus) {
     if (!job?.match || job.match.status === status) return;
@@ -102,14 +121,21 @@ export function OpportunityInspector({
 
   if (!summary) return <aside className="panel opportunity-inspector"><div className="empty compact">Select a saved opportunity to inspect its evidence.</div></aside>;
   if (loading && !job) return <aside className="panel opportunity-inspector"><InspectorSkeleton summary={summary} /></aside>;
-  if (detailError) return <aside className="panel opportunity-inspector"><div className="notice error">{detailError}</div></aside>;
+  if (detailError) return (
+    <aside className="panel opportunity-inspector">
+      <div className="notice error action-notice" role="alert">
+        <span>{detailError}</span>
+        {onRetry ? <button className="button compact" onClick={onRetry} type="button"><RefreshCw size={14} /> Retry details</button> : null}
+      </div>
+    </aside>
+  );
   if (!job) return <aside className="panel opportunity-inspector"><InspectorSkeleton summary={summary} /></aside>;
 
   return (
     <aside className="panel opportunity-inspector">
       <div className="inspector-hero">
         <span className="inspector-company-mark" aria-hidden><BriefcaseBusiness size={24} strokeWidth={1.65} /></span>
-        <div className="inspector-copy">
+        <div className="inspector-copy" dir="auto">
           <h2>{job.role}</h2>
           <p>{job.company}</p>
           <div className="inspector-meta">
@@ -121,8 +147,8 @@ export function OpportunityInspector({
         <div className="inspector-side">
           <ScoreSummary confidence={match?.confidence ?? 0} score={match?.score ?? 0} fit={match?.fit_level ?? "Weak"} />
           <div className="inspector-actions">
-            {job.source_url || job.application_link ? (
-              <a className="button compact quiet" href={job.application_link || job.source_url} rel="noreferrer" target="_blank">
+            {externalJobUrl ? (
+              <a className="button compact quiet" href={externalJobUrl} rel="noreferrer noopener" target="_blank">
                 <ExternalLink size={14} /> Open job
               </a>
             ) : null}
@@ -144,15 +170,23 @@ export function OpportunityInspector({
       {statusError ? <div className="notice error compact-notice" role="alert">{statusError}</div> : null}
 
       <div aria-label="Opportunity details" className="inspector-tabs" role="tablist">
-        {inspectorTabs.map((tab) => (
+        {inspectorTabs.map((tab, index) => (
           <button
-            aria-controls={`inspector-panel-${tab.id}`}
+            aria-controls="inspector-panel"
             aria-selected={activeTab === tab.id}
             className={activeTab === tab.id ? "active" : ""}
             id={`inspector-tab-${tab.id}`}
             key={tab.id}
             onClick={() => setActiveTab(tab.id)}
+            onKeyDown={(event) => {
+              if (["ArrowRight", "ArrowLeft", "Home", "End"].includes(event.key)) {
+                event.preventDefault();
+                moveTabFocus(index, event.key);
+              }
+            }}
+            ref={(node) => { tabRefs.current[index] = node; }}
             role="tab"
+            tabIndex={activeTab === tab.id ? 0 : -1}
             type="button"
           >
             {tab.label}
@@ -160,7 +194,7 @@ export function OpportunityInspector({
         ))}
       </div>
 
-      <div aria-labelledby={`inspector-tab-${activeTab}`} className="inspector-tab-panel" id={`inspector-panel-${activeTab}`} role="tabpanel">
+      <div aria-labelledby={`inspector-tab-${activeTab}`} className="inspector-tab-panel" id="inspector-panel" role="tabpanel" tabIndex={0}>
         {!match ? (
           <section className="analysis-section"><h3>Match unavailable</h3><p>{job.error || "This job has not produced a match yet."}</p></section>
         ) : activeTab === "evidence" ? (
@@ -178,7 +212,7 @@ export function OpportunityInspector({
 }
 
 function EvidenceMap({ job, match, onReviewAdvice }: { job: TrackedJob; match: JobMatch; onReviewAdvice: () => void }) {
-  const strengths = useMemo(() => {
+  const strengths = useMemo<EvidencePoint[]>(() => {
     const components = Object.entries(match.component_scores)
       .filter(([, value]) => value > 0)
       .sort((a, b) => b[1] - a[1])
@@ -204,15 +238,15 @@ function EvidenceMap({ job, match, onReviewAdvice }: { job: TrackedJob; match: J
       id: `strength-fallback-${index}`,
       kind: "strength" as const,
       name,
-      score: 50,
-      band: "Supported",
-      tone: "supported",
-      reason: "This skill appears in the role and has supporting profile evidence, but this scan did not return a component-level percentage.",
+      band: "Not scored",
+      tone: "unscored",
+      reason: "This skill appears in the role, but this scan did not return a trustworthy component-level score.",
       profileEvidence: matchingItems(match.matched_evidence, evidenceTokens(name)),
       roleEvidence: requirementEvidence(job, evidenceTokens(name))
     }));
   }, [job, match.component_scores, match.matched_evidence]);
-  const gap = match.missing_blockers[0] || match.gaps[0] || null;
+  const allGaps = Array.from(new Set([...match.missing_blockers, ...match.gaps])).filter(Boolean);
+  const gap = allGaps[0] || null;
   const gapIsCritical = Boolean(match.missing_blockers[0]);
   const overallPoint = useMemo<EvidencePoint>(() => ({
     id: "overall",
@@ -252,7 +286,7 @@ function EvidenceMap({ job, match, onReviewAdvice }: { job: TrackedJob; match: J
               <li className={selectedId === item.id ? "selected" : ""} key={item.id}>
                 <button aria-controls="evidence-explainer" aria-pressed={selectedId === item.id} onClick={() => setSelectedId(item.id)} type="button">
                   <span className={`evidence-status ${item.tone}`}><EvidenceStatusIcon score={item.score} /></span>
-                  <span><strong>{item.name}</strong><small>{item.score}% evidence coverage</small></span>
+                  <span><strong>{item.name}</strong><small>{typeof item.score === "number" ? `${item.score}% evidence coverage` : "Component not scored"}</small></span>
                   <em className={item.tone}>{item.band}</em>
                 </button>
               </li>
@@ -263,6 +297,12 @@ function EvidenceMap({ job, match, onReviewAdvice }: { job: TrackedJob; match: J
               <CircleAlert size={17} /><span><strong>{gapPoint.name}</strong><small>{gapPoint.band}</small></span>
             </button>
           ) : <div className="evidence-clear"><CheckCircle2 size={17} /><span>No critical gaps detected</span></div>}
+          {allGaps.length > 1 ? (
+            <div className="evidence-source">
+              <strong>Other gaps considered</strong>
+              <ul>{allGaps.slice(1).map((item) => <li key={item}>{item}</li>)}</ul>
+            </div>
+          ) : null}
         </section>
 
         <div aria-label="Interactive match evidence map" className="evidence-orbit" role="group">
@@ -273,7 +313,7 @@ function EvidenceMap({ job, match, onReviewAdvice }: { job: TrackedJob; match: J
           {strengths.map((item, index) => (
             <button
               aria-controls="evidence-explainer"
-              aria-label={`${item.name}: ${item.score}% evidence coverage, ${item.band}. Show evidence`}
+              aria-label={`${item.name}: ${typeof item.score === "number" ? `${item.score}% evidence coverage` : "component not scored"}, ${item.band}. Show evidence`}
               aria-pressed={selectedId === item.id}
               className={`orbit-node node-${index + 1} ${item.tone}${selectedId === item.id ? " selected" : ""}`}
               key={item.id}
@@ -302,7 +342,7 @@ function EvidenceMap({ job, match, onReviewAdvice }: { job: TrackedJob; match: J
       <section className="resume-action">
         <span><Sparkles size={20} /></span>
         <div><strong>Resume action</strong><p>{match.resume_advice.projects[0] || match.resume_advice.about_text || "Bring your strongest matching evidence into the first third of your resume."}</p></div>
-        <button className="button resume-action-button" onClick={onReviewAdvice} type="button">Review advice <ExternalLink size={14} /></button>
+        <button className="button resume-action-button" onClick={onReviewAdvice} type="button">Review advice <ArrowRight size={14} /></button>
       </section>
     </>
   );
@@ -380,7 +420,7 @@ function AgentWorkflowTrace({ run }: { run: AgentRun | null }) {
 
 function ScoreSummary({ score, fit, confidence }: { score: number; fit: "Strong" | "Medium" | "Weak"; confidence: number }) {
   const rounded = Math.round(score);
-  const ref = useRef<HTMLDivElement>(null);
+  const ref = useRef<HTMLOutputElement>(null);
   const [visible, setVisible] = useState(false);
   useEffect(() => {
     const node = ref.current;
@@ -389,7 +429,7 @@ function ScoreSummary({ score, fit, confidence }: { score: number; fit: "Strong"
     observer.observe(node);
     return () => observer.disconnect();
   }, []);
-  return <div aria-label={`${rounded}% match, ${fit} fit, ${Math.round(confidence * 100)}% confidence`} ref={ref} className={`score-summary ${fit.toLowerCase()}${visible ? " visible" : ""}`}><strong>{rounded}%</strong><span>{fit} fit</span><small>{Math.round(confidence * 100)}% confidence</small></div>;
+  return <output aria-label={`${rounded}% evidence alignment, ${fit} fit, ${Math.round(confidence * 100)}% confidence`} ref={ref} className={`score-summary ${fit.toLowerCase()}${visible ? " visible" : ""}`} title="Evidence alignment guidance, not a prediction of an interview or offer"><strong>{rounded}%</strong><span>{fit} fit</span><small>Evidence alignment · {Math.round(confidence * 100)}% confidence</small></output>;
 }
 
 type EvidencePoint = {
@@ -408,7 +448,8 @@ function EvidenceSource({ title, items, empty }: { title: string; items: string[
   return <div className="evidence-source"><strong>{title}</strong>{items.length ? <ul>{items.slice(0, 3).map((item) => <li key={item}>{item}</li>)}</ul> : <p>{empty}</p>}</div>;
 }
 
-function EvidenceStatusIcon({ score }: { score: number }) {
+function EvidenceStatusIcon({ score }: { score?: number }) {
+  if (typeof score !== "number") return <CircleDot size={15} />;
   if (score >= 75) return <Check size={15} strokeWidth={3} />;
   if (score >= 50) return <CheckCircle2 size={15} />;
   if (score >= 25) return <CircleDot size={15} />;

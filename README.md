@@ -45,24 +45,32 @@ Out of scope for v1: broad Goozali rollout, Gmail, WhatsApp, automatic applicati
 - [Future product and engineering proposals](docs/CEO_FUTURE_IMPROVEMENTS.md)
 - [UI, performance, and agent research plan](docs/CAREERFIT_UI_AI_RESEARCH_PLAN.md)
 - [Goozali discovery beta operations](docs/GOOZALI_DISCOVERY_BETA.md)
+- [Environment and scheduler preflight](docs/ENVIRONMENT_AND_SCHEDULER_PREFLIGHT.md)
+- [Release and rollback](docs/RELEASE_AND_ROLLBACK.md)
+- [Production operations and incident response](docs/OPERATIONS_RUNBOOK.md)
+- [Data retention inventory](docs/DATA_RETENTION_INVENTORY.md)
+- [Dependency and build policy](docs/DEPENDENCY_POLICY.md)
+- [Ownership register](docs/OWNERSHIP.md)
 
 ## Local development
+
+Use Python `3.12.13`, Node `22.16.0`, and npm `10.9.2` as recorded in the
+repository toolchain files.
 
 Backend:
 
 ```powershell
 cd backend
 python -m venv .venv
-.\.venv\Scripts\activate
-pip install -r requirements-dev.txt
-uvicorn app.main:app --reload --port 8000
+.\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
+.\.venv\Scripts\python.exe -m uvicorn app.main:app --reload --port 8000
 ```
 
 Frontend:
 
 ```powershell
 cd frontend
-npm install
+npm ci
 npm run dev
 ```
 
@@ -71,19 +79,27 @@ Open `http://localhost:3000`.
 ## Supabase setup
 
 1. Create a Supabase project.
-2. Run `supabase/schema.sql` in the Supabase SQL editor.
+2. Run `supabase/schema.sql` in the Supabase SQL editor. This is the current
+   fresh-install snapshot through database contract v22.
 3. Create a private Storage bucket named `profile-documents`.
 4. Keep email/password Auth enabled. The app signup route creates confirmed beta users and applies signup rate limits.
 5. Put the project URL, anon key, service role key, backend API key, and allowed origins in Vercel/local env.
 6. Set a sensitive `CRON_SECRET` on the backend deployment so Vercel Cron can recover abandoned queue work.
 
-For an existing database, apply the SQL files in `supabase/migrations/` in filename order instead of rerunning the base schema.
+For an existing database, never rerun the base schema. Apply only migrations
+that environment has not recorded, following the release order and naming
+policy in [`supabase/migrations/README.md`](supabase/migrations/README.md).
 
 Use the API project URL in the form `https://<project-ref>.supabase.co`, not the Supabase dashboard URL. Use a publishable key for browser/auth requests and a secret key only in backend/Vercel environment variables.
 
+Contract v21 makes private document mutations backend/service-role mediated and
+does not grant authenticated browsers direct Storage writes or deletes. Before
+production, run the synthetic service-role and application Storage lifecycle
+checks in the [environment preflight](docs/ENVIRONMENT_AND_SCHEDULER_PREFLIGHT.md).
+
 The current Hobby deployment invokes recovery once per day because Hobby Cron does not support minute-level schedules. Normal scans start immediately from the authenticated client and continue in the persisted queue; move the same worker endpoint to a more frequent schedule when scan volume or the hosting plan increases.
 
-Hourly Goozali discovery uses Supabase Cron to call the secured `/api/workers/discover` endpoint. The source is disabled by default and requires an explicit UUID allowlist. Email is a second opt-in and remains unavailable until Resend, a verified sender, and a dedicated unsubscribe-signing secret are configured. See the operations guide before enabling either path.
+Hourly Goozali discovery uses Supabase Cron to call the secured `/api/workers/discover` endpoint. The source is disabled by default and requires an explicit UUID allowlist. Email is a second opt-in and remains unavailable until Resend, a verified sender, and a dedicated unsubscribe-signing secret are configured. Follow the [scheduler preflight](docs/ENVIRONMENT_AND_SCHEDULER_PREFLIGHT.md) before enabling either path.
 
 The same secured worker removes unfinished onboarding preview data after 24 hours, in batches of five per invocation. Completed profiles are never included in this cleanup.
 
@@ -97,15 +113,31 @@ To inspect onboarding drop-off without exporting user IDs or CV-derived content,
 
 The match percentage measures evidence alignment with a saved job posting. It is not a prediction that the user will receive an interview or offer. Confidence is reported separately and missing information creates clarification questions.
 
-For local development without Supabase configured, the backend accepts a development fallback user, but the frontend auth screens need Supabase env values.
+For local development without Supabase configured, the backend accepts a
+development fallback user only when both `APP_ENV=development` and
+`ENABLE_DEV_AUTH=true` are set. Production rejects the development-auth flag at
+startup. The frontend auth screens still need Supabase environment values.
 
 ## Verification
 
 ```powershell
 cd backend
-.\.venv\Scripts\python.exe -m pytest
+.\.venv\Scripts\python.exe -m pip check
+.\.venv\Scripts\python.exe -m pytest -q
 
 cd ..\frontend
+npm test
 npm run typecheck
 npm run build
+npm audit --omit=dev --audit-level=high
+
+cd ..\ocr-worker
+..\backend\.venv\Scripts\python.exe -m pytest -q
+
+cd ..
+backend\.venv\Scripts\python.exe supabase\tests\run_postgres_security_tests.py
 ```
+
+CI repeats these checks from exact locks and preserves dependency/SBOM evidence.
+See [release and rollback](docs/RELEASE_AND_ROLLBACK.md) for production
+promotion, migration, Storage, and rollback requirements.

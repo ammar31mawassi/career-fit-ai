@@ -3,18 +3,20 @@
 import Link from "next/link";
 import { useState } from "react";
 import { Download, ShieldCheck, Trash2 } from "lucide-react";
-import { clearWorkspaceCaches } from "@/components/AppDataProvider";
 import { deleteCareerFitAccount, getAccountExport } from "@/lib/api";
+import { clearWorkspaceCaches } from "@/lib/workspace-session";
 
 export function AccountControls() {
   const [exporting, setExporting] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [confirmation, setConfirmation] = useState("");
   const [error, setError] = useState("");
+  const [status, setStatus] = useState("");
 
   async function exportData() {
     setExporting(true);
     setError("");
+    setStatus("");
     try {
       const data = await getAccountExport();
       const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
@@ -26,6 +28,7 @@ export function AccountControls() {
       anchor.click();
       anchor.remove();
       window.setTimeout(() => URL.revokeObjectURL(url), 0);
+      setStatus("Your data export download has started.");
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Could not export your data.");
     } finally {
@@ -37,6 +40,7 @@ export function AccountControls() {
     if (confirmation !== "DELETE") return;
     setDeleting(true);
     setError("");
+    setStatus("");
     try {
       await deleteCareerFitAccount();
       clearWorkspaceCaches();
@@ -56,6 +60,7 @@ export function AccountControls() {
         <ShieldCheck size={20} aria-hidden />
       </div>
       {error ? <div className="notice error compact-notice" role="alert">{error}</div> : null}
+      {status ? <div className="notice compact-notice" role="status">{status}</div> : null}
       <div className="account-actions">
         <button className="button" disabled={exporting || deleting} onClick={() => void exportData()} type="button"><Download size={15} /> {exporting ? "Preparing export…" : "Export my data"}</button>
         <Link className="button quiet" href="/privacy">Read the privacy policy</Link>

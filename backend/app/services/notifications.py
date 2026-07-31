@@ -5,6 +5,7 @@ import hashlib
 import hmac
 import html
 import json
+import logging
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -20,6 +21,7 @@ from ..models import (
     JobNotificationPreference,
     JobRecommendation,
     NotificationDelivery,
+    Profile,
     SharedJobCatalog,
 )
 from ..schemas import NotificationPreferenceOut
@@ -28,6 +30,9 @@ from ..schemas import NotificationPreferenceOut
 QUEUE_NAME = "careerfit_email_notifications"
 EMAIL_SCORE_THRESHOLD = 76.0
 EMAIL_CONFIDENCE_THRESHOLD = 0.55
+MAX_DELIVERY_ATTEMPTS = 5
+SENDING_LEASE_SECONDS = 5 * 60
+logger = logging.getLogger("careerfit.notifications")
 
 
 class NotificationDeliveryError(RuntimeError):
@@ -113,9 +118,36 @@ def process_one_queued_email(session: Session) -> NotificationDelivery | None:
     ).first()
     if row is None:
         return None
-    message = row[1] if isinstance(row[1], dict) else json.loads(str(row[1]))
-    delivery = deliver_notification(session, int(message["delivery_id"]))
-    if delivery.status in {"sent", "suppressed"}:
+    try:
+        message = row[1] if isinstance(row[1], dict) else json.loads(str(row[1]))
+        delivery_id = int(message["delivery_id"])
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+        logger.error("notification_queue_message_invalid msg_id=%s", int(row[0]))
+        session.exec(
+            text("select pgmq.archive(:queue_name, :msg_id)").bindparams(
+                queue_name=QUEUE_NAME,
+                msg_id=int(row[0]),
+            )
+        )
+        session.commit()
+        return None
+    try:
+        delivery = deliver_notification(session, delivery_id)
+    except ValueError:
+        logger.error(
+            "notification_queue_delivery_missing msg_id=%s delivery_id=%s",
+            int(row[0]),
+            delivery_id,
+        )
+        session.exec(
+            text("select pgmq.archive(:queue_name, :msg_id)").bindparams(
+                queue_name=QUEUE_NAME,
+                msg_id=int(row[0]),
+            )
+        )
+        session.commit()
+        return None
+    if delivery.status in {"sent", "suppressed"} or delivery.attempts >= MAX_DELIVERY_ATTEMPTS:
         session.exec(
             text("select pgmq.archive(:queue_name, :msg_id)").bindparams(
                 queue_name=QUEUE_NAME,
@@ -140,6 +172,22 @@ def deliver_notification(
         raise ValueError("Notification delivery not found.")
     if delivery.status == "sent":
         return delivery
+    age_seconds = _age_seconds(delivery.updated_at)
+    if delivery.status == "sending" and age_seconds < SENDING_LEASE_SECONDS:
+        return delivery
+    if delivery.attempts >= MAX_DELIVERY_ATTEMPTS:
+        delivery.status = "failed"
+        delivery.error_code = "MAX_ATTEMPTS"
+        delivery.error = "Delivery stopped after repeated failures."
+        delivery.updated_at = _now()
+        session.add(delivery)
+        session.commit()
+        session.refresh(delivery)
+        return delivery
+    if delivery.status == "failed":
+        retry_after = min(60 * 60, 30 * (2 ** max(0, delivery.attempts - 1)))
+        if age_seconds < retry_after:
+            return delivery
     recommendation = session.get(JobRecommendation, delivery.recommendation_id)
     catalog = (
         session.get(SharedJobCatalog, recommendation.catalog_job_id)
@@ -155,6 +203,7 @@ def deliver_notification(
         or recommendation.score < EMAIL_SCORE_THRESHOLD
         or recommendation.confidence < EMAIL_CONFIDENCE_THRESHOLD
         or not _eligible_member(session, delivery.user_id)
+        or not _discovery_enabled(session, delivery.user_id)
         or preference is None
         or not preference.email_enabled
     ):
@@ -162,6 +211,7 @@ def deliver_notification(
         delivery.updated_at = _now()
         session.add(delivery)
         session.commit()
+        session.refresh(delivery)
         return delivery
 
     delivery.status = "sending"
@@ -188,9 +238,15 @@ def deliver_notification(
         delivery.error = ""
         delivery.sent_at = _now()
     except Exception as exc:
+        logger.exception(
+            "notification_delivery_failed delivery_id=%s attempt=%s error_code=%s",
+            delivery.id or 0,
+            delivery.attempts,
+            type(exc).__name__[:100],
+        )
         delivery.status = "failed"
         delivery.error_code = type(exc).__name__[:100]
-        delivery.error = _safe_error(exc)
+        delivery.error = "Email delivery failed and will be retried safely."
     delivery.updated_at = _now()
     session.add(delivery)
     session.commit()
@@ -220,6 +276,17 @@ def _eligible_member(session: Session, user_id: UUID) -> bool:
             JobDiscoveryBetaMember.user_id == user_id,
             JobDiscoveryBetaMember.market_code == "IL",
             JobDiscoveryBetaMember.active.is_(True),
+        )
+    ).first() is not None
+
+
+def _discovery_enabled(session: Session, user_id: UUID) -> bool:
+    return session.exec(
+        select(Profile.id).where(
+            Profile.user_id == user_id,
+            Profile.status == "ready",
+            Profile.onboarding_completed.is_(True),
+            Profile.recommendations_enabled.is_(True),
         )
     ).first() is not None
 
@@ -363,6 +430,11 @@ def _verify_unsubscribe_token(token: str, settings: Settings) -> UUID | None:
 def _safe_error(exc: Exception) -> str:
     message = " ".join(str(exc).split())
     return (message or type(exc).__name__)[:300]
+
+
+def _age_seconds(value: datetime) -> float:
+    timestamp = value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+    return max(0.0, (_now() - timestamp).total_seconds())
 
 
 def _now() -> datetime:

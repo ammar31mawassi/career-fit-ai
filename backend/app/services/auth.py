@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hmac
 import json
 import urllib.error
 import urllib.request
@@ -16,11 +17,22 @@ from ..config import get_settings
 
 def require_internal_key(x_internal_api_key: str | None = Header(default=None)) -> None:
     settings = get_settings()
-    if settings.app_env != "production":
+    if settings.app_env not in {"staging", "production"}:
         return
     if not settings.backend_api_key:
         raise HTTPException(status_code=503, detail="Backend API key is not configured.")
-    if x_internal_api_key != settings.backend_api_key:
+    if not x_internal_api_key:
+        raise HTTPException(status_code=401, detail="Unauthorized.")
+    supplied = x_internal_api_key.encode("utf-8")
+    candidates = (
+        settings.backend_api_key,
+        getattr(settings, "backend_api_key_next", None),
+    )
+    accepted = False
+    for candidate in candidates:
+        if candidate:
+            accepted |= hmac.compare_digest(supplied, candidate.encode("utf-8"))
+    if not accepted:
         raise HTTPException(status_code=401, detail="Unauthorized.")
 
 
@@ -31,20 +43,23 @@ def current_user_id(
     x_dev_user_id: str | None = Header(default=None),
 ) -> UUID:
     settings = get_settings()
-    if settings.app_env in {"development", "test"} and x_dev_user_id:
+    dev_auth_enabled = (
+        settings.app_env in {"development", "test"} and settings.dev_auth_enabled
+    )
+    if dev_auth_enabled and x_dev_user_id:
         try:
             return UUID(x_dev_user_id)
         except ValueError:
             return uuid5(NAMESPACE_URL, f"career-fit-dev:{x_dev_user_id}")
-    if settings.app_env == "development" and not authorization:
+    if dev_auth_enabled and not authorization:
         return UUID("00000000-0000-0000-0000-000000000001")
     if not authorization or not authorization.lower().startswith("bearer "):
         raise HTTPException(status_code=401, detail="Authentication required.")
     token = authorization.split(" ", 1)[1].strip()
     if not settings.supabase_url or not settings.supabase_anon_key:
-        if settings.app_env == "production":
-            raise HTTPException(status_code=503, detail="Supabase auth is not configured.")
-        return UUID("00000000-0000-0000-0000-000000000001")
+        if dev_auth_enabled:
+            return UUID("00000000-0000-0000-0000-000000000001")
+        raise HTTPException(status_code=503, detail="Supabase auth is not configured.")
     return _verify_supabase_token(token)
 
 

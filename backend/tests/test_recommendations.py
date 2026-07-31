@@ -1,13 +1,18 @@
 from __future__ import annotations
 
+import hashlib
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from uuid import UUID
 
+import pytest
+from sqlalchemy import event
 from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel, create_engine, select
 
+from app.services import recommendations as recommendation_service
 from app.models import (
+    ExtractionMetric,
     Job,
     JobDiscoveryBetaMember,
     JobMatch,
@@ -27,6 +32,7 @@ from app.services.recommendations import (
     catalog_and_enqueue_job,
     generate_shadow_recommendations,
     list_recommendations,
+    process_one_queued_recommendation,
     record_recommendation_view,
     refresh_field_calibration,
     refresh_user_recommendations,
@@ -56,6 +62,24 @@ def _profile(session: Session, user_id: UUID, interest: str) -> Profile:
     session.add(ProfileInterest(user_id=user_id, profile_id=profile.id or 0, interest=interest))
     session.commit()
     return profile
+
+
+def _record_public_job_provenance(session: Session, job: Job) -> None:
+    if job.id is None:
+        session.flush()
+    job.source_url = job.source_url or f"https://example.com/jobs/{job.content_hash}"
+    session.add(job)
+    session.add(
+        ExtractionMetric(
+            user_id=job.user_id,
+            workflow_type="job_extraction",
+            subject_type="job",
+            subject_id=job.id,
+            strategy="scoped_html",
+            status="succeeded",
+        )
+    )
+    session.commit()
 
 
 class _StrongScorer:
@@ -109,6 +133,94 @@ class _RoleAwareScorer(_StrongScorer):
         return result
 
 
+def test_catalog_rejects_pasted_and_missing_provenance():
+    engine = _engine()
+    SQLModel.metadata.create_all(engine)
+
+    with Session(engine) as session:
+        requirements = classify_requirements("Requirements: Python and SQL.", "Backend Developer")
+        pasted = Job(
+            user_id=SCANNER,
+            content_hash="pasted-private-job",
+            source_url="https://example.com/jobs/private-fallback",
+            company="Private Co",
+            role="Backend Developer",
+            description_text="Confidential recruiter notes. Requirements: Python and SQL.",
+            requirements_json=requirements.to_json(),
+            status="analyzed",
+        )
+        unverified = Job(
+            user_id=SCANNER,
+            content_hash="unverified-job",
+            source_url="https://example.com/jobs/unverified",
+            company="Unknown Co",
+            role="Backend Developer",
+            description_text="Requirements: Python and SQL.",
+            requirements_json=requirements.to_json(),
+            status="analyzed",
+        )
+        session.add(pasted)
+        session.add(unverified)
+        session.commit()
+        session.add(
+            ExtractionMetric(
+                user_id=SCANNER,
+                workflow_type="job_extraction",
+                subject_type="job",
+                subject_id=pasted.id,
+                strategy="pasted",
+                status="succeeded",
+            )
+        )
+        session.commit()
+
+        assert catalog_and_enqueue_job(session, SCANNER, pasted) is None
+        assert catalog_and_enqueue_job(session, SCANNER, unverified) is None
+        assert list(session.exec(select(SharedJobCatalog)).all()) == []
+
+
+def test_later_pasted_rescan_cannot_overwrite_public_catalog():
+    engine = _engine()
+    SQLModel.metadata.create_all(engine)
+
+    with Session(engine) as session:
+        requirements = classify_requirements("Requirements: Python and SQL.", "Backend Developer")
+        job = Job(
+            user_id=SCANNER,
+            content_hash="public-then-private",
+            source_url="https://example.com/jobs/public-then-private",
+            company="Public Co",
+            role="Backend Developer",
+            description_text="Public posting. Requirements: Python and SQL.",
+            requirements_json=requirements.to_json(),
+            status="analyzed",
+        )
+        session.add(job)
+        session.commit()
+        _record_public_job_provenance(session, job)
+        catalog = catalog_and_enqueue_job(session, SCANNER, job)
+        assert catalog is not None
+
+        job.description_text = "Private recruiter notes that must not be redistributed."
+        session.add(job)
+        session.add(
+            ExtractionMetric(
+                user_id=SCANNER,
+                workflow_type="job_extraction",
+                subject_type="job",
+                subject_id=job.id,
+                strategy="pasted",
+                status="succeeded",
+            )
+        )
+        session.commit()
+
+        assert catalog_and_enqueue_job(session, SCANNER, job) is None
+        persisted = session.exec(select(SharedJobCatalog)).one()
+
+    assert persisted.description_text == "Public posting. Requirements: Python and SQL."
+
+
 def test_job_routing_uses_domain_and_role_hints():
     backend = classify_requirements("Requirements: Python, FastAPI and SQL.", "Backend Developer")
     hardware = classify_requirements("Requirements: Verilog and FPGA.", "FPGA Verification Engineer")
@@ -155,6 +267,7 @@ def test_shadow_recommendations_prefilter_candidates_and_hide_scanner(monkeypatc
         )
         session.add(job)
         session.commit()
+        _record_public_job_provenance(session, job)
 
         catalog = catalog_and_enqueue_job(session, SCANNER, job)
         assert catalog is not None and catalog.id is not None
@@ -187,6 +300,7 @@ def test_candidate_who_already_saved_job_is_not_rescored(monkeypatch):
         session.add(source_job)
         session.add(Job(user_id=RELEVANT, content_hash="same-job", role="Backend Developer", status="analyzed"))
         session.commit()
+        _record_public_job_provenance(session, source_job)
 
         catalog = catalog_and_enqueue_job(session, SCANNER, source_job)
         assert catalog is not None and catalog.id is not None
@@ -214,6 +328,7 @@ def test_non_eligible_scores_are_kept_for_shadow_calibration(monkeypatch):
         )
         session.add(job)
         session.commit()
+        _record_public_job_provenance(session, job)
         catalog = catalog_and_enqueue_job(session, SCANNER, job)
         assert catalog is not None and catalog.id is not None
         run = generate_shadow_recommendations(session, catalog.id, SCANNER)
@@ -243,6 +358,7 @@ def test_candidate_without_discovery_consent_is_never_shortlisted(monkeypatch):
         )
         session.add(job)
         session.commit()
+        _record_public_job_provenance(session, job)
         catalog = catalog_and_enqueue_job(session, SCANNER, job)
         assert catalog is not None and catalog.id is not None
         run = generate_shadow_recommendations(session, catalog.id, SCANNER)
@@ -268,6 +384,7 @@ def test_deleted_source_account_does_not_break_recommendation_run(monkeypatch):
         )
         session.add(catalog_job)
         session.commit()
+        _record_public_job_provenance(session, catalog_job)
         catalog = catalog_and_enqueue_job(session, SCANNER, catalog_job)
         assert catalog is not None and catalog.id is not None
 
@@ -819,3 +936,575 @@ def test_field_calibration_raises_only_the_noisy_field_threshold():
 
     assert calibration_values == (50, 20, 8, 0)
     assert untouched is None
+
+
+def test_failed_recommendation_run_rolls_back_before_recording_failure(monkeypatch):
+    engine = _engine()
+    SQLModel.metadata.create_all(engine)
+
+    with Session(engine) as session:
+        _profile(session, RELEVANT, "Software Engineering")
+        requirements = classify_requirements("Requirements: Python and SQL.", "Backend Developer")
+        catalog = SharedJobCatalog(
+            content_hash="rollback-before-failure-record",
+            role="Backend Developer",
+            career_fields_json='["Software Engineering"]',
+            requirements_json=requirements.to_json(),
+            source_confidence=0.9,
+        )
+        session.add(catalog)
+        session.commit()
+        session.refresh(catalog)
+
+        operations: list[str] = []
+        original_commit = session.commit
+        original_rollback = session.rollback
+
+        def tracked_commit():
+            operations.append("commit")
+            return original_commit()
+
+        def tracked_rollback():
+            operations.append("rollback")
+            return original_rollback()
+
+        monkeypatch.setattr(session, "commit", tracked_commit)
+        monkeypatch.setattr(session, "rollback", tracked_rollback)
+        monkeypatch.setattr(
+            recommendation_service,
+            "_score_catalog_for_profile",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("score failed")),
+        )
+
+        with pytest.raises(RuntimeError, match="score failed"):
+            generate_shadow_recommendations(session, catalog.id or 0, None)
+
+        session.expire_all()
+        persisted = session.exec(select(RecommendationRun)).one()
+
+    assert operations == ["commit", "rollback", "commit"]
+    assert persisted.status == "failed"
+    assert persisted.error == "score failed"
+    assert persisted.completed_at is not None
+
+
+def test_competing_terminal_action_cannot_overwrite_committed_dismissal():
+    engine = _engine()
+    SQLModel.metadata.create_all(engine)
+    requirements = classify_requirements("Requirements: Python and SQL.", "Backend Developer")
+
+    with Session(engine) as setup:
+        catalog = SharedJobCatalog(
+            content_hash="terminal-action-race",
+            role="Backend Developer",
+            career_fields_json='["Software Engineering"]',
+            requirements_json=requirements.to_json(),
+            source_confidence=0.9,
+        )
+        setup.add(catalog)
+        setup.commit()
+        setup.refresh(catalog)
+        recommendation = JobRecommendation(
+            user_id=RELEVANT,
+            catalog_job_id=catalog.id or 0,
+            model_version=MODEL_VERSION,
+            score=80,
+            fit_level="Strong",
+            confidence=0.8,
+            status="available",
+            career_fields_json='["Software Engineering"]',
+        )
+        setup.add(recommendation)
+        setup.commit()
+        recommendation_id = recommendation.id or 0
+
+    with Session(engine, expire_on_commit=False) as stale_session:
+        assert stale_session.get(JobRecommendation, recommendation_id).status == "available"
+        stale_session.commit()
+        with Session(engine) as winning_session:
+            update_recommendation(
+                winning_session,
+                RELEVANT,
+                recommendation_id,
+                "dismissed",
+                dismiss_reason="wrong_field",
+            )
+
+        with pytest.raises(ValueError, match="already handled"):
+            update_recommendation(
+                stale_session,
+                RELEVANT,
+                recommendation_id,
+                "saved",
+            )
+
+    with Session(engine) as verification:
+        persisted = verification.get(JobRecommendation, recommendation_id)
+        events = list(verification.exec(select(RecommendationEvent)).all())
+        jobs = list(verification.exec(select(Job).where(Job.user_id == RELEVANT)).all())
+
+    assert persisted is not None and persisted.status == "dismissed"
+    assert [item.event_type for item in events] == ["dismissed"]
+    assert jobs == []
+
+
+def test_failed_save_rolls_back_action_and_materialized_job(monkeypatch):
+    engine = _engine()
+    SQLModel.metadata.create_all(engine)
+
+    with Session(engine) as session:
+        _profile(session, RELEVANT, "Software Engineering")
+        requirements = classify_requirements("Requirements: Python and SQL.", "Backend Developer")
+        catalog = SharedJobCatalog(
+            content_hash="failed-save-rolls-back",
+            role="Backend Developer",
+            career_fields_json='["Software Engineering"]',
+            requirements_json=requirements.to_json(),
+            source_confidence=0.9,
+        )
+        session.add(catalog)
+        session.commit()
+        session.refresh(catalog)
+        recommendation = JobRecommendation(
+            user_id=RELEVANT,
+            catalog_job_id=catalog.id or 0,
+            model_version=MODEL_VERSION,
+            score=80,
+            fit_level="Strong",
+            confidence=0.8,
+            status="available",
+            career_fields_json='["Software Engineering"]',
+        )
+        session.add(recommendation)
+        session.commit()
+        recommendation_id = recommendation.id or 0
+
+        monkeypatch.setattr(
+            "app.services.jobs.save_match",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("match failed")),
+        )
+        with pytest.raises(RuntimeError, match="match failed"):
+            update_recommendation(session, RELEVANT, recommendation_id, "saved")
+
+        session.expire_all()
+        persisted = session.get(JobRecommendation, recommendation_id)
+        jobs = list(session.exec(select(Job).where(Job.user_id == RELEVANT)).all())
+        events = list(session.exec(select(RecommendationEvent)).all())
+
+    assert persisted is not None and persisted.status == "available"
+    assert persisted.materialized_job_id is None
+    assert jobs == []
+    assert events == []
+
+
+def test_save_transition_materializes_job_match_and_feedback_atomically():
+    engine = _engine()
+    SQLModel.metadata.create_all(engine)
+
+    with Session(engine) as session:
+        _profile(session, RELEVANT, "Software Engineering")
+        requirements = classify_requirements("Requirements: Python and SQL.", "Backend Developer")
+        catalog = SharedJobCatalog(
+            content_hash="successful-atomic-save",
+            company="Example",
+            role="Backend Developer",
+            description_text="Requirements: Python and SQL.",
+            career_fields_json='["Software Engineering"]',
+            requirements_json=requirements.to_json(),
+            source_confidence=0.9,
+        )
+        session.add(catalog)
+        session.commit()
+        session.refresh(catalog)
+        recommendation = JobRecommendation(
+            user_id=RELEVANT,
+            catalog_job_id=catalog.id or 0,
+            model_version=MODEL_VERSION,
+            score=80,
+            fit_level="Strong",
+            confidence=0.8,
+            status="available",
+            career_fields_json='["Software Engineering"]',
+        )
+        session.add(recommendation)
+        session.commit()
+
+        result, job = update_recommendation(
+            session,
+            RELEVANT,
+            recommendation.id or 0,
+            "saved",
+        )
+        session.expire_all()
+        persisted = session.get(JobRecommendation, recommendation.id or 0)
+        matches = list(session.exec(select(JobMatch)).all())
+        events = list(session.exec(select(RecommendationEvent)).all())
+
+    assert result.status == "saved"
+    assert job is not None and job.role == "Backend Developer"
+    assert persisted is not None and persisted.materialized_job_id == job.id
+    assert len(matches) == 1 and matches[0].job_id == job.id
+    assert [item.event_type for item in events] == ["saved"]
+
+
+def test_scoring_recovers_from_a_stale_unique_insert_view():
+    engine = _engine()
+    SQLModel.metadata.create_all(engine)
+
+    with Session(engine) as session:
+        profile = _profile(session, RELEVANT, "Software Engineering")
+        requirements = classify_requirements("Requirements: Python and SQL.", "Backend Developer")
+        catalog = SharedJobCatalog(
+            content_hash="unique-recommendation-race",
+            role="Backend Developer",
+            career_fields_json='["Software Engineering"]',
+            requirements_json=requirements.to_json(),
+            source_confidence=0.9,
+        )
+        session.add(catalog)
+        session.commit()
+        session.refresh(catalog)
+        session.add(
+            JobRecommendation(
+                user_id=RELEVANT,
+                catalog_job_id=catalog.id or 0,
+                model_version=MODEL_VERSION,
+                score=1,
+                fit_level="Weak",
+                confidence=0.1,
+                status="available",
+                career_fields_json='["Software Engineering"]',
+            )
+        )
+        session.commit()
+
+        scored, available = recommendation_service._score_catalog_for_profile(
+            session,
+            catalog,
+            profile,
+            recommendation_service.candidate_snapshot(session, profile),
+            requirements,
+            ["Software Engineering"],
+            _StrongScorer(),
+            queue_email=False,
+            minimum_score=40,
+            already_saved=False,
+            # Simulate a bulk-read snapshot taken just before another worker's
+            # unique insert committed.
+            recommendations_by_key={},
+        )
+        session.commit()
+        persisted = list(session.exec(select(JobRecommendation)).all())
+
+    assert scored is True
+    assert available is True
+    assert len(persisted) == 1
+    assert persisted[0].score == 88
+    assert persisted[0].status == "available"
+
+
+def test_generation_bulk_loads_existing_jobs_and_recommendations_once(monkeypatch):
+    engine = _engine()
+    SQLModel.metadata.create_all(engine)
+    monkeypatch.setattr("app.services.recommendations.get_match_scorer", lambda: _StrongScorer())
+
+    statements: list[str] = []
+
+    def record_statement(_conn, _cursor, statement, _parameters, _context, _executemany):
+        statements.append(statement.lower())
+
+    event.listen(engine, "before_cursor_execute", record_statement)
+    try:
+        with Session(engine) as session:
+            users = [
+                UUID("10000000-0000-0000-0000-000000000001"),
+                UUID("50000000-0000-0000-0000-000000000002"),
+                UUID("90000000-0000-0000-0000-000000000003"),
+            ]
+            for user_id in users:
+                _profile(session, user_id, "Software Engineering")
+            requirements = classify_requirements(
+                "Requirements: Python and SQL.",
+                "Backend Developer",
+            )
+            catalog = SharedJobCatalog(
+                content_hash="bulk-candidate-state",
+                role="Backend Developer",
+                career_fields_json='["Software Engineering"]',
+                requirements_json=requirements.to_json(),
+                source_confidence=0.9,
+            )
+            session.add(catalog)
+            session.add(
+                Job(
+                    user_id=users[0],
+                    content_hash="bulk-candidate-state",
+                    role="Backend Developer",
+                    requirements_json=requirements.to_json(),
+                    status="analyzed",
+                )
+            )
+            session.commit()
+            session.refresh(catalog)
+            statements.clear()
+
+            run = generate_shadow_recommendations(session, catalog.id or 0, None)
+    finally:
+        event.remove(engine, "before_cursor_execute", record_statement)
+
+    existing_job_reads = [
+        statement
+        for statement in statements
+        if statement.lstrip().startswith("select")
+        and " from jobs " in statement.replace("\n", " ")
+        and "content_hash" in statement
+    ]
+    recommendation_reads = [
+        statement
+        for statement in statements
+        if statement.lstrip().startswith("select")
+        and " from job_recommendations " in statement.replace("\n", " ")
+    ]
+    assert run.candidate_count == 3
+    assert run.scored_count == 2
+    assert len(existing_job_reads) == 1
+    assert len(recommendation_reads) == 1
+
+
+def test_candidate_limit_uses_a_stable_per_job_rotation(monkeypatch):
+    engine = _engine()
+    SQLModel.metadata.create_all(engine)
+    monkeypatch.setattr(recommendation_service, "MAX_CANDIDATES_PER_JOB", 2)
+    user_ids = [
+        UUID("10000000-0000-0000-0000-000000000000"),
+        UUID("50000000-0000-0000-0000-000000000000"),
+        UUID("90000000-0000-0000-0000-000000000000"),
+        UUID("d0000000-0000-0000-0000-000000000000"),
+    ]
+
+    def expected_for(catalog: SharedJobCatalog) -> list[UUID]:
+        digest = hashlib.sha256(
+            f"{catalog.id or 0}:{catalog.content_hash}".encode("utf-8")
+        ).digest()
+        pivot = UUID(bytes=digest[:16])
+        circular = sorted(value for value in user_ids if value >= pivot)
+        circular.extend(sorted(value for value in user_ids if value < pivot))
+        return circular[:2]
+
+    with Session(engine) as session:
+        for user_id in user_ids:
+            session.add(Profile(user_id=user_id))
+        session.commit()
+        first_catalog = SharedJobCatalog(id=101, content_hash="rotation-first")
+        first_expected = expected_for(first_catalog)
+        first = recommendation_service._rotated_candidate_profiles(
+            session,
+            select(Profile),
+            first_catalog,
+        )
+        for index in range(100):
+            second_catalog = SharedJobCatalog(
+                id=202,
+                content_hash=f"rotation-second-{index}",
+            )
+            second_expected = expected_for(second_catalog)
+            if second_expected != first_expected:
+                break
+        second = recommendation_service._rotated_candidate_profiles(
+            session,
+            select(Profile),
+            second_catalog,
+        )
+
+    assert [profile.user_id for profile in first] == first_expected
+    assert [profile.user_id for profile in second] == second_expected
+    assert first_expected != second_expected
+
+
+class _QueueResult:
+    def __init__(self, row):
+        self.row = row
+
+    def first(self):
+        return self.row
+
+
+class _QueueSession:
+    def __init__(self, row):
+        self.row = row
+        self.statements: list[str] = []
+        self.commits = 0
+        self.rollbacks = 0
+
+    def get_bind(self):
+        return SimpleNamespace(dialect=SimpleNamespace(name="postgresql"))
+
+    def exec(self, statement):
+        rendered = str(statement)
+        self.statements.append(rendered)
+        if "pgmq.read" in rendered:
+            return _QueueResult(self.row)
+        return _QueueResult(None)
+
+    def commit(self):
+        self.commits += 1
+
+    def rollback(self):
+        self.rollbacks += 1
+
+
+def test_malformed_queue_message_is_archived_without_entering_scoring():
+    session = _QueueSession((17, 1, "{not-json"))
+
+    assert process_one_queued_recommendation(session) is None
+
+    assert sum("pgmq.archive" in statement for statement in session.statements) == 1
+    assert session.commits == 1
+    assert session.rollbacks == 0
+
+
+def test_successful_queue_message_commits_lease_then_archives(monkeypatch):
+    session = _QueueSession(
+        (
+            19,
+            1,
+            {"catalog_job_id": 7, "source_user_id": str(SCANNER)},
+        )
+    )
+    run = RecommendationRun(id=23, catalog_job_id=7, status="completed")
+    monkeypatch.setattr(
+        recommendation_service,
+        "generate_shadow_recommendations",
+        lambda *_args, **_kwargs: run,
+    )
+
+    assert process_one_queued_recommendation(session) is run
+
+    assert sum("pgmq.archive" in statement for statement in session.statements) == 1
+    assert session.commits == 2
+    assert session.rollbacks == 0
+
+
+@pytest.mark.parametrize(
+    ("read_count", "expected_archives", "expected_commits"),
+    [(1, 0, 1), (3, 1, 2)],
+)
+def test_failed_queue_message_retries_then_archives_at_attempt_ceiling(
+    monkeypatch,
+    read_count,
+    expected_archives,
+    expected_commits,
+):
+    session = _QueueSession(
+        (
+            18,
+            read_count,
+            {"catalog_job_id": 7, "source_user_id": str(SCANNER)},
+        )
+    )
+    monkeypatch.setattr(
+        recommendation_service,
+        "generate_shadow_recommendations",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("worker failed")),
+    )
+
+    assert process_one_queued_recommendation(session) is None
+
+    assert sum("pgmq.archive" in statement for statement in session.statements) == expected_archives
+    assert session.commits == expected_commits
+    assert session.rollbacks == 1
+
+
+def test_logistics_dismissals_do_not_become_global_negative_labels():
+    engine = _engine()
+    SQLModel.metadata.create_all(engine)
+
+    with Session(engine) as session:
+        catalog = SharedJobCatalog(
+            content_hash="reason-aware-calibration",
+            role="Backend Developer",
+            career_fields_json='["Software Engineering"]',
+        )
+        session.add(catalog)
+        session.commit()
+        session.refresh(catalog)
+        for index, reason in enumerate(("wrong_field", "wrong_location")):
+            recommendation = JobRecommendation(
+                user_id=RELEVANT,
+                catalog_job_id=catalog.id or 0,
+                model_version=f"{MODEL_VERSION}-reason-{index}",
+                score=45,
+                fit_level="Weak",
+                confidence=0.7,
+                status="dismissed",
+                career_fields_json='["Software Engineering"]',
+            )
+            session.add(recommendation)
+            session.flush()
+            session.add(
+                RecommendationEvent(
+                    user_id=RELEVANT,
+                    recommendation_id=recommendation.id or 0,
+                    catalog_job_id=catalog.id or 0,
+                    event_type="dismissed",
+                    dismiss_reason=reason,
+                    score=45,
+                    score_band="possible",
+                    career_field="Software Engineering",
+                    model_version=recommendation.model_version,
+                )
+            )
+        session.commit()
+
+        calibration = refresh_field_calibration(session, "Software Engineering")
+        session.commit()
+        session.refresh(calibration)
+
+    assert calibration.sample_size == 1
+    assert calibration.negative_count == 1
+    assert calibration.possible_sample_size == 1
+
+
+def test_user_action_defers_global_calibration_refresh(monkeypatch):
+    engine = _engine()
+    SQLModel.metadata.create_all(engine)
+
+    with Session(engine) as session:
+        catalog = SharedJobCatalog(
+            content_hash="deferred-calibration",
+            role="Backend Developer",
+            career_fields_json='["Software Engineering"]',
+        )
+        session.add(catalog)
+        session.commit()
+        session.refresh(catalog)
+        recommendation = JobRecommendation(
+            user_id=RELEVANT,
+            catalog_job_id=catalog.id or 0,
+            model_version=MODEL_VERSION,
+            score=45,
+            fit_level="Weak",
+            confidence=0.7,
+            status="available",
+            career_fields_json='["Software Engineering"]',
+        )
+        session.add(recommendation)
+        session.commit()
+        recommendation_id = recommendation.id or 0
+        monkeypatch.setattr(
+            recommendation_service,
+            "refresh_field_calibration",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("calibration must be deferred")
+            ),
+        )
+
+        result, _job = update_recommendation(
+            session,
+            RELEVANT,
+            recommendation_id,
+            "dismissed",
+            dismiss_reason="wrong_field",
+        )
+
+    assert result.status == "dismissed"
