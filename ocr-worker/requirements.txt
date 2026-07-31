@@ -2,18 +2,18 @@
 #
 # Direct constraints are maintained in requirements.in. Update this complete
 # closure only in a reviewed dependency PR; see ../docs/DEPENDENCY_POLICY.md.
+annotated-doc==0.0.5
 annotated-types==0.7.0
 anyio==4.14.1
 click==8.4.2
-colorama==0.4.6
-fastapi==0.116.1
+fastapi==0.140.9
 h11==0.16.0
 idna==3.18
 packaging==26.2
-Pillow==12.3.0
+pillow==12.3.0
 pydantic==2.13.4
 pydantic-core==2.46.4
-PyMuPDF==1.28.0
+pymupdf==1.28.0
 pytesseract==0.3.13
 starlette==0.47.3
 typing-extensions==4.15.0
