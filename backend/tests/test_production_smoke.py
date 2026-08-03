@@ -16,6 +16,17 @@ def _valid_configuration(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(production_smoke, "EMAIL_DOMAIN", "example.com")
 
 
+def test_response_payload_parses_json_and_ignores_html() -> None:
+    assert production_smoke.response_payload(
+        b'{"status":"ok"}',
+        "application/json; charset=utf-8",
+    ) == {"status": "ok"}
+    assert production_smoke.response_payload(
+        b"<html><title>Privacy</title></html>",
+        "text/html; charset=utf-8",
+    ) == {}
+
+
 def test_smoke_requires_an_explicit_staging_target(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

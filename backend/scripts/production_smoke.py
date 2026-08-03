@@ -29,6 +29,15 @@ BUCKET = os.getenv("SMOKE_STORAGE_BUCKET") or "profile-documents"
 EMAIL_DOMAIN = os.getenv("SMOKE_EMAIL_DOMAIN") or "example.com"
 
 
+def response_payload(raw: bytes, content_type: str | None):
+    if not raw:
+        return {}
+    media_type = (content_type or "").partition(";")[0].strip().lower()
+    if media_type == "application/json" or media_type.endswith("+json"):
+        return json.loads(raw.decode())
+    return {}
+
+
 def request(
     url: str,
     method: str = "GET",
@@ -46,12 +55,15 @@ def request(
                 raise RuntimeError(
                     f"Unexpected HTTP {response.status} for {method} {path}."
                 )
-            return response.status, json.loads(raw.decode()) if raw else {}
+            return response.status, response_payload(
+                raw,
+                response.headers.get("Content-Type"),
+            )
     except urllib.error.HTTPError as exc:
         raw = exc.read()
         if accepted_statuses is not None and exc.code in accepted_statuses:
             try:
-                payload = json.loads(raw.decode()) if raw else {}
+                payload = response_payload(raw, exc.headers.get("Content-Type"))
             except (UnicodeDecodeError, json.JSONDecodeError):
                 payload = {}
             return exc.code, payload
