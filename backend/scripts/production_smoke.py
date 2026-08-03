@@ -27,6 +27,14 @@ SECRET_KEY = os.getenv("SMOKE_SUPABASE_SECRET_KEY", "")
 INTERNAL_KEY = os.getenv("SMOKE_INTERNAL_KEY", "")
 BUCKET = os.getenv("SMOKE_STORAGE_BUCKET") or "profile-documents"
 EMAIL_DOMAIN = os.getenv("SMOKE_EMAIL_DOMAIN") or "example.com"
+SMOKE_JOB_DESCRIPTION = (
+    "Requirements: Python, FastAPI, PostgreSQL, React, automated testing, and API design. "
+    "Candidates should have experience building and debugging web applications; Docker is "
+    "preferred. Responsibilities include developing reliable backend services, reviewing "
+    "changes, investigating production failures, documenting technical decisions, and "
+    "collaborating with product and engineering partners. This is a full-time student role "
+    "based in Israel."
+)
 
 
 def response_payload(raw: bytes, content_type: str | None):
@@ -285,7 +293,7 @@ def main() -> None:
                 "source_url": "",
                 "company": "Smoke Co",
                 "role": "Backend Student Developer",
-                "description_text": "Student role. Requirements: Python, FastAPI, PostgreSQL and React. Preferred: Docker. Location: Israel. Full-time.",
+                "description_text": SMOKE_JOB_DESCRIPTION,
                 "contribute_public_posting": False,
             },
             api_headers,

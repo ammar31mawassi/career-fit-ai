@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 
+from app.services.job_research import validate_pasted_job_description
 from scripts import production_smoke
 
 
@@ -25,6 +26,10 @@ def test_response_payload_parses_json_and_ignores_html() -> None:
         b"<html><title>Privacy</title></html>",
         "text/html; charset=utf-8",
     ) == {}
+
+
+def test_synthetic_job_fixture_meets_the_production_content_contract() -> None:
+    validate_pasted_job_description(production_smoke.SMOKE_JOB_DESCRIPTION)
 
 
 def test_smoke_requires_an_explicit_staging_target(
